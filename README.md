@@ -13,12 +13,12 @@ This repository tracks the design and host-side tooling for an ESP32-S3 dashboar
 
 The following local directories are kept out of version control on purpose:
 
-- `esp-idf-v5.2.1/`
-  Local ESP-IDF checkout used for reference and experiments.
 - `test-blink/`
   Temporary board validation example project.
 - `.claude/`, `.omc/`, `build/`, `target/`
   Local assistant state and generated build artifacts.
+
+ESP-IDF itself is expected to be installed and managed outside this repository, for example through Espressif Install Manager and the VS Code ESP-IDF extension.
 
 See [`.gitignore`](./.gitignore) for the full ignore policy.
 

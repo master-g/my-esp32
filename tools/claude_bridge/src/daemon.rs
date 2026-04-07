@@ -124,28 +124,8 @@ pub struct AppState {
 }
 
 pub async fn run(config: Config) -> Result<()> {
-    let initial_snapshot = load_state(&config.state_path)
-        .map(|persisted| persisted.snapshot)
-        .unwrap_or_else(|| Snapshot::empty(now_epoch()));
-    let (tx, _) = broadcast::channel(256);
-
-    let app_state = AppState {
-        config: config.clone(),
-        state: Arc::new(Mutex::new(BridgeState::new(initial_snapshot))),
-        tx,
-        connected_clients: Arc::new(AtomicUsize::new(0)),
-        pending_generation: Arc::new(AtomicU64::new(0)),
-    };
-
-    let admin_router = Router::new()
-        .route("/v1/events", post(post_event))
-        .route("/v1/status", get(get_status))
-        .route("/v1/snapshot", get(get_snapshot))
-        .with_state(app_state.clone());
-
-    let ws_router = Router::new()
-        .route("/ws", get(ws_handler))
-        .with_state(app_state.clone());
+    let app_state = build_app_state(config.clone());
+    let (admin_router, ws_router) = build_routers(app_state);
 
     let admin_listener = TcpListener::bind(config.admin_addr)
         .await
@@ -460,4 +440,150 @@ fn persist_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
     let json = serde_json::to_string_pretty(state)?;
     fs::write(path, json)?;
     Ok(())
+}
+
+fn build_app_state(config: Config) -> AppState {
+    let initial_snapshot = load_state(&config.state_path)
+        .map(|persisted| persisted.snapshot)
+        .unwrap_or_else(|| Snapshot::empty(now_epoch()));
+    let (tx, _) = broadcast::channel(256);
+
+    AppState {
+        config,
+        state: Arc::new(Mutex::new(BridgeState::new(initial_snapshot))),
+        tx,
+        connected_clients: Arc::new(AtomicUsize::new(0)),
+        pending_generation: Arc::new(AtomicU64::new(0)),
+    }
+}
+
+fn build_routers(app_state: AppState) -> (Router, Router) {
+    let admin_router = Router::new()
+        .route("/v1/events", post(post_event))
+        .route("/v1/status", get(get_status))
+        .route("/v1/snapshot", get(get_snapshot))
+        .with_state(app_state.clone());
+
+    let ws_router = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(app_state);
+
+    (admin_router, ws_router)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::SystemTime};
+
+    use anyhow::Result;
+    use futures_util::{SinkExt, StreamExt};
+    use reqwest::Client;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+
+    use super::*;
+    use crate::model::{BridgeEnvelope, LocalHookEvent};
+
+    #[tokio::test]
+    async fn websocket_receives_snapshot_then_delta_after_event_ingest() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("claude-bridge-ws-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            ws_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".to_string(),
+            ws_addr_raw: "127.0.0.1:0".to_string(),
+            psk: "test-psk".to_string(),
+            state_path: state_dir.join("state.json"),
+        };
+
+        let app_state = build_app_state(config);
+        let (admin_router, ws_router) = build_routers(app_state.clone());
+
+        let admin_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let admin_addr = admin_listener.local_addr()?;
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let ws_addr = ws_listener.local_addr()?;
+
+        let (admin_tx, admin_rx) = oneshot::channel::<()>();
+        let (ws_tx, ws_rx) = oneshot::channel::<()>();
+
+        let admin_task = tokio::spawn(async move {
+            axum::serve(admin_listener, admin_router)
+                .with_graceful_shutdown(async {
+                    let _ = admin_rx.await;
+                })
+                .await
+        });
+        let ws_task = tokio::spawn(async move {
+            axum::serve(ws_listener, ws_router)
+                .with_graceful_shutdown(async {
+                    let _ = ws_rx.await;
+                })
+                .await
+        });
+
+        let (mut ws_stream, _) = connect_async(format!("ws://{ws_addr}/ws")).await?;
+        ws_stream
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "hello",
+                    "token": "test-psk",
+                    "device_id": "esp32-dashboard-test",
+                    "last_seq": 0_u64
+                })
+                .to_string()
+                .into(),
+            ))
+            .await?;
+
+        let snapshot_message = timeout(Duration::from_secs(2), ws_stream.next())
+            .await?
+            .expect("websocket should yield initial snapshot")?;
+        let snapshot_text = snapshot_message.into_text()?;
+        let snapshot_envelope: BridgeEnvelope = serde_json::from_str(&snapshot_text)?;
+        assert_eq!(snapshot_envelope.r#type, "snapshot");
+        assert_eq!(snapshot_envelope.payload.seq, 0);
+        assert_eq!(snapshot_envelope.payload.title, "No data yet");
+
+        Client::new()
+            .post(format!("http://{admin_addr}/v1/events"))
+            .json(&LocalHookEvent {
+                session_id: "sess-1".into(),
+                cwd: "/tmp/project-foo".into(),
+                hook_event_name: "SessionStart".into(),
+                message: None,
+                prompt_preview: None,
+                tool_name: None,
+                tool_use_id: None,
+                permission_mode: "default".into(),
+                recv_ts: now_epoch(),
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let delta_message = timeout(Duration::from_secs(2), ws_stream.next())
+            .await?
+            .expect("websocket should yield a delta after ingest")?;
+        let delta_text = delta_message.into_text()?;
+        let delta_envelope: BridgeEnvelope = serde_json::from_str(&delta_text)?;
+        assert_eq!(delta_envelope.r#type, "delta");
+        assert_eq!(delta_envelope.payload.seq, 1);
+        assert_eq!(delta_envelope.payload.event, "SessionStart");
+        assert_eq!(delta_envelope.payload.status, "waiting_for_input");
+        assert_eq!(delta_envelope.payload.workspace, "project-foo");
+
+        let _ = admin_tx.send(());
+        let _ = ws_tx.send(());
+        let _ = ws_stream.close(None).await;
+        admin_task.await??;
+        ws_task.await??;
+
+        Ok(())
+    }
 }

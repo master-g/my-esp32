@@ -29,6 +29,6 @@ target/
 *.swo
 
 # Local vendor / experiments not tracked in this repo
-/esp-idf-v5.2.1/
+/esp-idf/
+/esp-idf-*/
 /test-blink/
-
