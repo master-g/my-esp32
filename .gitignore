@@ -1,0 +1,34 @@
+# OS / editor
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+
+# Local assistant / workspace state
+.claude/
+.omc/
+**/.omc/
+
+# Embedded build outputs
+build/
+**/build/
+sdkconfig
+sdkconfig.old
+sdkconfig.*
+!sdkconfig.defaults
+**/sdkconfig.old
+
+# Rust outputs
+target/
+**/target/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Local vendor / experiments not tracked in this repo
+/esp-idf-v5.2.1/
+/test-blink/
+
