@@ -15,11 +15,12 @@
 
 ### 2.1 核心目标
 
-基于 Waveshare ESP32-S3-Touch-LCD-3.49 开发一个三页式竖屏仪表板：
+基于 Waveshare ESP32-S3-Touch-LCD-3.49 开发一个四页式竖屏仪表板，其中包含三个核心页和一个 BTC 应用页：
 
 1. `Home`：时间、日期、联网状态、天气摘要
 2. `Notify`：Claude Code 最新状态和未读提示
 3. `Trading`：BTC/USDT、ETH/USDT、BTC/ETH 的价格与简化行情
+4. `Satoshi Slot`：随机生成 BTC 私钥并与目标地址指纹集合进行匹配的趣味页
 
 ### 2.2 非目标
 
@@ -76,7 +77,7 @@ P0 的目标是把板卡从开发板状态变成“可运行产品底座”：
 - 触摸输入可上报坐标和手势方向
 - Wi-Fi 连接和重连机制可用
 - NTP 同步后写入 RTC，重启后可从 RTC 恢复时间
-- LVGL 页面壳子可切换三页
+- LVGL 页面壳子可切换四个应用槽位
 - 串口日志、异常恢复和基本监控可用
 
 ### 4.2 P1: 可演示 MVP
@@ -95,18 +96,19 @@ P1 不包含：
 - 背景图片
 - IMU 抬手唤醒
 - 复杂动画
+- `Satoshi Slot`
 
 ### 4.3 P2: 增强能力
 
 - 天气正式接入并缓存
 - 交易页接入蜡烛图
+- `Satoshi Slot` 页面
 - 电池模式下的差异化采样和刷新策略
 - IMU 抬手唤醒
 - 背景图和主题
 
 ### 4.4 P3: 扩展应用
 
-- Feeling Lucky Today
 - 设置页
 - 更多桌面小组件
 
@@ -118,6 +120,7 @@ P1 不包含：
 ┌──────────────────────────────────────────────┐
 │                  Apps                        │
 │  home_app  notify_app  trading_app           │
+│  satoshi_slot_app                            │
 ├──────────────────────────────────────────────┤
 │                UI Core                       │
 │  app_manager  page_router  gesture_router    │
@@ -125,7 +128,8 @@ P1 不包含：
 │              Domain Services                 │
 │  time_service    weather_service             │
 │  claude_service  market_service              │
-│  power_policy    net_manager                 │
+│  bitcoin_service power_policy                │
+│  net_manager                                 │
 ├──────────────────────────────────────────────┤
 │                 BSP Layer                    │
 │  bsp_display  bsp_touch  bsp_rtc  bsp_imu    │
@@ -141,6 +145,14 @@ P1 不包含：
 - 页面切换与数据采集解耦，避免“页面不在前台就丢数据”
 - 复杂性向下沉到 service 和 policy 层，不泄漏到 `app_manager`
 
+`time_service`、`weather_service`、`market_service`、`power_policy` 和 `app_manager/event_bus` 的详细子设计分别见：
+
+- [2026-04-07-time-service-subdesign.md](./2026-04-07-time-service-subdesign.md)
+- [2026-04-07-weather-service-subdesign.md](./2026-04-07-weather-service-subdesign.md)
+- [2026-04-07-market-service-subdesign.md](./2026-04-07-market-service-subdesign.md)
+- [2026-04-07-power-policy-subdesign.md](./2026-04-07-power-policy-subdesign.md)
+- [2026-04-07-app-manager-event-bus-subdesign.md](./2026-04-07-app-manager-event-bus-subdesign.md)
+
 ### 5.3 后台服务职责
 
 | 服务 | 职责 | 是否缓存 |
@@ -149,6 +161,7 @@ P1 不包含：
 | `weather_service` | 获取天气摘要、缓存上次成功结果 | 是 |
 | `claude_service` | 获取 Claude 最新状态快照、未读计数、重连 | 是 |
 | `market_service` | 获取交易对价格和 K 线源数据 | 是 |
+| `bitcoin_service` | BTC 私钥生成、地址指纹比对、哈希核心算法、自检向量 | 否 |
 | `power_policy` | 根据供电、亮屏、前台页决定刷新频率 | 是 |
 | `net_manager` | Wi-Fi 连接、断线重连、网络事件广播 | 否 |
 
@@ -201,6 +214,22 @@ P1 不包含：
 - `Notify` 页不能依赖“前台时才开始采集”来保证状态完整性
 - `Trading` 页在电池模式下降级为低频刷新，不维持高频市场流
 - 天气始终属于缓存型数据，不进入高频更新路径
+
+### 6.3 计算密集型页面策略
+
+`Satoshi Slot` 属于本地高计算负载页面，必须受 `power_policy` 统一约束：
+
+| 条件 | Satoshi Slot |
+|------|--------------|
+| USB + 前台 | 连续批量运行 |
+| 电池 + 前台 | 降级为 burst 模式 |
+| `DIM` / `SLEEP` | 停止 |
+| 温度/掉压异常 | 停止并提示 |
+
+关键约束：
+
+- `Satoshi Slot` 必须支持显式开始/暂停，不允许后台偷偷持续扫描
+- 计算过程不能阻塞 UI 主线程
 
 ## 7. Claude Code 桥接协议
 
@@ -291,17 +320,45 @@ P2 再做蜡烛图：
 - 失败后保留上次成功结果并标记“缓存”
 - 若网络不可用，`Home` 页面仍显示时间，不因天气接口失败阻塞首页
 
+### 8.3 BTC 趣味应用策略
+
+#### Satoshi Slot
+
+`Satoshi Slot` 是“随机私钥 + 指纹比对”的趣味页，不是现实可行的密钥恢复方案。
+
+详细子设计见 [2026-04-07-satoshi-slot-subdesign.md](./2026-04-07-satoshi-slot-subdesign.md)。
+
+设计边界：
+
+- 页面随机生成 secp256k1 私钥，派生公钥和地址指纹
+- 设备只和本地预置的“目标地址指纹集合”做比对，不依赖联网
+- 目标集合应抽象成 `hash160` 或等价短指纹，不在 UI 层硬编码一组地址字符串
+- 命中概率在现实中近乎为零，因此页面必须内置 `self-test / forced-hit` 模式，用于验证保存和提醒链路
+
+命中后的动作：
+
+- 立即暂停扫描
+- 亮屏并弹出全屏告警
+- 将命中记录保存到受保护存储
+- 若启用了 `claude_bridge` 或其他通知桥接，可额外发送主机提醒
+
+安全要求：
+
+- 只在启用了安全存储能力时允许落盘保存原始私钥
+- 若安全存储不可用，页面应降级为“仅演示 / 仅自检”模式
+
 ## 9. UI 和交互设计
 
 ### 9.1 页面模型
 
-三页结构固定：
+四页结构固定：
 
 - `Home`
 - `Notify`
 - `Trading`
+- `Satoshi Slot`
 
-三页之间允许全局切换，但页面内部交互不得与全局翻页冲突。
+页面之间允许全局切换，但页面内部交互不得与全局翻页冲突。
 
 ### 9.2 全局翻页规则
 
@@ -318,6 +375,8 @@ P2 再做蜡烛图：
 - 中间区域手势优先留给当前页面
 
 ### 9.3 Home 页面
+
+详细子设计见 [2026-04-07-home-subdesign.md](./2026-04-07-home-subdesign.md)。
 
 显示内容：
 
@@ -350,6 +409,8 @@ P2 再做蜡烛图：
 
 ### 9.5 Trading 页面
 
+详细子设计见 [2026-04-07-trading-subdesign.md](./2026-04-07-trading-subdesign.md)。
+
 显示内容：
 
 - 当前交易对
@@ -365,6 +426,28 @@ P2 再做蜡烛图：
 - 不使用内容区左右滑动切换交易对
 
 该规则用于消除与全局翻页的冲突。
+
+### 9.6 Satoshi Slot 页面
+
+显示内容：
+
+- 当前运行状态：`idle / running / hit / self-test`
+- 已尝试次数
+- 当前批次速度：`keys/s`
+- 最近一次生成的短地址指纹
+- 目标集合标签：`Satoshi candidate set`
+
+交互规则：
+
+- `Start / Pause`
+- `Self-test`，用于注入一次可验证命中
+- `Reset counter`
+
+行为约束：
+
+- 页面进入时默认不自动开始
+- 只在前台运行
+- 一旦命中或进入自检命中态，必须暂停并等待用户确认
 
 ## 10. 应用框架设计
 
@@ -383,6 +466,7 @@ typedef enum {
     APP_EVENT_DATA_CLAUDE,
     APP_EVENT_DATA_MARKET,
     APP_EVENT_DATA_WEATHER,
+    APP_EVENT_DATA_BITCOIN,
 } app_event_type_t;
 
 typedef struct {
@@ -431,19 +515,23 @@ project/
 │   ├── service_weather/
 │   ├── service_claude/
 │   ├── service_market/
+│   ├── service_bitcoin/
 │   ├── net_manager/
 │   └── power_policy/
 │
 ├── apps/
 │   ├── home/
 │   ├── notify/
-│   └── trading/
+│   ├── trading/
+│   └── satoshi_slot/
 │
 ├── tools/
-│   └── claude_bridge/
-│       ├── hook_handler.py
-│       ├── ws_server.py
-│       └── README.md
+│   ├── claude_bridge/
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   ├── hooks/
+│   │   ├── rust-toolchain.toml
+│   │   └── README.md
 │
 ├── sdkconfig.defaults
 ├── CMakeLists.txt
@@ -464,6 +552,8 @@ project/
 | 分辨率和触控型号描述不一致 | 高 | 以 Waveshare 示例和实测为准，抽象统一 BSP |
 | Claude hooks 语义不足以直接驱动 UI | 高 | 在桥接层做状态归一化，不让设备依赖原始事件 |
 | 电池模式下实时行情过于耗电 | 中 | 前台低频轮询，后台暂停 |
+| 用户对 “Satoshi 私钥命中” 存在不现实预期 | 高 | 文档和 UI 明确标注为趣味页，提供 self-test 而非承诺实际命中 |
+| 命中后原始私钥保存涉及安全风险 | 高 | 只有安全存储可用时才允许持久化，否则降级为演示模式 |
 | K 线渲染占用内存和 CPU | 中 | P2 再做，先做价格摘要 |
 | 网络不稳定导致页面卡死 | 中 | service 层缓存最近一次成功结果，UI 永远可降级显示 |
 
@@ -473,7 +563,7 @@ project/
 
 - 开机后 3 秒内进入首页
 - Wi-Fi 已配置时，30 秒内完成联网和校时
-- 三页可稳定切换，无明显误触冲突
+- 四个应用槽位可稳定切换，无明显误触冲突
 - `Notify` 页可在断线重连后恢复最近一次 Claude 状态
 - `Trading` 页可显示至少一个交易对的当前价格和更新时间
 - 电池模式下设备能够进入 `DIM` 和 `SLEEP`
@@ -482,6 +572,7 @@ project/
 
 - 天气缓存策略生效
 - K 线图切换周期时无明显卡顿
+- `Satoshi Slot` 可以通过 self-test 验证命中保存和提醒链路
 - IMU 抬手唤醒可靠率达到可接受水平
 
 ## 14. 参考资料
@@ -490,8 +581,9 @@ project/
 - Claude Code hooks: https://docs.anthropic.com/en/docs/claude-code/hooks
 - Binance Spot API: https://binance-docs.github.io/apidocs/spot/en/
 - OpenWeatherMap API: https://openweathermap.org/api
+- secp256k1: https://github.com/bitcoin-core/secp256k1
 
 ---
 
-*文档版本: 2.0*  
+*文档版本: 2.4*  
 *修订日期: 2026-04-07*
