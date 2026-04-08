@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "src/weather_client.c"
+        "src/weather_mapper.c"
+        "src/service_weather.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        core_event_bus
+        esp_http_client
+        nvs_flash
+        mbedtls
+        net_manager
+        power_policy
+        esp_timer
+)

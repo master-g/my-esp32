@@ -1,0 +1,22 @@
+menu "Dashboard Weather"
+
+config DASH_WEATHER_CITY_LABEL
+    string "Default weather city label"
+    default "Shanghai"
+    help
+        Fixed city label shown on Home in v1. This is only display text and
+        does not affect API lookup.
+
+config DASH_WEATHER_LATITUDE
+    string "Default weather latitude"
+    default "31.2304"
+    help
+        Fixed latitude used for the Open-Meteo current weather request.
+
+config DASH_WEATHER_LONGITUDE
+    string "Default weather longitude"
+    default "121.4737"
+    help
+        Fixed longitude used for the Open-Meteo current weather request.
+
+endmenu

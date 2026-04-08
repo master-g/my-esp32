@@ -1,0 +1,15 @@
+menu "Dashboard Time"
+
+config DASH_TIMEZONE_NAME
+    string "Default timezone display name"
+    default "Asia/Shanghai"
+    help
+        Friendly IANA timezone name shown in host-side configuration UI.
+
+config DASH_TIMEZONE_TZ
+    string "Default timezone TZ string"
+    default "CST-8"
+    help
+        POSIX TZ string used when no timezone value exists in NVS.
+
+endmenu

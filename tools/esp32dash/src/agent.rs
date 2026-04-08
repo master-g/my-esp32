@@ -1,0 +1,530 @@
+use std::{
+    collections::VecDeque,
+    fs,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+
+use anyhow::{Context, Result, anyhow};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
+use directories::ProjectDirs;
+use tokio::{net::TcpListener, sync::Mutex};
+use tracing::{debug, info, warn};
+
+use crate::{
+    compat,
+    device::{DeviceConfig, DeviceManager, SessionFactory, UnixSerialFactory},
+    model::{
+        AdminErrorResponse, AdminRpcResponse, AgentStatusResponse, LocalHookEvent, PersistedState,
+        RpcRequest, Snapshot,
+    },
+    normalizer::{apply_notification_status, materially_equal, normalize},
+};
+
+const RING_BUFFER_CAPACITY: usize = 64;
+const PRE_TOOL_COALESCE_MS: u64 = 300;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub admin_addr: SocketAddr,
+    pub admin_addr_raw: String,
+    pub state_path: PathBuf,
+    pub device: DeviceConfig,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self> {
+        let admin_addr_raw = compat::admin_addr();
+        let admin_addr = admin_addr_raw
+            .parse()
+            .with_context(|| format!("invalid admin addr: {admin_addr_raw}"))?;
+
+        let state_dir = if let Some(state_dir) = compat::state_dir() {
+            PathBuf::from(state_dir)
+        } else {
+            let project_dirs = ProjectDirs::from("local", "esp32dash", "esp32dash")
+                .ok_or_else(|| anyhow!("failed to resolve project directories"))?;
+            project_dirs.data_dir().to_path_buf()
+        };
+        fs::create_dir_all(&state_dir).context("failed to create state directory")?;
+
+        Ok(Self {
+            admin_addr,
+            admin_addr_raw,
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: compat::serial_port(),
+                baud: compat::serial_baud(),
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PendingToolEvent {
+    generation: u64,
+    event: LocalHookEvent,
+}
+
+#[derive(Debug)]
+struct AgentState {
+    seq: u64,
+    snapshot: Snapshot,
+    history: VecDeque<Snapshot>,
+    pending_tool: Option<PendingToolEvent>,
+}
+
+impl AgentState {
+    fn new(initial: Snapshot) -> Self {
+        let seq = initial.seq;
+        Self {
+            seq,
+            snapshot: initial,
+            history: VecDeque::with_capacity(RING_BUFFER_CAPACITY),
+            pending_tool: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    config: Config,
+    state: Arc<Mutex<AgentState>>,
+    pending_generation: Arc<AtomicU64>,
+    device_manager: DeviceManager,
+}
+
+pub async fn run(config: Config) -> Result<()> {
+    let app_state = build_app_state(config.clone(), Arc::new(UnixSerialFactory));
+    let router = build_router(app_state);
+
+    let listener = TcpListener::bind(config.admin_addr)
+        .await
+        .with_context(|| format!("failed to bind admin addr {}", config.admin_addr_raw))?;
+
+    info!(
+        "esp32dash admin endpoint listening on {}",
+        config.admin_addr_raw
+    );
+
+    tokio::select! {
+        res = axum::serve(listener, router) => {
+            res.context("admin server failed")?;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("received ctrl-c, shutting down");
+        }
+    }
+
+    Ok(())
+}
+
+impl AppState {
+    pub async fn ingest(self: &Arc<Self>, event: LocalHookEvent) {
+        match event.hook_event_name.as_str() {
+            "PreToolUse" => self.handle_pre_tool(event).await,
+            "PostToolUse" => self.handle_post_tool(event).await,
+            _ => {
+                self.flush_pending_tool().await;
+                self.process_event(event).await;
+            }
+        }
+    }
+
+    async fn handle_pre_tool(self: &Arc<Self>, event: LocalHookEvent) {
+        self.flush_pending_tool().await;
+        let generation = self.pending_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        {
+            let mut guard = self.state.lock().await;
+            guard.pending_tool = Some(PendingToolEvent {
+                generation,
+                event: event.clone(),
+            });
+        }
+
+        let app = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(PRE_TOOL_COALESCE_MS)).await;
+            app.flush_pending_tool_generation(generation).await;
+        });
+    }
+
+    async fn handle_post_tool(self: &Arc<Self>, event: LocalHookEvent) {
+        let matched_pending = {
+            let mut guard = self.state.lock().await;
+            if let Some(pending) = guard.pending_tool.as_ref() {
+                if pending.event.tool_use_id == event.tool_use_id && event.tool_use_id.is_some() {
+                    guard.pending_tool = None;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if !matched_pending {
+            self.flush_pending_tool().await;
+        }
+
+        self.process_event(event).await;
+    }
+
+    async fn flush_pending_tool_generation(self: &Arc<Self>, generation: u64) {
+        let pending = {
+            let mut guard = self.state.lock().await;
+            if let Some(pending) = guard.pending_tool.take() {
+                if pending.generation == generation {
+                    Some(pending.event)
+                } else {
+                    guard.pending_tool = Some(pending);
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(event) = pending {
+            self.process_event(event).await;
+        }
+    }
+
+    async fn flush_pending_tool(self: &Arc<Self>) {
+        let pending = {
+            let mut guard = self.state.lock().await;
+            guard.pending_tool.take().map(|pending| pending.event)
+        };
+
+        if let Some(event) = pending {
+            self.process_event(event).await;
+        }
+    }
+
+    async fn process_event(self: &Arc<Self>, event: LocalHookEvent) {
+        let persist = {
+            let mut guard = self.state.lock().await;
+            let current = guard.snapshot.clone();
+            let mut next = normalize(&event, &current);
+            if event.hook_event_name == "Notification" {
+                next = apply_notification_status(next, &current, &event);
+            }
+
+            if materially_equal(&next, &current) {
+                guard.snapshot.ts = next.ts;
+                debug!(
+                    "coalesced duplicate state for event {}",
+                    event.hook_event_name
+                );
+                return;
+            }
+
+            guard.seq += 1;
+            next.seq = guard.seq;
+            guard.snapshot = next.clone();
+            guard.history.push_back(next.clone());
+            while guard.history.len() > RING_BUFFER_CAPACITY {
+                guard.history.pop_front();
+            }
+
+            PersistedState {
+                seq: guard.seq,
+                snapshot: next,
+            }
+        };
+
+        if let Err(err) = persist_state(&self.config.state_path, &persist) {
+            warn!("failed to persist state: {err:#}");
+        }
+
+        self.device_manager.send_snapshot(persist.snapshot);
+    }
+
+    async fn snapshot(&self) -> Snapshot {
+        self.state.lock().await.snapshot.clone()
+    }
+
+    fn serial_status(&self) -> crate::model::SerialConnectionStatus {
+        self.device_manager.status()
+    }
+}
+
+async fn post_event(
+    State(state): State<AppState>,
+    Json(event): Json<LocalHookEvent>,
+) -> impl IntoResponse {
+    Arc::new(state).ingest(event).await;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    Json(AgentStatusResponse {
+        admin_addr: state.config.admin_addr_raw.clone(),
+        current_seq: snapshot.seq,
+        serial: state.serial_status(),
+        snapshot,
+    })
+}
+
+async fn get_snapshot(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.snapshot().await)
+}
+
+async fn post_device_rpc(
+    State(state): State<AppState>,
+    Json(request): Json<RpcRequest>,
+) -> Result<Json<AdminRpcResponse>, (StatusCode, Json<AdminErrorResponse>)> {
+    match state.device_manager.rpc(request).await {
+        Ok(result) => Ok(Json(AdminRpcResponse {
+            ok: true,
+            result: Some(result),
+            error: None,
+        })),
+        Err(err) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(AdminErrorResponse {
+                ok: false,
+                error: err.to_string(),
+            }),
+        )),
+    }
+}
+
+fn load_state(path: &PathBuf) -> Option<PersistedState> {
+    let contents = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+fn persist_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
+    let json = serde_json::to_string_pretty(state)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
+fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState {
+    let initial_snapshot = load_state(&config.state_path)
+        .map(|persisted| persisted.snapshot)
+        .unwrap_or_else(|| Snapshot::empty(now_epoch()));
+    let device_manager = DeviceManager::start(
+        config.device.clone(),
+        factory,
+        Some(initial_snapshot.clone()),
+    );
+
+    AppState {
+        config,
+        state: Arc::new(Mutex::new(AgentState::new(initial_snapshot))),
+        pending_generation: Arc::new(AtomicU64::new(0)),
+        device_manager,
+    }
+}
+
+fn build_router(app_state: AppState) -> Router {
+    Router::new()
+        .route("/v1/claude/events", post(post_event))
+        .route("/v1/events", post(post_event))
+        .route("/v1/agent/status", get(get_status))
+        .route("/v1/status", get(get_status))
+        .route("/v1/snapshot", get(get_snapshot))
+        .route("/v1/device/rpc", post(post_device_rpc))
+        .with_state(app_state)
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Mutex},
+        time::SystemTime,
+    };
+
+    use anyhow::Result;
+    use reqwest::Client;
+
+    use super::*;
+    use crate::{
+        device::DeviceSession,
+        model::{Attention, WireFrame},
+    };
+
+    #[derive(Clone)]
+    struct FakeFactory {
+        writes: Arc<Mutex<Vec<WireFrame>>>,
+    }
+
+    impl SessionFactory for FakeFactory {
+        fn connect(&self, _port: &str, _baud: u32) -> Result<Box<dyn DeviceSession>> {
+            Ok(Box::new(FakeSession {
+                writes: self.writes.clone(),
+                sent_hello: false,
+            }))
+        }
+    }
+
+    struct FakeSession {
+        writes: Arc<Mutex<Vec<WireFrame>>>,
+        sent_hello: bool,
+    }
+
+    impl DeviceSession for FakeSession {
+        fn read_frame(&mut self, timeout: Duration) -> Result<Option<WireFrame>> {
+            if !self.sent_hello {
+                self.sent_hello = true;
+                return Ok(Some(WireFrame::Hello {
+                    protocol_version: 1,
+                    device_id: "esp32-dashboard".into(),
+                    product: "waveshare".into(),
+                    capabilities: vec!["claude.update".into(), "config.get".into()],
+                }));
+            }
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(None)
+        }
+
+        fn write_frame(&mut self, frame: &WireFrame) -> Result<()> {
+            self.writes
+                .lock()
+                .expect("writes mutex poisoned")
+                .push(frame.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_returns_serial_and_snapshot_state() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("esp32dash-status-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+        };
+
+        let app_state = build_app_state(
+            config,
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+        );
+        let router = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let body = Client::new()
+            .get(format!("http://{addr}/v1/agent/status"))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+
+        let status: AgentStatusResponse = serde_json::from_str(&body)?;
+        assert_eq!(status.snapshot.title, "No data yet");
+        assert!(status.serial.connected);
+        assert_eq!(status.serial.device_id.as_deref(), Some("esp32-dashboard"));
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingest_event_pushes_snapshot_to_serial_worker() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("esp32dash-ingest-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+        };
+
+        let app_state = build_app_state(
+            config,
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+        );
+        let router = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        Client::new()
+            .post(format!("http://{addr}/v1/claude/events"))
+            .json(&LocalHookEvent {
+                session_id: "sess-1".into(),
+                cwd: "/tmp/project".into(),
+                hook_event_name: "Stop".into(),
+                message: Some("finished".into()),
+                prompt_preview: None,
+                tool_name: None,
+                tool_use_id: None,
+                permission_mode: "default".into(),
+                recv_ts: 123,
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let writes = writes.lock().expect("writes mutex poisoned");
+        assert!(!writes.is_empty());
+        let last = writes
+            .last()
+            .expect("serial worker should have written a frame");
+        match last {
+            WireFrame::Event { method, payload } => {
+                assert_eq!(method, "claude.update");
+                assert_eq!(payload["status"], "waiting_for_input");
+                assert_eq!(
+                    payload["attention"],
+                    serde_json::to_value(Attention::Medium)?
+                );
+            }
+            other => panic!("unexpected frame written to serial worker: {other:?}"),
+        }
+
+        server.abort();
+        Ok(())
+    }
+}

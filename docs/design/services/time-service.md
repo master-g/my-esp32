@@ -45,7 +45,7 @@ typedef struct {
     bool rtc_valid;
     bool ntp_synced;
     uint32_t now_epoch_s;
-    char hhmm[6];
+    char time_text[9];
     char date_text[24];
     char weekday_text[12];
 } time_snapshot_t;
@@ -70,14 +70,14 @@ bool time_service_is_valid(void);
 
 - 启动后 RTC 有效时立即可见时间
 - NTP 成功后快照更新且 RTC 回写
-- RTC 无效时返回 `--:--`
+- RTC 无效时返回 `--:--:--`
 
 ## 8. 假设
 
 - v1 时区由系统统一配置
-- 首页只需要分钟级刷新
+- 首页需要秒级刷新
 
 ---
 
-*文档版本: 1.0*  
+*文档版本: 1.0*
 *创建日期: 2026-04-07*

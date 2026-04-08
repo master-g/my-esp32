@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "src/device_link.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp_board
+        cjson
+        core_types
+        esp_app_format
+        esp_driver_usb_serial_jtag
+        esp_system
+        esp_wifi
+        net_manager
+        nvs_flash
+        service_claude
+        service_time
+        service_weather
+)

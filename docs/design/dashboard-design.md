@@ -143,7 +143,7 @@ P1 不包含：
 
 ### 5.2 设计原则
 
-- UI 页面只消费状态，不直接发起 HTTP/WebSocket 请求
+- UI 页面只消费状态，不直接发起 HTTP、USB serial 或其他传输请求
 - 所有外部数据先进入 service 层，再分发给页面
 - 页面切换与数据采集解耦，避免“页面不在前台就丢数据”
 - 复杂性向下沉到 service 和 policy 层，不泄漏到 `app_manager`
@@ -197,7 +197,7 @@ P1 不包含：
 
 定义三种采集模式：
 
-- `REALTIME`：WebSocket 或秒级前台刷新
+- `REALTIME`：串口推送或秒级前台刷新
 - `INTERACTIVE_POLL`：前台低频轮询
 - `BACKGROUND_CACHE`：仅维护缓存，不追求实时
 
@@ -238,7 +238,7 @@ P1 不包含：
 
 ### 7.1 设计目标
 
-桥接服务运行在开发机，负责把 Claude Code hooks 事件转成局域网可消费的状态流。ESP32 只负责展示，不直接解析 Claude 内部行为。
+`esp32dash` 运行在开发机，负责把 Claude Code hooks 事件转成设备可消费的状态流，并通过 USB serial 把当前状态和配置 RPC 送到 ESP32。ESP32 只负责展示和管理，不直接解析 Claude 内部行为。
 
 Claude app 的详细子设计见 [claude-app.md](./apps/claude-app.md)。
 
@@ -280,12 +280,12 @@ Claude app 的详细子设计见 [claude-app.md](./apps/claude-app.md)。
 
 ### 7.4 交付语义
 
-为避免漏消息，采用“当前快照 + 实时增量”模型：
+为避免漏状态，采用“agent 保留当前快照 + 串口推送完整快照”模型：
 
-1. 桥接服务内存中保留最新状态和最新 `seq`
-2. ESP32 建立连接时先拿当前快照
-3. 建连成功后只接收该快照之后的实时增量
-4. 若订阅中断，重新连接后再次拉当前快照，再继续增量
+1. `esp32dash` 内存中保留最新状态和最新 `seq`
+2. ESP32 打开 USB serial 会话后先发送 `hello`
+3. host 识别设备能力后，把当前 Claude snapshot 作为 `claude.update` 事件发送
+4. 后续只在状态发生实质变化时再发送新的完整 snapshot
 
 这意味着：
 
@@ -295,9 +295,9 @@ Claude app 的详细子设计见 [claude-app.md](./apps/claude-app.md)。
 
 ### 7.5 安全边界
 
-- 桥接只监听局域网地址，不暴露公网
-- 设备连接需带预共享 token
-- token 存储在 NVS
+- agent 的 admin HTTP 只监听本机 loopback 地址，不暴露公网
+- host 和设备之间的管理链路默认走本地 USB serial，不依赖局域网
+- 设备通过 `hello` 声明 `protocol_version` 和 `capabilities`
 - 桥接和设备都需要重连退避
 
 ## 8. 市场和天气数据策略
@@ -499,34 +499,28 @@ typedef struct {
 
 ```text
 project/
-├── main/
-│   ├── main.c
-│   ├── app_manager.c
-│   ├── app_manager.h
-│   ├── system_state.c
-│   ├── system_state.h
-│   ├── event_bus.c
-│   └── event_bus.h
-│
-├── components/
-│   ├── bsp_board/
-│   │   ├── bsp_display.c
-│   │   ├── bsp_touch.c
-│   │   ├── bsp_rtc.c
-│   │   └── bsp_imu.c
-│   ├── service_time/
-│   ├── service_weather/
-│   ├── service_claude/
-│   ├── service_market/
-│   ├── service_bitcoin/
-│   ├── net_manager/
-│   └── power_policy/
-│
-├── apps/
-│   ├── home/
-│   ├── notify/
-│   ├── trading/
-│   └── satoshi_slot/
+├── src/
+│   ├── main/
+│   │   ├── main.c
+│   │   ├── bootstrap.c
+│   │   ├── bootstrap.h
+│   │   └── CMakeLists.txt
+│   ├── components/
+│   │   ├── bsp_board/
+│   │   │   ├── include/
+│   │   │   └── src/
+│   │   ├── service_time/
+│   │   ├── service_weather/
+│   │   ├── service_claude/
+│   │   ├── service_market/
+│   │   ├── net_manager/
+│   │   ├── power_policy/
+│   │   └── power_runtime/
+│   └── apps/
+│       ├── app_home/
+│       ├── app_notify/
+│       ├── app_trading/
+│       └── app_satoshi_slot/
 │
 ├── tools/
 │   ├── claude_bridge/
@@ -588,5 +582,5 @@ project/
 
 ---
 
-*文档版本: 2.4*  
+*文档版本: 2.4*
 *修订日期: 2026-04-07*

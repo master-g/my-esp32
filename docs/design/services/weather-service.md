@@ -52,6 +52,25 @@ typedef struct {
 - 手动刷新节流：`60 s`
 - 失败后保留旧缓存并标记 `STALE`
 
+## 5.1 v1 实施建议
+
+v1 推荐采用单一上游接口，并优先把复杂度留在 service 层而不是首页：
+
+- 上游推荐：Open-Meteo
+- 设备端配置：固定 `latitude / longitude / timezone / city_label`
+- 设备端请求：只取当前值，不先接 hourly / alerts
+
+推荐请求字段：
+
+- `current=temperature_2m,weather_code,is_day`
+- `timezone=auto`
+
+这样做的原因：
+
+- 首页只需要摘要，不需要完整天气产品模型
+- 固定经纬度比运行时城市搜索更省资源
+- 先把缓存、节流和错误退化做稳，再扩展更多天气能力
+
 ## 6. 对外接口
 
 ```c
@@ -77,8 +96,9 @@ const weather_snapshot_t *weather_service_get_snapshot(void);
 
 - v1 只有单一上游 API
 - 首页只消费聚合后的天气快照
+- v1 不在设备端实现城市模糊搜索，而是先使用固定地点配置
 
 ---
 
-*文档版本: 1.0*  
+*文档版本: 1.0*
 *创建日期: 2026-04-07*

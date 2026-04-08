@@ -1,0 +1,27 @@
+idf_component_register(
+    SRCS
+        "bootstrap.c"
+        "main.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        app_home
+        app_notify
+        app_satoshi_slot
+        app_trading
+        bsp_board
+        core_app_manager
+        core_event_bus
+        core_system_state
+        device_link
+        net_manager
+        nvs_flash
+        power_policy
+        power_runtime
+        service_claude
+        service_home
+        service_market
+        service_time
+        service_weather
+        lvgl__lvgl
+)

@@ -9,6 +9,7 @@
 .claude/
 .omc/
 **/.omc/
+.pre-commit-cache/
 
 # Embedded build outputs
 build/

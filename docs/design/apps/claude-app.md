@@ -16,7 +16,7 @@
 ### 2.1 本文档覆盖范围
 
 - 开发机 hook 适配器
-- bridge 内部归一化和 WebSocket 输出
+- bridge 内部归一化和 USB serial 输出
 - ESP32 侧 `claude_service`
 - `Notify` 页的状态展示和已读语义
 
@@ -102,15 +102,15 @@
 
 - `hook_adapter`
 - `bridge_normalizer`
-- `bridge_ws_server`
+- `bridge_serial_transport`
 
 职责定义：
 
 | 模块 | 职责 |
 |------|------|
-| `hook_adapter` | 读取 hook stdin，调用本地 CLI 把事件提交给 daemon |
+| `hook_adapter` | 读取 hook stdin，调用本地 CLI 把事件提交给 agent |
 | `bridge_normalizer` | 事件归一化、去噪、生成 snapshot 和 unread 语义 |
-| `bridge_ws_server` | 认证、快照响应、增量推送、心跳和重连 |
+| `bridge_serial_transport` | 设备 `hello`、串口 framing、RPC 请求响应、Claude snapshot 推送 |
 
 ### 4.2 设备侧
 
@@ -128,7 +128,7 @@
 
 关键原则：
 
-- `app_notify` 不解析 WebSocket JSON
+- `app_notify` 不解析串口协议 JSON
 - `service_claude` 不拼 UI 文案和颜色
 - 桥接侧吸收 hook 差异，设备侧只接受统一协议
 
@@ -152,7 +152,7 @@ typedef enum {
 说明：
 
 - `DISCONNECTED`：未建连或连接断开
-- `CONNECTING`：TCP/WebSocket 建连中
+- `CONNECTING`：USB serial 会话建立中
 - `SYNCING`：已连接，等待 snapshot
 - `READY`：已拿到合法 snapshot
 - `STALE`：连接仍在，但超过超时阈值未收到任何 bridge 活动
@@ -241,67 +241,72 @@ Claude hook 事件会非常频繁，bridge 必须做 coalescing：
 
 ### 7.1 握手
 
-ESP32 建立 WebSocket 后，先发送 `hello`：
+ESP32 打开 USB serial 后，先发送带前缀的 `hello`：
 
 ```json
-{
+@esp32dash {
   "type": "hello",
-  "token": "psk-from-nvs",
+  "protocol_version": 1,
   "device_id": "esp32-dashboard",
-  "last_seq": 1038
+  "product": "waveshare-3.49",
+  "capabilities": ["device.info", "device.reboot", "config.export", "config.set_many", "wifi.scan", "claude.update"]
 }
 ```
 
-bridge 校验成功后，返回：
+host 识别成功后：
 
-1. 一个 `snapshot`
-2. 然后进入实时推送
+1. 建立串口 session
+2. 记录设备能力
+3. 发送当前 Claude snapshot 的 `claude.update`
 
 说明：
 
-- 当前实现优先保证“拿到最新快照 + 继续接收实时 delta”
-- 不会在发送当前 `snapshot` 之后，再回放早于该 `snapshot` 的历史 `delta`
+- 当前实现优先保证“拿到最新状态并继续收最新快照”
+- 不回放完整历史事件，只保留最新 snapshot
 
-### 7.2 snapshot 消息
+### 7.2 `claude.update` 消息
 
 ```json
-{
-  "type": "snapshot",
+@esp32dash {
+  "type": "event",
+  "method": "claude.update",
   "payload": {
-    "seq": 1042,
-    "source": "claude_code",
-    "session_id": "sess_xxx",
-    "event": "PermissionRequest",
-    "status": "waiting_for_input",
-    "title": "Awaiting approval",
-    "workspace": "project-foo",
-    "detail": "exec_command requires approval",
-    "permission_mode": "default",
-    "ts": 1743957123,
-    "unread": true,
-    "attention": "high"
+      "seq": 1042,
+      "source": "claude_code",
+      "session_id": "sess_xxx",
+      "event": "PermissionRequest",
+      "status": "waiting_for_input",
+      "title": "Awaiting approval",
+      "workspace": "project-foo",
+      "detail": "exec_command requires approval",
+      "permission_mode": "default",
+      "ts": 1743957123,
+      "unread": true,
+      "attention": "high"
   }
 }
 ```
 
-### 7.3 delta 消息
+### 7.3 配置 RPC
 
 ```json
-{
-  "type": "delta",
-  "payload": {
-    "seq": 1043,
-    "source": "claude_code",
-    "session_id": "sess_xxx",
-    "event": "Stop",
-    "status": "waiting_for_input",
-    "title": "Ready for input",
-    "workspace": "project-foo",
-    "detail": "Previous action completed",
-    "permission_mode": "default",
-    "ts": 1743957128,
-    "unread": true,
-    "attention": "medium"
+@esp32dash {
+  "type": "request",
+  "id": "rpc-1",
+  "method": "wifi.scan",
+  "params": {}
+}
+```
+
+```json
+@esp32dash {
+  "type": "response",
+  "id": "rpc-1",
+  "ok": true,
+  "result": {
+    "aps": [
+      { "ssid": "my-network", "rssi": -49, "auth_mode": "wpa2_psk", "auth_required": true }
+    ]
   }
 }
 ```
@@ -310,7 +315,7 @@ bridge 校验成功后，返回：
 
 | 字段 | 说明 |
 |------|------|
-| `type` | `snapshot` 或 `delta` |
+| `type` | `hello` / `request` / `response` / `event` |
 | `seq` | 全局单调递增 |
 | `session_id` | 仅用于去重和调试，设备默认不展示 |
 | `event` | 原始事件名，便于调试和规则追踪 |
@@ -497,5 +502,5 @@ claude_conn_state_t claude_service_get_conn_state(void);
 
 ---
 
-*文档版本: 1.0*  
+*文档版本: 1.0*
 *创建日期: 2026-04-07*

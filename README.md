@@ -4,16 +4,18 @@ This repository now tracks both the host-side tooling and the initial ESP-IDF fi
 
 ## Repository Layout
 
+- `src/`
+  Firmware source tree root.
 - `docs/`
   Project design documents, architecture notes, setup guides, hardware baselines, and plans.
-- `main/`
+- `src/main/`
   ESP-IDF firmware bootstrap entrypoint.
-- `components/`
+- `src/components/`
   Firmware core modules, BSP contracts, services, and policies.
-- `apps/`
+- `src/apps/`
   Four fixed app slots: `Home`, `Notify`, `Trading`, `Satoshi Slot`.
-- `tools/claude_bridge/`
-  Rust daemon and CLI that receive Claude Code hook events on the host machine and expose device-facing WebSocket state.
+- `tools/esp32dash/`
+  Rust host companion CLI and local agent for Claude hook ingestion, USB serial config management, and device control.
 
 ## Intentionally Not Tracked
 
@@ -30,16 +32,16 @@ ESP-IDF itself is expected to be installed and managed outside this repository, 
 
 See [`.gitignore`](./.gitignore) for the full ignore policy.
 
-## Claude Bridge
+## esp32dash
 
-`tools/claude_bridge/` is a standalone Rust project.
+`tools/esp32dash/` is a standalone Rust project.
 
 Common commands:
 
 ```bash
-cd tools/claude_bridge
-cargo run -- daemon
-cargo run -- status
+cd tools/esp32dash
+cargo run -- agent run
+cargo run -- agent status
 ```
 
 The bridge is documented in:
@@ -84,7 +86,7 @@ The firmware side currently provides:
 
 What is intentionally not wired yet:
 
-- real weather / market / Claude bridge transports
+- real weather / market transports, plus the firmware-side `esp32dash` serial transport
 - production-ready `Notify` / `Trading` / `Satoshi Slot` UI
 - end-to-end backlight / dim / sleep control validation
 - IMU-backed auto rotation / auto wake behavior

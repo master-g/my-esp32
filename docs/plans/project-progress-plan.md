@@ -27,6 +27,12 @@
   - 已补 `power_runtime`，把 `power_policy` 输出真正执行到背光
   - 已根据最新要求改为：USB 供电下保持 `ACTIVE`，不自动进入 `DIM` / `SLEEP`
   - Battery 模式仍保留空闲降级路径，用于后续实机验证
+  - 已通过实机串口日志确认：
+    - RTC 恢复成功
+    - Wi-Fi 自动联网成功
+    - 获取 IP 成功
+    - SNTP 校时成功
+    - NTP 结果已写回 RTC
 
 ## 当前状态评估
 
@@ -35,14 +41,14 @@
 项目已经越过“纯设计阶段”，当前更准确的定位是：
 
 - **文档和架构层面**：主设计文档与多个子设计已经基本成型。
-- **Host 侧工具**：`tools/claude_bridge` 已经是独立 Rust 项目，并带有基础测试。
+- **Host 侧工具**：`tools/esp32dash` 已经是独立 Rust 项目，并带有基础测试。
 - **Firmware 侧**：ESP-IDF 工程、组件分层、BSP、服务骨架、四个 app 槽位均已落地。
 
 整体上，项目处于 **“P0 代码骨架已落地，横屏显示基线已稳定并支持双固定方向，但 P0 板级闭环验证与 P1 真实数据/UI 仍未完成”** 的阶段。
 
 ### 已完成 / 已有真实骨架
 
-- 顶层 ESP-IDF 工程结构已建立：`CMakeLists.txt`、`main/`、`components/`、`apps/`。
+- 顶层 ESP-IDF 工程结构已建立：`CMakeLists.txt`、`src/main/`、`src/components/`、`src/apps/`。
 - `bsp_board_config` 已把 Waveshare 板级基线固定为：
   - `AXS15231B`
   - `172 x 640`
@@ -62,7 +68,7 @@
   - 时间文本快照更新
 - `home_service` 已有聚合层，可汇总 time / weather / claude / net 状态。
 - 四个 app 都已注册并能创建 LVGL 根视图。
-- `tools/claude_bridge` 已具备 daemon / send / status / launchd 的 CLI 结构；现有 Rust 测试可通过。
+- `tools/esp32dash` 已具备 agent / claude / device / config / launchd 的 CLI 结构；现有 Rust 测试可通过。
 
 ### 部分完成 / 明显仍是占位
 
@@ -70,7 +76,7 @@
 - `service_market` 仍是 pair/interval/snapshot 占位，尚未接真实行情与 candle 数据。
 - `service_claude` 目前只维护本地状态占位，尚未接入 bridge 快照/增量协议。
 - `Notify`、`Trading`、`Satoshi Slot` 仍是占位页；`Home` 也是简化版展示而非最终 MVP 页面。
-- 横屏显示已跑通并支持两种固定方向，但触摸、背光、RTC、Wi-Fi、NTP 等板级主链路仍需按 P0 验证清单做系统回归。
+- 横屏显示已跑通并支持两种固定方向；触摸基础点击正常，RTC、Wi-Fi、IP、SNTP、RTC 回写也已完成首轮串口验证，但背光 / dim / sleep 与更多异常路径仍需继续回归。
 - 全局翻页、边缘手势、分页指示器、生产级页面布局尚未落地。
 - `power_policy` 已有输出逻辑，但还未看到完整的背光 / dim / sleep 端到端闭环。
 - IMU、更多板级外设、复杂功耗策略还未接上。
@@ -79,7 +85,7 @@
 
 - `README.md` 与硬件/设计文档已完成横屏首轮同步，但板级闭环和真实数据链路接入后仍需要继续跟进更新，避免再次落后于代码。
 - `.gitignore` 已完成首轮收口；如果后续决定纳管共享 IDE 配置，需要再单独细化 `.vscode/` 的白名单策略。
-- 已确认当前工程可在 `ESP-IDF 6.0` 环境下完成 `idf.py -B build-esp32s3 build`，且横屏固件已完成实机显示验证；当前阻塞点已转向板级主链路是否完整闭环。
+- 已确认当前工程可在 `ESP-IDF 6.0` 环境下完成 `idf.py -B build-esp32s3 build`，且横屏固件与 RTC/Wi-Fi/NTP 主链均已完成首轮实机验证；当前阻塞点已转向剩余板级异常路径与真实业务数据接线。
 - IMU 自动翻转暂不应插队；在 `bsp_imu` 尚未落地前继续推进会把 P0 bring-up 和 P2 体验特性混在一起。
 - 当前工作区存在大量未提交新增文件，后续改动必须避免误碰用户已有变更。
 
@@ -94,7 +100,7 @@
 - 确认哪些文件应长期纳管：
   - `sdkconfig.defaults`
   - `dependencies.lock`
-  - `tools/claude_bridge/Cargo.lock`
+  - `tools/esp32dash/Cargo.lock`
 - 更新 `README.md`，让文档准确反映当前代码进度。
 - 标记哪些模块已是真实 bring-up，哪些仍是 placeholder。
 
@@ -185,7 +191,7 @@
 
 ## 备注
 
-- `tools/claude_bridge` 可以独立推进，不必等待所有固件 UI 完成。
+- `tools/esp32dash` 可以独立推进，不必等待所有固件 UI 完成。
 - 当前最值得优先推进的不是“再加新功能”，而是先让：
   - 仓库状态清晰
   - 文档与代码对齐

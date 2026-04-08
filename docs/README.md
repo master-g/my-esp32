@@ -15,3 +15,4 @@
 - [hardware/waveshare-board-baseline.md](./hardware/waveshare-board-baseline.md): Waveshare 板级基线与硬件冲突说明
 - [guides/dev-setup-guide.md](./guides/dev-setup-guide.md): 开发环境配置指南
 - [plans/project-progress-plan.md](./plans/project-progress-plan.md): 项目进度评估与实施计划
+- [plans/weather-system-plan.md](./plans/weather-system-plan.md): 天气系统实施计划
