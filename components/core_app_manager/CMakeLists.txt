@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/app_manager.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp_board
+        core_types
+        lvgl__lvgl
+)

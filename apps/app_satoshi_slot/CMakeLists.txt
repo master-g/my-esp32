@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "src/app_satoshi_slot.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp_board
+        core_app_manager
+        lvgl__lvgl
+        power_policy
+)

@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/power_runtime.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp_board
+        core_event_bus
+        core_system_state
+        esp_timer
+        power_policy
+)

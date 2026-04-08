@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "src/bsp_backlight.c"
+        "src/bsp_board.c"
+        "src/bsp_display.c"
+        "src/bsp_rtc.c"
+        "src/bsp_touch.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        core_system_state
+        core_types
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_ledc
+        esp_driver_spi
+        esp_lcd
+        esp_timer
+        espressif__esp_lcd_axs15231b
+        lvgl__lvgl
+)

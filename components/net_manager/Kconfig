@@ -1,0 +1,17 @@
+menu "Dashboard Network"
+
+config DASH_WIFI_SSID
+    string "Default Wi-Fi SSID"
+    default ""
+    help
+        Development-time fallback SSID. If NVS does not contain Wi-Fi
+        credentials yet, this value is copied into NVS on first boot.
+
+config DASH_WIFI_PASSWORD
+    string "Default Wi-Fi Password"
+    default ""
+    help
+        Development-time fallback password. If NVS does not contain a
+        password yet, this value is copied into NVS on first boot.
+
+endmenu

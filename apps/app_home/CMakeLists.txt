@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "src/app_home.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp_board
+        core_app_manager
+        lvgl__lvgl
+        service_home
+)

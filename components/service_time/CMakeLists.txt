@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/service_time.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp_board
+        core_event_bus
+        esp_netif
+        net_manager
+        nvs_flash
+)

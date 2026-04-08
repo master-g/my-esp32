@@ -2,6 +2,7 @@
 .DS_Store
 **/.DS_Store
 .idea/
+# VS Code currently only contains machine-local ESP-IDF extension state.
 .vscode/
 
 # Local assistant / workspace state
@@ -12,6 +13,11 @@
 # Embedded build outputs
 build/
 **/build/
+build-*/
+**/build-*/
+managed_components/
+**/managed_components/
+# Keep only the checked-in baseline config; local generated sdkconfig files stay ignored.
 sdkconfig
 sdkconfig.old
 sdkconfig.*
@@ -31,4 +37,3 @@ target/
 # Local vendor / experiments not tracked in this repo
 /esp-idf/
 /esp-idf-*/
-/test-blink/

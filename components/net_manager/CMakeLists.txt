@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "src/net_manager.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        core_event_bus
+        core_system_state
+        esp_event
+        esp_netif
+        esp_wifi
+        nvs_flash
+)

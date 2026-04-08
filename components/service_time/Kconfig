@@ -1,0 +1,9 @@
+menu "Dashboard Time"
+
+config DASH_TIMEZONE_TZ
+    string "Default timezone TZ string"
+    default "CST-8"
+    help
+        POSIX TZ string used when no timezone value exists in NVS.
+
+endmenu

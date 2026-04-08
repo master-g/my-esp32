@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "src/service_home.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        net_manager
+        service_claude
+        service_time
+        service_weather
+)

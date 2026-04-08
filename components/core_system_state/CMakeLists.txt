@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/system_state.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        core_event_bus
+        core_types
+        power_policy
+)
