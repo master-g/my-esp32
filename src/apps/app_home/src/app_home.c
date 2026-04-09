@@ -453,8 +453,8 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 
     s_view.bubble_box = lv_obj_create(root);
     lv_obj_remove_style_all(s_view.bubble_box);
-    lv_obj_set_width(s_view.bubble_box, HOME_BUBBLE_MAX_W);
-    lv_obj_set_height(s_view.bubble_box, LV_SIZE_CONTENT);
+    lv_obj_set_size(s_view.bubble_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(s_view.bubble_box, HOME_BUBBLE_MAX_W, 0);
     lv_obj_set_style_bg_color(s_view.bubble_box, lv_color_hex(HOME_BUBBLE_BG_COLOR), 0);
     lv_obj_set_style_bg_opa(s_view.bubble_box, LV_OPA_80, 0);
     lv_obj_set_style_radius(s_view.bubble_box, HOME_BUBBLE_RADIUS, 0);
@@ -464,7 +464,7 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
 
     s_view.bubble_label = lv_label_create(s_view.bubble_box);
-    lv_obj_set_width(s_view.bubble_label, HOME_BUBBLE_MAX_W - 2 * HOME_BUBBLE_PAD_H);
+    lv_obj_set_style_max_width(s_view.bubble_label, HOME_BUBBLE_MAX_W - 2 * HOME_BUBBLE_PAD_H, 0);
     lv_label_set_long_mode(s_view.bubble_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_view.bubble_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_view.bubble_label, lv_color_hex(HOME_BUBBLE_TEXT_COLOR), 0);
