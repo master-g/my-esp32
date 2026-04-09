@@ -220,15 +220,26 @@ fn render_hook_script(executable: &Path) -> String {
 DEFAULT_BIN={escaped_executable}
 BIN="${{ESP32DASH_BIN:-$DEFAULT_BIN}}"
 
-if [ -x "$BIN" ]; then
-  exec "$BIN" claude ingest --event-from-stdin
+if [ ! -x "$BIN" ]; then
+  if command -v esp32dash >/dev/null 2>&1; then
+    BIN=esp32dash
+  else
+    exit 0
+  fi
 fi
 
-if command -v esp32dash >/dev/null 2>&1; then
-  exec esp32dash claude ingest --event-from-stdin
-fi
+# Read stdin so we can inspect and re-pipe it
+INPUT=$(cat)
 
-exit 0
+# PermissionRequest needs the blocking approve path
+EVENT_NAME=$(printf '%s' "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+if [ "$EVENT_NAME" = "PermissionRequest" ]; then
+  printf '%s' "$INPUT" | exec "$BIN" claude approve --event-from-stdin
+else
+  printf '%s' "$INPUT" | "$BIN" claude ingest --event-from-stdin
+  exit 0
+fi
 "#
     )
 }
