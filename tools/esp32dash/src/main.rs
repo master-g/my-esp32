@@ -1,4 +1,5 @@
 mod agent;
+mod approvals;
 mod compat;
 mod config_ui;
 mod device;
@@ -109,6 +110,13 @@ enum ClaudeCommand {
         #[arg(long, help = "Read the hook event payload from stdin")]
         event_from_stdin: bool,
     },
+    #[command(
+        about = "Handle a PermissionRequest hook event: submit to agent, wait for device approval, output decision JSON"
+    )]
+    Approve {
+        #[arg(long, help = "Read the hook event payload from stdin")]
+        event_from_stdin: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -211,6 +219,14 @@ async fn main() -> Result<()> {
                 return Err(anyhow!("ingest requires --event-from-stdin"));
             }
             ingest_from_stdin().await
+        }
+        Command::Claude {
+            command: ClaudeCommand::Approve { event_from_stdin },
+        } => {
+            if !event_from_stdin {
+                return Err(anyhow!("approve requires --event-from-stdin"));
+            }
+            approve_from_stdin().await
         }
         Command::Device { command } => run_device_command(command).await,
         Command::Config(args) => config_ui::run_config_editor(args.port).await,
@@ -516,6 +532,187 @@ fn json_escape_path(path: PathBuf) -> String {
     path.to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
+}
+
+async fn approve_from_stdin() -> Result<()> {
+    let mut stdin = String::new();
+    io::stdin()
+        .read_to_string(&mut stdin)
+        .context("failed to read stdin")?;
+
+    let raw: Value = match serde_json::from_str(&stdin) {
+        Ok(v) => v,
+        Err(err) => {
+            debug!("ignoring invalid hook JSON: {err}");
+            return Ok(());
+        }
+    };
+
+    let tool_name = raw
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let tool_input_summary = summarize_tool_input(&raw);
+
+    let permission_mode = raw
+        .get("permission_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+
+    let approval_id = format!(
+        "approval-{}-{}",
+        now_epoch(),
+        tool_name.chars().take(16).collect::<String>()
+    );
+
+    // Also ingest as a normal event so the dashboard updates
+    let ingest_raw: std::result::Result<RawHookInput, _> = serde_json::from_str(&stdin);
+    if let Ok(raw_event) = ingest_raw {
+        let event = sanitize_raw_event(raw_event);
+        let client = Client::new();
+        let _ = client
+            .post(format!("{}/v1/claude/events", admin_base_url()))
+            .json(&event)
+            .timeout(std::time::Duration::from_millis(100))
+            .send()
+            .await;
+    }
+
+    // Submit approval to agent
+    let client = Client::new();
+    let submit_response = client
+        .post(format!("{}/v1/claude/approvals", admin_base_url()))
+        .json(&json!({
+            "id": approval_id,
+            "tool_name": tool_name,
+            "tool_input_summary": tool_input_summary,
+            "permission_mode": permission_mode,
+        }))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
+    if let Err(err) = submit_response {
+        warn!("agent unavailable for approval: {err}");
+        // Agent not running — let Claude Code show its normal permission dialog
+        return Ok(());
+    }
+
+    // Poll for decision
+    let poll_interval = std::time::Duration::from_millis(500);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+
+    loop {
+        if std::time::Instant::now() > deadline {
+            warn!("approval timed out, denying");
+            let output = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "Approval timed out on ESP32 dashboard"
+                    }
+                }
+            });
+            println!("{}", serde_json::to_string(&output)?);
+            return Ok(());
+        }
+
+        tokio::time::sleep(poll_interval).await;
+
+        let response = client
+            .get(format!(
+                "{}/v1/claude/approvals/{}",
+                admin_base_url(),
+                approval_id
+            ))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await;
+
+        let body: Value = match response {
+            Ok(resp) if resp.status().is_success() => {
+                resp.json().await.unwrap_or_default()
+            }
+            _ => continue,
+        };
+
+        let approval = match body.get("approval") {
+            Some(a) => a,
+            None => continue,
+        };
+
+        let resolved = approval.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !resolved {
+            continue;
+        }
+
+        let decision = approval
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("deny");
+
+        let output = match decision {
+            "allow" => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "allow"
+                    }
+                }
+            }),
+            "yolo" => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "allow",
+                        "updatedPermissions": [{
+                            "type": "addRules",
+                            "rules": [{ "toolName": tool_name }],
+                            "behavior": "allow",
+                            "destination": "localSettings"
+                        }]
+                    }
+                }
+            }),
+            _ => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "Denied from ESP32 dashboard"
+                    }
+                }
+            }),
+        };
+
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+}
+
+fn summarize_tool_input(raw: &Value) -> String {
+    let tool_input = match raw.get("tool_input") {
+        Some(input) => input,
+        None => return String::new(),
+    };
+
+    // For Bash, show the command
+    if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
+        return trim_text(cmd, 80);
+    }
+    // For Edit/Write, show the file path
+    if let Some(path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
+        return trim_text(path, 80);
+    }
+    // For other tools, compact JSON
+    match serde_json::to_string(tool_input) {
+        Ok(s) => trim_text(&s, 80),
+        Err(_) => String::new(),
+    }
 }
 
 fn init_tracing() {

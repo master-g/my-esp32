@@ -27,16 +27,24 @@
 #include "service_time.h"
 #include "service_weather.h"
 
+#include "event_bus.h"
+
 #define DEVICE_LINK_PROTOCOL_PREFIX "@esp32dash "
 #define DEVICE_LINK_PROTOCOL_VERSION 1
 #define DEVICE_LINK_LINE_MAX 768
 #define DEVICE_LINK_HELLO_INTERVAL_MS 1000
+#define APPROVAL_TIMEOUT_MS 300000
 
 static const char *TAG = "device_link";
 static SemaphoreHandle_t s_stdout_lock;
 static char s_device_id[32];
 static bool s_started;
 static int s_usb_fd = -1;
+
+/* Approval state — shared between reader task and LVGL task */
+static SemaphoreHandle_t s_approval_sem;
+static approval_request_t s_approval_req;
+static approval_decision_t s_approval_decision;
 
 typedef struct {
     bool set_wifi_ssid;
@@ -54,8 +62,8 @@ typedef struct {
 } pending_config_t;
 
 static const char *capabilities[] = {
-    "device.info",     "device.reboot", "config.export",
-    "config.set_many", "wifi.scan",     "claude.update",
+    "device.info", "device.reboot", "config.export",  "config.set_many",
+    "wifi.scan",   "claude.update", "claude.approve",
 };
 
 static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
@@ -761,6 +769,52 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
+    if (strcmp(method->valuestring, "claude.approve") == 0) {
+        /* Already have a pending approval — reject new one */
+        if (s_approval_req.pending) {
+            send_response_error(id->valuestring, "busy", "approval already pending");
+            return;
+        }
+
+        const cJSON *tool = cJSON_GetObjectItemCaseSensitive(params, "tool_name");
+        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(params, "description");
+        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(params, "id");
+
+        memset(&s_approval_req, 0, sizeof(s_approval_req));
+        if (cJSON_IsString(req_id))
+            strlcpy(s_approval_req.id, req_id->valuestring, sizeof(s_approval_req.id));
+        if (cJSON_IsString(tool))
+            strlcpy(s_approval_req.tool_name, tool->valuestring, sizeof(s_approval_req.tool_name));
+        if (cJSON_IsString(desc))
+            strlcpy(s_approval_req.description, desc->valuestring,
+                    sizeof(s_approval_req.description));
+        s_approval_req.pending = true;
+
+        /* Notify LVGL task to show approval UI */
+        app_event_t evt = {.type = APP_EVENT_PERMISSION_REQUEST, .payload = NULL};
+        event_bus_publish(&evt);
+
+        /* Block until user taps a button (or timeout) */
+        if (xSemaphoreTake(s_approval_sem, pdMS_TO_TICKS(APPROVAL_TIMEOUT_MS)) == pdTRUE) {
+            const char *decision_str = "deny";
+            if (s_approval_decision == APPROVAL_DECISION_ALLOW)
+                decision_str = "allow";
+            else if (s_approval_decision == APPROVAL_DECISION_YOLO)
+                decision_str = "yolo";
+
+            cJSON *result = cJSON_CreateObject();
+            cJSON_AddStringToObject(result, "decision", decision_str);
+            send_response_ok(id->valuestring, result);
+        } else {
+            ESP_LOGW(TAG, "claude.approve: timed out waiting for user");
+            cJSON *result = cJSON_CreateObject();
+            cJSON_AddStringToObject(result, "decision", "deny");
+            send_response_ok(id->valuestring, result);
+        }
+        s_approval_req.pending = false;
+        return;
+    }
+
     send_response_error(id->valuestring, "unknown_method", method->valuestring);
 }
 
@@ -851,6 +905,9 @@ esp_err_t device_link_init(void)
 
     s_stdout_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_stdout_lock != NULL, ESP_ERR_NO_MEM, TAG, "failed to create stdout lock");
+    s_approval_sem = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(s_approval_sem != NULL, ESP_ERR_NO_MEM, TAG,
+                        "failed to create approval sem");
     ESP_RETURN_ON_ERROR(esp_read_mac(mac, ESP_MAC_WIFI_STA), TAG, "failed to read device mac");
     if (!usb_serial_jtag_is_driver_installed()) {
         ESP_RETURN_ON_ERROR(usb_serial_jtag_driver_install(&usb_config), TAG,
@@ -875,4 +932,21 @@ esp_err_t device_link_init(void)
     }
     s_started = true;
     return ESP_OK;
+}
+
+bool device_link_get_pending_approval(approval_request_t *out)
+{
+    if (!s_approval_req.pending) {
+        return false;
+    }
+    if (out) {
+        *out = s_approval_req;
+    }
+    return true;
+}
+
+void device_link_resolve_approval(approval_decision_t decision)
+{
+    s_approval_decision = decision;
+    xSemaphoreGive(s_approval_sem);
 }

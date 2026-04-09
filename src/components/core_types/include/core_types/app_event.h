@@ -12,6 +12,7 @@ typedef enum {
     APP_EVENT_DATA_MARKET,
     APP_EVENT_DATA_WEATHER,
     APP_EVENT_DATA_BITCOIN,
+    APP_EVENT_PERMISSION_REQUEST,
 } app_event_type_t;
 
 typedef struct {

@@ -23,6 +23,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{debug, info, warn};
 
 use crate::{
+    approvals::{ApprovalDecision, ApprovalRequest, ApprovalStore},
     compat,
     device::{DeviceConfig, DeviceManager, SessionFactory, UnixSerialFactory},
     model::{
@@ -103,6 +104,7 @@ pub struct AppState {
     state: Arc<Mutex<AgentState>>,
     pending_generation: Arc<AtomicU64>,
     device_manager: DeviceManager,
+    pub approvals: ApprovalStore,
 }
 
 pub async fn run(config: Config) -> Result<()> {
@@ -303,6 +305,95 @@ async fn post_device_rpc(
     }
 }
 
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct SubmitApprovalBody {
+    id: String,
+    tool_name: String,
+    tool_input_summary: String,
+    #[serde(default = "default_permission_mode")]
+    permission_mode: String,
+}
+
+fn default_permission_mode() -> String {
+    "default".into()
+}
+
+async fn post_approval(
+    State(state): State<AppState>,
+    Json(body): Json<SubmitApprovalBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let request = ApprovalRequest {
+        tool_name: body.tool_name.clone(),
+        tool_input_summary: body.tool_input_summary.clone(),
+        permission_mode: body.permission_mode.clone(),
+    };
+    let id = state.approvals.submit(body.id, request.clone()).await;
+    info!(
+        approval_id = id,
+        tool = body.tool_name,
+        "approval submitted, forwarding to device"
+    );
+
+    // Forward to ESP32 via RPC in background
+    let dm = state.device_manager.clone();
+    let approvals = state.approvals.clone();
+    let approval_id = id.clone();
+    tokio::spawn(async move {
+        let rpc = RpcRequest {
+            method: "claude.approve".into(),
+            params: serde_json::json!({
+                "id": approval_id,
+                "tool_name": request.tool_name,
+                "description": request.tool_input_summary,
+            }),
+        };
+        match dm.rpc(rpc).await {
+            Ok(result) => {
+                if let Some(decision_str) = result.get("decision").and_then(|v| v.as_str()) {
+                    let decision = match decision_str {
+                        "allow" => ApprovalDecision::Allow,
+                        "deny" => ApprovalDecision::Deny,
+                        "yolo" => ApprovalDecision::Yolo,
+                        _ => {
+                            warn!(decision = decision_str, "unknown device decision");
+                            ApprovalDecision::Deny
+                        }
+                    };
+                    approvals.resolve(&approval_id, decision).await;
+                    info!(approval_id, ?decision, "device resolved approval");
+                } else {
+                    warn!(approval_id, "device response missing decision field");
+                    approvals.resolve(&approval_id, ApprovalDecision::Deny).await;
+                }
+            }
+            Err(err) => {
+                warn!(approval_id, error = %err, "failed to reach device for approval");
+                // Don't auto-deny on device error — let the CLI timeout handle it
+            }
+        }
+    });
+
+    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+async fn get_approval(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.approvals.status(&id).await {
+        Some(status) => (StatusCode::OK, Json(serde_json::json!({
+            "ok": true,
+            "approval": status,
+        }))),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "ok": false,
+            "error": "approval not found",
+        }))),
+    }
+}
+
 fn load_state(path: &PathBuf) -> Option<PersistedState> {
     let contents = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -351,6 +442,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
         state: Arc::new(Mutex::new(AgentState::new(initial_snapshot))),
         pending_generation: Arc::new(AtomicU64::new(0)),
         device_manager,
+        approvals: ApprovalStore::new(),
     }
 }
 
@@ -362,6 +454,8 @@ fn build_router(app_state: AppState) -> Router {
         .route("/v1/status", get(get_status))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/device/rpc", post(post_device_rpc))
+        .route("/v1/claude/approvals", post(post_approval))
+        .route("/v1/claude/approvals/{id}", get(get_approval))
         .with_state(app_state)
 }
 

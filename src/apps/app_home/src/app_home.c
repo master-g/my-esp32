@@ -5,6 +5,7 @@
 
 #include "bsp_board.h"
 #include "bsp_board_config.h"
+#include "device_link.h"
 #include "generated/app_home_status_font.h"
 #include "generated/sprite_frames.h"
 #include "lvgl.h"
@@ -40,6 +41,13 @@
 
 #define HOME_LEFT_HALF_W 280
 #define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
+
+#define APPROVE_BG_COLOR 0x1a2332
+#define APPROVE_BTN_H 36
+#define APPROVE_BTN_GAP 6
+#define APPROVE_ALLOW_COLOR 0x2d8c4e
+#define APPROVE_DENY_COLOR 0x8c3030
+#define APPROVE_YOLO_COLOR 0x6b5c2e
 
 typedef enum {
     SPRITE_STATE_IDLE = 0,
@@ -79,6 +87,13 @@ typedef struct {
     lv_obj_t *sprite_img;
     lv_obj_t *bubble_box;
     lv_obj_t *bubble_label;
+    /* approval overlay */
+    lv_obj_t *approval_overlay;
+    lv_obj_t *approval_tool_label;
+    lv_obj_t *approval_desc_label;
+    lv_obj_t *approval_btn_allow;
+    lv_obj_t *approval_btn_deny;
+    lv_obj_t *approval_btn_yolo;
 } app_home_view_t;
 
 typedef struct {
@@ -354,6 +369,91 @@ static esp_err_t app_home_init(void)
     return ESP_OK;
 }
 
+/* ---- Approval overlay ---- */
+
+static void approval_btn_cb(lv_event_t *e)
+{
+    approval_decision_t decision = (approval_decision_t)(intptr_t)lv_event_get_user_data(e);
+    device_link_resolve_approval(decision);
+    lv_obj_add_flag(s_view.approval_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+static lv_obj_t *create_approval_btn(lv_obj_t *parent, const char *text, uint32_t color,
+                                     approval_decision_t decision)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_size(btn, LV_PCT(100), APPROVE_BTN_H);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_center(label);
+
+    lv_obj_add_event_cb(btn, approval_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)decision);
+    return btn;
+}
+
+static void create_approval_overlay(lv_obj_t *root)
+{
+    lv_obj_t *overlay = lv_obj_create(root);
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, BSP_LCD_H_RES, BSP_LCD_V_RES);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(APPROVE_BG_COLOR), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_90, 0);
+    lv_obj_set_style_pad_all(overlay, 10, 0);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+    s_view.approval_overlay = overlay;
+
+    /* Tool name label (top left) */
+    s_view.approval_tool_label = lv_label_create(overlay);
+    lv_obj_set_style_text_font(s_view.approval_tool_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_view.approval_tool_label, lv_color_hex(0xe9e0cf), 0);
+    lv_obj_set_width(s_view.approval_tool_label, BSP_LCD_H_RES / 2 - 20);
+    lv_label_set_long_mode(s_view.approval_tool_label, LV_LABEL_LONG_CLIP);
+    lv_obj_align(s_view.approval_tool_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    /* Description label (below tool name) */
+    s_view.approval_desc_label = lv_label_create(overlay);
+    lv_obj_set_style_text_font(s_view.approval_desc_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_view.approval_desc_label, lv_color_hex(0x8899a6), 0);
+    lv_obj_set_width(s_view.approval_desc_label, BSP_LCD_H_RES / 2 - 20);
+    lv_label_set_long_mode(s_view.approval_desc_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_view.approval_desc_label, LV_ALIGN_TOP_LEFT, 0, 22);
+
+    /* Buttons column (right half) */
+    lv_obj_t *btn_col = lv_obj_create(overlay);
+    lv_obj_remove_style_all(btn_col);
+    lv_obj_set_size(btn_col, BSP_LCD_H_RES / 2 - 30, BSP_LCD_V_RES - 20);
+    lv_obj_align(btn_col, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_flex_flow(btn_col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(btn_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(btn_col, APPROVE_BTN_GAP, 0);
+
+    s_view.approval_btn_allow = create_approval_btn(btn_col, LV_SYMBOL_OK " Accept",
+                                                    APPROVE_ALLOW_COLOR, APPROVAL_DECISION_ALLOW);
+    s_view.approval_btn_deny = create_approval_btn(btn_col, LV_SYMBOL_CLOSE " Decline",
+                                                   APPROVE_DENY_COLOR, APPROVAL_DECISION_DENY);
+    s_view.approval_btn_yolo = create_approval_btn(btn_col, LV_SYMBOL_SHUFFLE " YOLO",
+                                                   APPROVE_YOLO_COLOR, APPROVAL_DECISION_YOLO);
+}
+
+static void show_approval_overlay(void)
+{
+    approval_request_t req;
+    if (!device_link_get_pending_approval(&req)) {
+        return;
+    }
+    lv_label_set_text(s_view.approval_tool_label, req.tool_name);
+    lv_label_set_text(s_view.approval_desc_label, req.description);
+    lv_obj_clear_flag(s_view.approval_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
 static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 {
     lv_obj_t *root = lv_obj_create(parent);
@@ -479,6 +579,9 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     s_sprite.frame_idx = 0;
     s_sprite.timer = lv_timer_create(sprite_timer_cb, s_sprite.anim->period_ms, NULL);
 
+    /* ---- approval overlay (must be last for z-order) ---- */
+    create_approval_overlay(root);
+
     refresh_view();
     return root;
 }
@@ -517,6 +620,9 @@ static void app_home_handle_event(const app_event_t *event)
     case APP_EVENT_TICK_1S:
         home_service_refresh_snapshot();
         refresh_view();
+        break;
+    case APP_EVENT_PERMISSION_REQUEST:
+        show_approval_overlay();
         break;
     default:
         break;

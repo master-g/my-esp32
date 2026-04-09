@@ -2,7 +2,33 @@
 #define DEVICE_LINK_H
 
 #include "esp_err.h"
+#include <stdbool.h>
+
+typedef enum {
+    APPROVAL_DECISION_ALLOW = 0,
+    APPROVAL_DECISION_DENY,
+    APPROVAL_DECISION_YOLO,
+} approval_decision_t;
+
+typedef struct {
+    char id[32];
+    char tool_name[48];
+    char description[80];
+    bool pending;
+} approval_request_t;
 
 esp_err_t device_link_init(void);
+
+/**
+ * Get the current pending approval request (if any).
+ * Returns true if a request is pending, false otherwise.
+ */
+bool device_link_get_pending_approval(approval_request_t *out);
+
+/**
+ * Submit a decision for the current pending approval.
+ * This unblocks the RPC handler which sends the response to the host.
+ */
+void device_link_resolve_approval(approval_decision_t decision);
 
 #endif

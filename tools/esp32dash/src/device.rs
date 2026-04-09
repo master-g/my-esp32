@@ -22,12 +22,14 @@ use crate::model::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
+use tracing::{debug, info, warn};
 
 pub const PROTOCOL_PREFIX: &str = "@esp32dash ";
 
 const MAX_LINE_BUFFER: usize = 4096;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const RPC_TIMEOUT_APPROVAL: Duration = Duration::from_secs(310);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -116,8 +118,11 @@ pub fn discover_devices(
     factory: Arc<dyn SessionFactory>,
     baud: u32,
 ) -> Result<Vec<DeviceListEntry>> {
+    let candidates = candidate_ports()?;
+    debug!(count = candidates.len(), "probing serial port candidates");
     let mut devices = Vec::new();
-    for port in candidate_ports()? {
+    for port in candidates {
+        debug!(port, "probing...");
         if let Ok((_, hello)) = connect_port(factory.as_ref(), &port, baud) {
             devices.push(DeviceListEntry { port, hello });
         }
@@ -232,7 +237,12 @@ fn worker_loop(
                             }
                         }
                         Ok(WorkerCommand::Rpc { request, reply }) => {
-                            let result = perform_rpc(session.as_mut(), request, RPC_TIMEOUT)
+                            let timeout = if request.method == "claude.approve" {
+                                RPC_TIMEOUT_APPROVAL
+                            } else {
+                                RPC_TIMEOUT
+                            };
+                            let result = perform_rpc(session.as_mut(), request, timeout)
                                 .map_err(|err| err.to_string());
                             let should_disconnect = result.is_err();
                             let _ = reply.send(result);
@@ -301,13 +311,22 @@ fn resolve_port(
     baud: u32,
 ) -> Result<String> {
     if let Some(port) = preferred_port {
+        info!(port, "using configured serial port");
         return Ok(port.to_string());
     }
 
+    info!("scanning serial ports for compatible devices...");
     let devices = discover_devices(factory, baud)?;
     match devices.len() {
         0 => bail!("no compatible esp32dash device found on serial ports"),
-        1 => Ok(devices[0].port.clone()),
+        1 => {
+            info!(
+                port = devices[0].port,
+                device_id = devices[0].hello.device_id,
+                "auto-discovered device"
+            );
+            Ok(devices[0].port.clone())
+        }
         _ => bail!("multiple compatible esp32dash devices found; set ESP32DASH_SERIAL_PORT"),
     }
 }
@@ -393,6 +412,13 @@ fn send_snapshot_update(session: &mut dyn DeviceSession, snapshot: &Snapshot) ->
 }
 
 fn set_connected(status: &Arc<Mutex<SerialConnectionStatus>>, port: &str, hello: &DeviceHello) {
+    info!(
+        port,
+        device_id = hello.device_id,
+        product = hello.product,
+        protocol = hello.protocol_version,
+        "connected to device"
+    );
     let mut guard = status.lock().expect("serial status mutex poisoned");
     guard.active_port = Some(port.to_string());
     guard.connected = true;
@@ -404,6 +430,7 @@ fn set_connected(status: &Arc<Mutex<SerialConnectionStatus>>, port: &str, hello:
 }
 
 fn set_disconnected(status: &Arc<Mutex<SerialConnectionStatus>>) {
+    debug!("device disconnected, will attempt reconnection");
     let mut guard = status.lock().expect("serial status mutex poisoned");
     guard.connected = false;
     guard.active_port = None;
@@ -414,6 +441,7 @@ fn set_disconnected(status: &Arc<Mutex<SerialConnectionStatus>>) {
 }
 
 fn set_last_error(status: &Arc<Mutex<SerialConnectionStatus>>, message: String) {
+    warn!(error = message, "device error");
     let mut guard = status.lock().expect("serial status mutex poisoned");
     guard.last_error = Some(message);
 }

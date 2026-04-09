@@ -11,6 +11,7 @@ idf_component_register(
     REQUIRES
         bsp_board
         core_app_manager
+        device_link
         lvgl__lvgl
         service_home
 )
