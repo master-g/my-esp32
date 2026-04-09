@@ -144,7 +144,29 @@ pub fn send_event_direct(
 ) -> Result<()> {
     let port = resolve_port(factory.clone(), preferred_port, baud)?;
     let (mut session, _) = connect_port(factory.as_ref(), &port, baud)?;
-    send_snapshot_update(session.as_mut(), snapshot)
+    send_snapshot_update(session.as_mut(), snapshot)?;
+    // Verify delivery with a round-trip RPC; the device processes
+    // frames in order, so a successful response guarantees the
+    // preceding event has been handled.
+    let _ = perform_rpc(
+        session.as_mut(),
+        RpcRequest {
+            method: "device.info".into(),
+            params: serde_json::json!({}),
+        },
+        RPC_TIMEOUT,
+    )?;
+    Ok(())
+}
+
+pub fn open_direct_session(
+    factory: Arc<dyn SessionFactory>,
+    preferred_port: Option<&str>,
+    baud: u32,
+) -> Result<Box<dyn DeviceSession>> {
+    let port = resolve_port(factory.clone(), preferred_port, baud)?;
+    let (session, _) = connect_port(factory.as_ref(), &port, baud)?;
+    Ok(session)
 }
 
 pub fn encode_frame_line(frame: &WireFrame) -> Result<String> {

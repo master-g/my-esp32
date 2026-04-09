@@ -24,9 +24,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
     agent::Config,
-    device::{UnixSerialFactory, discover_devices, request_direct, send_event_direct},
+    device::{UnixSerialFactory, discover_devices, open_direct_session, request_direct, send_event_direct},
     hooks::InstallHooksResult,
-    model::{AdminErrorResponse, AdminRpcResponse, Attention, LocalHookEvent, RawHookInput, RpcRequest, RunStatus, Snapshot},
+    model::{AdminErrorResponse, AdminRpcResponse, Attention, LocalHookEvent, RawHookInput, RpcRequest, RunStatus, Snapshot, WireFrame},
     normalizer::sanitize_prompt_preview,
 };
 
@@ -298,6 +298,8 @@ fn run_chibi_command(command: ChibiCommand) -> Result<()> {
         ChibiCommand::Demo { port } => {
             let factory = Arc::new(UnixSerialFactory);
             let baud = compat::serial_baud();
+            let mut session = open_direct_session(factory, port.as_deref(), baud)?;
+
             let steps: &[(ChibiState, &str)] = &[
                 (ChibiState::Idle, "Just chilling..."),
                 (ChibiState::Working, "Thinking hard..."),
@@ -313,12 +315,10 @@ fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                     Some(*bubble)
                 };
                 let snapshot = build_test_snapshot(state, bubble_text);
-                send_event_direct(
-                    factory.clone(),
-                    port.as_deref(),
-                    baud,
-                    &snapshot,
-                )?;
+                session.write_frame(&WireFrame::event(
+                    "claude.update",
+                    serde_json::to_value(&snapshot)?,
+                ))?;
                 println!(
                     "[{}/{}] state={} bubble={:?}",
                     i + 1,
