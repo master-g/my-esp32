@@ -64,6 +64,7 @@ void home_service_refresh_snapshot(void)
     s_snapshot.claude_connected = (claude_snap.conn_state == CLAUDE_CONN_CONNECTED);
     s_snapshot.claude_unread = claude_snap.unread;
     s_snapshot.claude_run_state = claude_snap.run_state;
+    copy_text(s_snapshot.claude_detail, sizeof(s_snapshot.claude_detail), claude_snap.detail);
 }
 
 void home_service_get_snapshot(home_snapshot_t *out)

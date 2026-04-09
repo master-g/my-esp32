@@ -30,6 +30,12 @@
 #define HOME_WEATHER_TEXT_Y_OFFSET 1
 #define HOME_WEATHER_TEXT_COLOR 0xe3edf2
 #define HOME_WEATHER_MUTED_COLOR 0x8da0ab
+#define HOME_BUBBLE_BG_COLOR 0x1e2830
+#define HOME_BUBBLE_TEXT_COLOR 0xe3edf2
+#define HOME_BUBBLE_MAX_W 200
+#define HOME_BUBBLE_PAD_H 6
+#define HOME_BUBBLE_PAD_V 4
+#define HOME_BUBBLE_RADIUS 8
 
 #define HOME_LEFT_HALF_W 280
 #define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
@@ -70,6 +76,8 @@ typedef struct {
     lv_obj_t *claude_icon;
     lv_obj_t *claude_dot;
     lv_obj_t *sprite_img;
+    lv_obj_t *bubble_box;
+    lv_obj_t *bubble_label;
 } app_home_view_t;
 
 typedef struct {
@@ -85,7 +93,7 @@ static sprite_ctx_t s_sprite;
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
     if (!connected) {
-        return SPRITE_STATE_IDLE;
+        return SPRITE_STATE_SLEEPING;
     }
 
     switch (rs) {
@@ -265,6 +273,24 @@ static void refresh_sprite(const home_snapshot_t *snapshot)
     }
 }
 
+static void refresh_bubble(const home_snapshot_t *snapshot)
+{
+    bool show;
+
+    if (s_view.bubble_box == NULL) {
+        return;
+    }
+
+    show = (snapshot->claude_detail[0] != '\0') && (s_sprite.state != SPRITE_STATE_SLEEPING);
+
+    if (show) {
+        lv_label_set_text(s_view.bubble_label, snapshot->claude_detail);
+        lv_obj_clear_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void refresh_view(void)
 {
     home_snapshot_t snapshot;
@@ -282,6 +308,7 @@ static void refresh_view(void)
     refresh_weather_summary(&snapshot);
     refresh_status_bar(&snapshot);
     refresh_sprite(&snapshot);
+    refresh_bubble(&snapshot);
 }
 
 static esp_err_t app_home_init(void)
@@ -388,6 +415,27 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     lv_obj_set_style_image_recolor(s_view.sprite_img, lv_color_white(), 0);
     lv_obj_set_style_image_recolor_opa(s_view.sprite_img, LV_OPA_TRANSP, 0);
     lv_obj_align(s_view.sprite_img, LV_ALIGN_RIGHT_MID, -60, 0);
+
+    /* ---- bubble above sprite ---- */
+
+    s_view.bubble_box = lv_obj_create(root);
+    lv_obj_remove_style_all(s_view.bubble_box);
+    lv_obj_set_width(s_view.bubble_box, HOME_BUBBLE_MAX_W);
+    lv_obj_set_height(s_view.bubble_box, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(s_view.bubble_box, lv_color_hex(HOME_BUBBLE_BG_COLOR), 0);
+    lv_obj_set_style_bg_opa(s_view.bubble_box, LV_OPA_80, 0);
+    lv_obj_set_style_radius(s_view.bubble_box, HOME_BUBBLE_RADIUS, 0);
+    lv_obj_set_style_pad_hor(s_view.bubble_box, HOME_BUBBLE_PAD_H, 0);
+    lv_obj_set_style_pad_ver(s_view.bubble_box, HOME_BUBBLE_PAD_V, 0);
+    lv_obj_align(s_view.bubble_box, LV_ALIGN_TOP_RIGHT, -20, 4);
+    lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+
+    s_view.bubble_label = lv_label_create(s_view.bubble_box);
+    lv_obj_set_width(s_view.bubble_label, HOME_BUBBLE_MAX_W - 2 * HOME_BUBBLE_PAD_H);
+    lv_label_set_long_mode(s_view.bubble_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_view.bubble_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_view.bubble_label, lv_color_hex(HOME_BUBBLE_TEXT_COLOR), 0);
+    lv_label_set_text_static(s_view.bubble_label, "");
 
     s_sprite.state = SPRITE_STATE_IDLE;
     s_sprite.anim = &s_sprite_anims[SPRITE_STATE_IDLE];

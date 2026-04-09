@@ -136,6 +136,17 @@ pub fn request_direct(
     perform_rpc(session.as_mut(), request, RPC_TIMEOUT)
 }
 
+pub fn send_event_direct(
+    factory: Arc<dyn SessionFactory>,
+    preferred_port: Option<&str>,
+    baud: u32,
+    snapshot: &Snapshot,
+) -> Result<()> {
+    let port = resolve_port(factory.clone(), preferred_port, baud)?;
+    let (mut session, _) = connect_port(factory.as_ref(), &port, baud)?;
+    send_snapshot_update(session.as_mut(), snapshot)
+}
+
 pub fn encode_frame_line(frame: &WireFrame) -> Result<String> {
     Ok(format!(
         "{}{}\n",

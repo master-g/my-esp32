@@ -26,6 +26,7 @@ typedef struct {
     bool claude_connected;
     bool claude_unread;
     claude_run_state_t claude_run_state;
+    char claude_detail[96];
 } home_snapshot_t;
 
 esp_err_t home_service_init(void);

@@ -24,9 +24,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
     agent::Config,
-    device::{UnixSerialFactory, discover_devices, request_direct},
+    device::{UnixSerialFactory, discover_devices, request_direct, send_event_direct},
     hooks::InstallHooksResult,
-    model::{AdminErrorResponse, AdminRpcResponse, LocalHookEvent, RawHookInput, RpcRequest},
+    model::{AdminErrorResponse, AdminRpcResponse, Attention, LocalHookEvent, RawHookInput, RpcRequest, RunStatus, Snapshot},
     normalizer::sanitize_prompt_preview,
 };
 
@@ -81,6 +81,15 @@ enum Command {
         about = "Install the Claude hook wrapper and register hooks in ~/.claude/settings.json"
     )]
     InstallHooks(InstallHooksArgs),
+    #[command(
+        about = "Test chibi sprite states and text bubbles on the ESP32 display",
+        subcommand_required = true,
+        arg_required_else_help = true
+    )]
+    Chibi {
+        #[command(subcommand)]
+        command: ChibiCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -143,6 +152,43 @@ struct InstallHooksArgs {
     force: bool,
 }
 
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum ChibiState {
+    Idle,
+    Working,
+    Waiting,
+    Sleeping,
+}
+
+impl ChibiState {
+    fn to_run_status(&self) -> RunStatus {
+        match self {
+            Self::Idle => RunStatus::Unknown,
+            Self::Working => RunStatus::Processing,
+            Self::Waiting => RunStatus::WaitingForInput,
+            Self::Sleeping => RunStatus::Ended,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum ChibiCommand {
+    #[command(about = "Send a specific sprite state (and optional text bubble) to the device")]
+    Test {
+        #[arg(long, value_enum, help = "Sprite state to display")]
+        state: ChibiState,
+        #[arg(long, help = "Text to show in the speech bubble")]
+        bubble: Option<String>,
+        #[arg(long, help = "Serial port (default: autodiscover)")]
+        port: Option<String>,
+    },
+    #[command(about = "Cycle through all sprite states with sample bubbles")]
+    Demo {
+        #[arg(long, help = "Serial port (default: autodiscover)")]
+        port: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -171,6 +217,7 @@ async fn main() -> Result<()> {
         Command::InstallLaunchd => install_launchd(),
         Command::UninstallLaunchd => uninstall_launchd(),
         Command::InstallHooks(args) => install_hooks(args),
+        Command::Chibi { command } => run_chibi_command(command),
     }
 }
 
@@ -221,6 +268,90 @@ pub(crate) async fn run_request(port: Option<&str>, request: RpcRequest) -> Resu
         compat::serial_baud(),
         request,
     )
+}
+
+fn run_chibi_command(command: ChibiCommand) -> Result<()> {
+    match command {
+        ChibiCommand::Test {
+            state,
+            bubble,
+            port,
+        } => {
+            let snapshot = build_test_snapshot(&state, bubble.as_deref());
+            send_event_direct(
+                Arc::new(UnixSerialFactory),
+                port.as_deref(),
+                compat::serial_baud(),
+                &snapshot,
+            )?;
+            println!(
+                "sent state={} bubble={:?}",
+                snapshot.status,
+                if snapshot.detail.is_empty() {
+                    None
+                } else {
+                    Some(&snapshot.detail)
+                }
+            );
+            Ok(())
+        }
+        ChibiCommand::Demo { port } => {
+            let factory = Arc::new(UnixSerialFactory);
+            let baud = compat::serial_baud();
+            let steps: &[(ChibiState, &str)] = &[
+                (ChibiState::Idle, "Just chilling..."),
+                (ChibiState::Working, "Thinking hard..."),
+                (ChibiState::Working, "Running tests"),
+                (ChibiState::Waiting, "Need your input!"),
+                (ChibiState::Sleeping, ""),
+            ];
+
+            for (i, (state, bubble)) in steps.iter().enumerate() {
+                let bubble_text = if bubble.is_empty() {
+                    None
+                } else {
+                    Some(*bubble)
+                };
+                let snapshot = build_test_snapshot(state, bubble_text);
+                send_event_direct(
+                    factory.clone(),
+                    port.as_deref(),
+                    baud,
+                    &snapshot,
+                )?;
+                println!(
+                    "[{}/{}] state={} bubble={:?}",
+                    i + 1,
+                    steps.len(),
+                    snapshot.status,
+                    bubble_text
+                );
+                if i + 1 < steps.len() {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                }
+            }
+            println!("demo complete");
+            Ok(())
+        }
+    }
+}
+
+fn build_test_snapshot(state: &ChibiState, bubble: Option<&str>) -> Snapshot {
+    let status = state.to_run_status();
+    Snapshot {
+        seq: 1,
+        source: "chibi_test".to_string(),
+        session_id: "test-session".to_string(),
+        event: "Stop".to_string(),
+        status: status.as_str().to_string(),
+        title: "Chibi Test".to_string(),
+        workspace: String::new(),
+        detail: bubble.unwrap_or_default().to_string(),
+        permission_mode: "default".to_string(),
+        ts: now_epoch(),
+        unread: true,
+        attention: Attention::Medium,
+    }
 }
 
 async fn ingest_from_stdin() -> Result<()> {
