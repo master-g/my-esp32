@@ -4,7 +4,7 @@
  * Opts: --font
  * /Users/mg/Documents/workspace/personal/esp32/tools/lv_font_pipeline/.cache/upstream/bootstrap-icons.woff
  * -r
- * 0xF914,0xF61C,0xF61B,0xF2B7,0xF5A1,0xF495,0xF2BD,0xF2AF,0xF2C4,0xF2A1,0xF29C,0xF2B3,0xF2B4,0xF2BB,0xF2AA
+ * 0xF914,0xF61C,0xF619,0xF61B,0xF2B7,0xF5A1,0xF495,0xF2BD,0xF2AF,0xF2C4,0xF2A1,0xF29C,0xF2B3,0xF2B4,0xF2BB,0xF2AA
  * --size 16 --bpp 4 --no-compress --format lvgl --lv-include lvgl.h -o
  * /Users/mg/Documents/workspace/personal/esp32/tools/lv_font_pipeline/../../src/apps/app_home/src/generated/app_home_status_font.c
  ******************************************************************************/
@@ -150,6 +150,10 @@ static LV_ATTRIBUTE_LARGE_CONST const uint8_t glyph_bitmap[] = {
     0x0, 0x0, 0x84, 0x0, 0x6, 0x60, 0x0, 0x48, 0x0, 0x0, 0x0, 0x0, 0x7, 0x70, 0x0, 0x0, 0x0, 0x0,
     0x0, 0x0, 0x6, 0x60, 0x0, 0x0, 0x0,
 
+    /* U+F619 "" */
+    0x7, 0xce, 0xec, 0x70, 0x7, 0x30, 0x3, 0x70, 0x0, 0x8, 0x80, 0x0, 0x0, 0xc, 0xc0, 0x0, 0x0, 0x0,
+    0x0, 0x0,
+
     /* U+F61B "" */
     0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x4e, 0x20, 0x0, 0x2,
     0x7b, 0xef, 0xfe, 0x44, 0xe4, 0x0, 0x2, 0xbe, 0x95, 0x10, 0x1, 0x4e, 0x46, 0x20, 0x5e, 0x70,
@@ -199,16 +203,17 @@ static const lv_font_fmt_txt_glyph_dsc_t glyph_dsc[] = {
     {.bitmap_index = 1240, .adv_w = 256, .box_w = 18, .box_h = 12, .ofs_x = -1, .ofs_y = 2},
     {.bitmap_index = 1348, .adv_w = 256, .box_w = 16, .box_h = 17, .ofs_x = 0, .ofs_y = 0},
     {.bitmap_index = 1484, .adv_w = 256, .box_w = 16, .box_h = 16, .ofs_x = 0, .ofs_y = 0},
-    {.bitmap_index = 1612, .adv_w = 256, .box_w = 16, .box_h = 13, .ofs_x = 0, .ofs_y = 2},
-    {.bitmap_index = 1716, .adv_w = 256, .box_w = 16, .box_h = 12, .ofs_x = 0, .ofs_y = 2},
-    {.bitmap_index = 1812, .adv_w = 256, .box_w = 16, .box_h = 17, .ofs_x = 0, .ofs_y = -1}};
+    {.bitmap_index = 1612, .adv_w = 256, .box_w = 8, .box_h = 5, .ofs_x = 4, .ofs_y = 2},
+    {.bitmap_index = 1632, .adv_w = 256, .box_w = 16, .box_h = 13, .ofs_x = 0, .ofs_y = 2},
+    {.bitmap_index = 1736, .adv_w = 256, .box_w = 16, .box_h = 12, .ofs_x = 0, .ofs_y = 2},
+    {.bitmap_index = 1832, .adv_w = 256, .box_w = 16, .box_h = 17, .ofs_x = 0, .ofs_y = -1}};
 
 /*---------------------
  *  CHARACTER MAPPING
  *--------------------*/
 
-static const uint16_t unicode_list_0[] = {0x0,  0x5,  0xe,   0x13,  0x17,  0x18,  0x1b, 0x1f,
-                                          0x21, 0x28, 0x1f9, 0x305, 0x37f, 0x380, 0x678};
+static const uint16_t unicode_list_0[] = {0x0,  0x5,  0xe,   0x13,  0x17,  0x18,  0x1b,  0x1f,
+                                          0x21, 0x28, 0x1f9, 0x305, 0x37d, 0x37f, 0x380, 0x678};
 
 /*Collect the unicode lists and glyph_id offsets*/
 static const lv_font_fmt_txt_cmap_t cmaps[] = {{.range_start = 62108,
@@ -216,7 +221,7 @@ static const lv_font_fmt_txt_cmap_t cmaps[] = {{.range_start = 62108,
                                                 .glyph_id_start = 1,
                                                 .unicode_list = unicode_list_0,
                                                 .glyph_id_ofs_list = NULL,
-                                                .list_length = 15,
+                                                .list_length = 16,
                                                 .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY}};
 
 /*--------------------

@@ -13,7 +13,7 @@
 
 #define HOME_STATUS_BAR_HEIGHT 20
 #define HOME_STATUS_BAR_WIDTH 80
-#define HOME_STATUS_ICON_GAP 12
+#define HOME_STATUS_ICON_GAP 6
 #define HOME_STATUS_ICON_SIZE 16
 #define HOME_STATUS_ITEM_BOX_SIZE (HOME_STATUS_ICON_SIZE + 4)
 #define HOME_STATUS_BAR_Y 4
@@ -91,6 +91,7 @@ typedef struct {
 static app_home_view_t s_view;
 static sprite_ctx_t s_sprite;
 static lv_timer_t *s_bubble_timer;
+static bool s_bubble_dismissed;
 
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
@@ -213,7 +214,7 @@ static void refresh_status_bar(const home_snapshot_t *snapshot)
         lv_label_set_text_static(s_view.wifi_icon, APP_HOME_SYMBOL_WIFI);
     } else if (snapshot->wifi_connecting) {
         wifi_color = lv_color_hex(HOME_WIFI_CONNECTING_COLOR);
-        lv_label_set_text_static(s_view.wifi_icon, APP_HOME_SYMBOL_WIFI);
+        lv_label_set_text_static(s_view.wifi_icon, APP_HOME_SYMBOL_WIFI_1);
     } else {
         lv_label_set_text_static(s_view.wifi_icon, APP_HOME_SYMBOL_WIFI_OFF);
     }
@@ -226,7 +227,6 @@ static void refresh_status_bar(const home_snapshot_t *snapshot)
 
     lv_obj_set_style_text_color(s_view.wifi_icon, wifi_color, 0);
     lv_obj_set_style_text_color(s_view.claude_icon, claude_color, 0);
-    set_status_dot_visible(s_view.wifi_dot, snapshot->wifi_connecting && !snapshot->wifi_connected);
     set_status_dot_visible(s_view.claude_dot, snapshot->claude_unread);
 }
 
@@ -282,6 +282,7 @@ static void refresh_sprite(const home_snapshot_t *snapshot)
 static void bubble_fade_cb(lv_timer_t *t)
 {
     (void)t;
+    s_bubble_dismissed = true;
     if (s_view.bubble_box != NULL) {
         lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
     }
@@ -305,18 +306,21 @@ static void refresh_bubble(const home_snapshot_t *snapshot)
         const char *cur = lv_label_get_text(s_view.bubble_label);
         bool text_changed = (cur == NULL || strcmp(cur, snapshot->claude_detail) != 0);
 
-        lv_label_set_text(s_view.bubble_label, snapshot->claude_detail);
-        lv_obj_clear_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
-
         if (text_changed) {
+            s_bubble_dismissed = false;
+            lv_label_set_text(s_view.bubble_label, snapshot->claude_detail);
+            lv_obj_clear_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
             if (s_bubble_timer != NULL) {
                 lv_timer_delete(s_bubble_timer);
             }
             s_bubble_timer = lv_timer_create(bubble_fade_cb, HOME_BUBBLE_FADE_MS, NULL);
             lv_timer_set_repeat_count(s_bubble_timer, 1);
+        } else if (!s_bubble_dismissed) {
+            lv_obj_clear_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
         }
     } else {
         lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+        s_bubble_dismissed = false;
         if (s_bubble_timer != NULL) {
             lv_timer_delete(s_bubble_timer);
             s_bubble_timer = NULL;
