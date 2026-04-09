@@ -49,30 +49,34 @@ static int64_t get_sleep_timeout_us(power_source_t source)
 
 static void apply_policy_output(void)
 {
-    const power_policy_output_t *output = power_policy_get_output();
+    power_policy_output_t output;
 
-    bsp_board_set_backlight_percent(output->brightness_percent);
+    power_policy_get_output(&output);
+    bsp_board_set_backlight_percent(output.brightness_percent);
 }
 
 static void maybe_update_display_state_from_idle(void)
 {
-    const power_policy_input_t *input = system_state_get_power_policy_input();
-    const int64_t idle_us = esp_timer_get_time() - s_last_activity_us;
+    power_policy_input_t input;
+    int64_t idle_us;
 
-    if (input->power_source == POWER_SOURCE_USB) {
-        if (input->display_state != DISPLAY_STATE_ACTIVE) {
+    system_state_get_power_policy_input(&input);
+    idle_us = esp_timer_get_time() - s_last_activity_us;
+
+    if (input.power_source == POWER_SOURCE_USB) {
+        if (input.display_state != DISPLAY_STATE_ACTIVE) {
             ESP_LOGI(TAG, "USB power -> force ACTIVE");
             system_state_set_display_state(DISPLAY_STATE_ACTIVE);
         }
         return;
     }
 
-    if (input->display_state == DISPLAY_STATE_ACTIVE &&
-        idle_us >= get_dim_timeout_us(input->power_source)) {
+    if (input.display_state == DISPLAY_STATE_ACTIVE &&
+        idle_us >= get_dim_timeout_us(input.power_source)) {
         ESP_LOGI(TAG, "Idle timeout -> DIM");
         system_state_set_display_state(DISPLAY_STATE_DIM);
-    } else if (input->display_state == DISPLAY_STATE_DIM &&
-               idle_us >= get_sleep_timeout_us(input->power_source)) {
+    } else if (input.display_state == DISPLAY_STATE_DIM &&
+               idle_us >= get_sleep_timeout_us(input.power_source)) {
         ESP_LOGI(TAG, "Idle timeout -> SLEEP");
         system_state_set_display_state(DISPLAY_STATE_SLEEP);
     }
@@ -80,7 +84,7 @@ static void maybe_update_display_state_from_idle(void)
 
 static void reconcile_user_activity(void)
 {
-    const power_policy_input_t *input = system_state_get_power_policy_input();
+    power_policy_input_t input;
     const uint32_t activity_seq = system_state_get_user_activity_seq();
 
     if (activity_seq == s_seen_activity_seq) {
@@ -90,7 +94,8 @@ static void reconcile_user_activity(void)
     s_seen_activity_seq = activity_seq;
     s_last_activity_us = esp_timer_get_time();
 
-    if (input->display_state != DISPLAY_STATE_ACTIVE) {
+    system_state_get_power_policy_input(&input);
+    if (input.display_state != DISPLAY_STATE_ACTIVE) {
         ESP_LOGI(TAG, "User activity -> ACTIVE");
         system_state_set_display_state(DISPLAY_STATE_ACTIVE);
     }
@@ -147,8 +152,12 @@ esp_err_t power_runtime_init(void)
     ESP_RETURN_ON_ERROR(event_bus_subscribe(power_runtime_event_handler, NULL), TAG,
                         "failed to subscribe power runtime");
 
-    xTaskCreatePinnedToCore(power_runtime_task, "power_runtime", POWER_RUNTIME_TASK_STACK, NULL,
-                            POWER_RUNTIME_TASK_PRIO, &s_task_handle, 1);
+    {
+        BaseType_t ret = xTaskCreatePinnedToCore(power_runtime_task, "power_runtime",
+                                                  POWER_RUNTIME_TASK_STACK, NULL,
+                                                  POWER_RUNTIME_TASK_PRIO, &s_task_handle, 1);
+        ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "power runtime task create failed");
+    }
 
     s_initialized = true;
     (void)xQueueSend(s_cmd_queue, &cmd, 0);

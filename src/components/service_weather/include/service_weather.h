@@ -53,6 +53,6 @@ void weather_service_request_refresh(void);
 bool weather_service_can_refresh(void);
 void weather_service_get_location_config(weather_location_config_t *config);
 esp_err_t weather_service_apply_location_config(const weather_location_config_t *config);
-const weather_snapshot_t *weather_service_get_snapshot(void);
+void weather_service_get_snapshot(weather_snapshot_t *out);
 
 #endif

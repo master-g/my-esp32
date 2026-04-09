@@ -13,6 +13,7 @@
 #include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net_manager.h"
 #include "nvs.h"
@@ -25,6 +26,7 @@ static const char *s_ntp_servers[] = {
 };
 
 static time_snapshot_t s_snapshot;
+static SemaphoreHandle_t s_mutex;
 static QueueHandle_t s_command_queue;
 static bool s_rtc_valid;
 static bool s_ntp_synced;
@@ -239,6 +241,8 @@ static void time_service_event_handler(const app_event_t *event, void *context)
 esp_err_t time_service_init(void)
 {
     memset(&s_snapshot, 0, sizeof(s_snapshot));
+    s_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_mutex != NULL, ESP_ERR_NO_MEM, TAG, "time mutex alloc failed");
     s_command_queue = NULL;
     s_rtc_valid = false;
     s_ntp_synced = false;
@@ -264,7 +268,11 @@ esp_err_t time_service_start(void)
     s_command_queue = xQueueCreate(4, sizeof(time_service_cmd_t));
     ESP_RETURN_ON_FALSE(s_command_queue != NULL, ESP_ERR_NO_MEM, TAG,
                         "failed to create time queue");
-    xTaskCreatePinnedToCore(time_service_task, "time_service", 4096, NULL, 4, NULL, 1);
+    {
+        BaseType_t ret = xTaskCreatePinnedToCore(time_service_task, "time_service", 4096, NULL, 4,
+                                                  NULL, 1);
+        ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "time task create failed");
+    }
     s_started = true;
 
     if (net_manager_is_connected() && !s_ntp_synced) {
@@ -287,10 +295,16 @@ esp_err_t time_service_sync_ntp(void)
     return (xQueueSend(s_command_queue, &cmd, 0) == pdTRUE) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
-const time_snapshot_t *time_service_get_snapshot(void)
+void time_service_get_snapshot(time_snapshot_t *out)
 {
+    if (out == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     time_service_refresh_now();
-    return &s_snapshot;
+    *out = s_snapshot;
+    xSemaphoreGive(s_mutex);
 }
 
 const char *time_service_get_timezone_name(void) { return s_timezone_name; }

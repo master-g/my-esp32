@@ -45,22 +45,24 @@ static void app_trading_resume(void)
 
 static void app_trading_handle_event(const app_event_t *event)
 {
-    const power_policy_output_t *policy = NULL;
+    power_policy_output_t policy;
 
     if (event == NULL) {
         return;
     }
 
     if (event->type == APP_EVENT_POWER_CHANGED) {
-        policy = power_policy_get_output();
-        market_service_on_refresh_mode_changed(policy->market_mode);
+        power_policy_get_output(&policy);
+        market_service_on_refresh_mode_changed(policy.market_mode);
     }
 
     if ((event->type == APP_EVENT_ENTER || event->type == APP_EVENT_POWER_CHANGED) &&
         s_status != NULL) {
-        const market_snapshot_t *snapshot = market_service_get_snapshot();
-        lv_label_set_text_fmt(s_status, "%s\nprice=%s\nmode=%d", snapshot->pair_label,
-                              snapshot->price_text, power_policy_get_output()->market_mode);
+        market_snapshot_t snapshot;
+        market_service_get_snapshot(&snapshot);
+        power_policy_get_output(&policy);
+        lv_label_set_text_fmt(s_status, "%s\nprice=%s\nmode=%d", snapshot.pair_label,
+                              snapshot.price_text, policy.market_mode);
     }
 }
 

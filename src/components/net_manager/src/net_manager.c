@@ -13,6 +13,7 @@
 #include "esp_wifi.h"
 #include "event_bus.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/timers.h"
 #include "nvs.h"
 #include "system_state.h"
@@ -26,6 +27,7 @@
 
 static const char *TAG = "net_manager";
 static net_snapshot_t s_snapshot;
+static SemaphoreHandle_t s_mutex;
 static bool s_started;
 static bool s_wifi_stack_ready;
 static bool s_wifi_driver_started;
@@ -45,7 +47,7 @@ static void publish_net_event(void)
 {
     app_event_t event = {
         .type = APP_EVENT_NET_CHANGED,
-        .payload = &s_snapshot,
+        .payload = NULL,
     };
 
     event_bus_publish(&event);
@@ -239,7 +241,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     (void)arg;
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_snapshot.state = s_snapshot.has_credentials ? NET_STATE_CONNECTING : NET_STATE_DOWN;
+        xSemaphoreGive(s_mutex);
         publish_net_event();
         if (s_snapshot.has_credentials) {
             esp_wifi_connect();
@@ -251,12 +255,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         const wifi_event_sta_disconnected_t *event =
             (const wifi_event_sta_disconnected_t *)event_data;
 
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_snapshot.state = s_snapshot.has_credentials ? NET_STATE_CONNECTING : NET_STATE_DOWN;
         s_snapshot.wifi_connected = false;
         s_snapshot.ip_ready = false;
         s_snapshot.auth_failed = is_auth_failure_reason(event->reason);
         s_snapshot.last_disconnect_reason = event->reason;
         s_snapshot.ip_addr[0] = '\0';
+        xSemaphoreGive(s_mutex);
         system_state_set_wifi_connected(false);
         publish_net_event();
         schedule_retry();
@@ -268,12 +274,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
 
         s_disconnect_count = 0;
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_snapshot.state = NET_STATE_UP;
         s_snapshot.wifi_connected = true;
         s_snapshot.ip_ready = true;
         s_snapshot.auth_failed = false;
         s_snapshot.last_disconnect_reason = 0;
         snprintf(s_snapshot.ip_addr, sizeof(s_snapshot.ip_addr), IPSTR, IP2STR(&event->ip_info.ip));
+        xSemaphoreGive(s_mutex);
         system_state_set_wifi_connected(true);
         publish_net_event();
         ESP_LOGI(TAG, "Got IP: %s", s_snapshot.ip_addr);
@@ -285,6 +293,8 @@ esp_err_t net_manager_init(void)
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     s_snapshot.state = NET_STATE_DOWN;
     s_snapshot.last_disconnect_reason = 0;
+    s_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_mutex != NULL, ESP_ERR_NO_MEM, TAG, "net mutex alloc failed");
     s_started = false;
     s_wifi_stack_ready = false;
     s_wifi_driver_started = false;
@@ -311,7 +321,9 @@ esp_err_t net_manager_start(void)
     }
 
     s_started = true;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_snapshot.state = s_snapshot.has_credentials ? NET_STATE_CONNECTING : NET_STATE_DOWN;
+    xSemaphoreGive(s_mutex);
     if (!s_snapshot.has_credentials) {
         ESP_LOGW(TAG, "Wi-Fi credentials not configured; Wi-Fi stack is ready for scans");
     }
@@ -319,9 +331,26 @@ esp_err_t net_manager_start(void)
     return ESP_OK;
 }
 
-const net_snapshot_t *net_manager_get_snapshot(void) { return &s_snapshot; }
+void net_manager_get_snapshot(net_snapshot_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
 
-bool net_manager_is_connected(void) { return s_snapshot.wifi_connected && s_snapshot.ip_ready; }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    *out = s_snapshot;
+    xSemaphoreGive(s_mutex);
+}
+
+bool net_manager_is_connected(void)
+{
+    bool connected;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    connected = s_snapshot.wifi_connected && s_snapshot.ip_ready;
+    xSemaphoreGive(s_mutex);
+    return connected;
+}
 
 bool net_manager_has_credentials(void) { return s_snapshot.has_credentials; }
 
@@ -347,9 +376,11 @@ esp_err_t net_manager_apply_credentials(const char *ssid, const char *password)
 
     snprintf(s_snapshot.ssid, sizeof(s_snapshot.ssid), "%s", ssid);
     snprintf(s_wifi_password, sizeof(s_wifi_password), "%s", password);
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_snapshot.has_credentials = has_text(s_snapshot.ssid);
     s_snapshot.auth_failed = false;
     s_snapshot.last_disconnect_reason = 0;
+    xSemaphoreGive(s_mutex);
 
     if (!s_started) {
         return ESP_OK;
@@ -364,14 +395,18 @@ esp_err_t net_manager_apply_credentials(const char *ssid, const char *password)
 
     xTimerStop(s_retry_timer, 0);
     if (s_snapshot.has_credentials) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_snapshot.state = NET_STATE_CONNECTING;
+        xSemaphoreGive(s_mutex);
         esp_wifi_disconnect();
         esp_wifi_connect();
     } else {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_snapshot.state = NET_STATE_DOWN;
         s_snapshot.wifi_connected = false;
         s_snapshot.ip_ready = false;
         s_snapshot.ip_addr[0] = '\0';
+        xSemaphoreGive(s_mutex);
         system_state_set_wifi_connected(false);
         esp_wifi_disconnect();
     }
@@ -441,6 +476,7 @@ esp_err_t net_manager_scan_access_points(net_scan_ap_t *results, size_t max_resu
 
 void net_manager_set_connected_for_test(bool connected)
 {
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_snapshot.wifi_connected = connected;
     s_snapshot.ip_ready = connected;
     s_snapshot.auth_failed = false;
@@ -453,4 +489,5 @@ void net_manager_set_connected_for_test(bool connected)
         s_snapshot.ssid[0] = '\0';
         s_snapshot.ip_addr[0] = '\0';
     }
+    xSemaphoreGive(s_mutex);
 }

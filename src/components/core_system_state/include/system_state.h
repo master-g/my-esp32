@@ -8,7 +8,7 @@
 #include "esp_err.h"
 
 esp_err_t system_state_init(void);
-const power_policy_input_t *system_state_get_power_policy_input(void);
+void system_state_get_power_policy_input(power_policy_input_t *out);
 uint32_t system_state_get_user_activity_seq(void);
 void system_state_set_power_source(power_source_t power_source);
 void system_state_set_display_state(display_state_t display_state);

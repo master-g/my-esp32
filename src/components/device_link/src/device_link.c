@@ -631,9 +631,12 @@ static cJSON *build_wifi_scan_result(void)
 
 static cJSON *build_device_info(void)
 {
-    const net_snapshot_t *net = net_manager_get_snapshot();
+    net_snapshot_t net;
     const esp_app_desc_t *app = esp_app_get_description();
-    cJSON *result = cJSON_CreateObject();
+    cJSON *result = NULL;
+
+    net_manager_get_snapshot(&net);
+    result = cJSON_CreateObject();
 
     if (result == NULL) {
         return NULL;
@@ -644,12 +647,12 @@ static cJSON *build_device_info(void)
     cJSON_AddNumberToObject(result, "protocol_version", DEVICE_LINK_PROTOCOL_VERSION);
     cJSON_AddStringToObject(result, "firmware_version", app->version);
     cJSON_AddStringToObject(result, "wifi_state",
-                            (net->state == NET_STATE_UP)           ? "up"
-                            : (net->state == NET_STATE_CONNECTING) ? "connecting"
+                            (net.state == NET_STATE_UP)           ? "up"
+                            : (net.state == NET_STATE_CONNECTING) ? "connecting"
                                                                    : "down");
-    cJSON_AddStringToObject(result, "ssid", net->ssid);
-    cJSON_AddStringToObject(result, "ip_addr", net->ip_addr);
-    cJSON_AddBoolToObject(result, "has_credentials", net->has_credentials);
+    cJSON_AddStringToObject(result, "ssid", net.ssid);
+    cJSON_AddStringToObject(result, "ip_addr", net.ip_addr);
+    cJSON_AddBoolToObject(result, "has_credentials", net.has_credentials);
     return result;
 }
 
@@ -860,8 +863,13 @@ esp_err_t device_link_init(void)
     snprintf(s_device_id, sizeof(s_device_id), "esp32-dashboard-%02x%02x%02x", mac[3], mac[4],
              mac[5]);
 
-    xTaskCreatePinnedToCore(reader_task, "device_link_rx", 6144, NULL, 4, NULL, 1);
-    xTaskCreatePinnedToCore(hello_task, "device_link_hello", 4096, NULL, 2, NULL, 1);
+    {
+        BaseType_t ret;
+        ret = xTaskCreatePinnedToCore(reader_task, "device_link_rx", 6144, NULL, 4, NULL, 1);
+        ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "reader task create failed");
+        ret = xTaskCreatePinnedToCore(hello_task, "device_link_hello", 4096, NULL, 2, NULL, 1);
+        ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "hello task create failed");
+    }
     s_started = true;
     return ESP_OK;
 }

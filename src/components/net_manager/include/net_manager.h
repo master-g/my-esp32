@@ -40,7 +40,7 @@ typedef struct {
 
 esp_err_t net_manager_init(void);
 esp_err_t net_manager_start(void);
-const net_snapshot_t *net_manager_get_snapshot(void);
+void net_manager_get_snapshot(net_snapshot_t *out);
 bool net_manager_is_connected(void);
 bool net_manager_has_credentials(void);
 void net_manager_get_credentials_summary(net_credentials_summary_t *summary);

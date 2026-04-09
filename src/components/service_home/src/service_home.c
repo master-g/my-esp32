@@ -33,35 +33,46 @@ esp_err_t home_service_init(void)
 
 void home_service_refresh_snapshot(void)
 {
-    const time_snapshot_t *time_snapshot = time_service_get_snapshot();
-    const weather_snapshot_t *weather_snapshot = weather_service_get_snapshot();
-    const claude_snapshot_t *claude_snapshot = claude_service_get_snapshot();
-    const net_snapshot_t *net_snapshot = net_manager_get_snapshot();
+    time_snapshot_t time_snap;
+    weather_snapshot_t weather_snap;
+    claude_snapshot_t claude_snap;
+    net_snapshot_t net_snap;
+
+    time_service_get_snapshot(&time_snap);
+    weather_service_get_snapshot(&weather_snap);
+    claude_service_get_snapshot(&claude_snap);
+    net_manager_get_snapshot(&net_snap);
 
     memset(&s_snapshot, 0, sizeof(s_snapshot));
-    s_snapshot.rtc_valid = time_snapshot->rtc_valid;
-    s_snapshot.ntp_synced = time_snapshot->ntp_synced;
-    s_snapshot.wifi_connected = net_snapshot->wifi_connected;
-    s_snapshot.wifi_connecting = (net_snapshot->state == NET_STATE_CONNECTING);
-    copy_text(s_snapshot.time_text, sizeof(s_snapshot.time_text), time_snapshot->time_text);
-    copy_text(s_snapshot.date_text, sizeof(s_snapshot.date_text), time_snapshot->date_text);
-    copy_text(s_snapshot.weekday_text, sizeof(s_snapshot.weekday_text),
-              time_snapshot->weekday_text);
+    s_snapshot.rtc_valid = time_snap.rtc_valid;
+    s_snapshot.ntp_synced = time_snap.ntp_synced;
+    s_snapshot.wifi_connected = net_snap.wifi_connected;
+    s_snapshot.wifi_connecting = (net_snap.state == NET_STATE_CONNECTING);
+    copy_text(s_snapshot.time_text, sizeof(s_snapshot.time_text), time_snap.time_text);
+    copy_text(s_snapshot.date_text, sizeof(s_snapshot.date_text), time_snap.date_text);
+    copy_text(s_snapshot.weekday_text, sizeof(s_snapshot.weekday_text), time_snap.weekday_text);
 
-    s_snapshot.weather_available = (weather_snapshot->state == WEATHER_LIVE) ||
-                                   (weather_snapshot->state == WEATHER_STALE) ||
-                                   (weather_snapshot->state == WEATHER_REFRESHING);
-    s_snapshot.weather_stale = (weather_snapshot->state == WEATHER_STALE);
-    s_snapshot.updated_at_epoch_s = weather_snapshot->updated_at_epoch_s;
-    copy_text(s_snapshot.weather_text, sizeof(s_snapshot.weather_text), weather_snapshot->text);
-    copy_text(s_snapshot.city_text, sizeof(s_snapshot.city_text), weather_snapshot->city);
-    s_snapshot.temperature_c_tenths = weather_snapshot->temperature_c_tenths;
-    s_snapshot.weather_icon_id = weather_snapshot->icon_id;
-    s_snapshot.claude_connected = (claude_snapshot->conn_state == CLAUDE_CONN_CONNECTED);
-    s_snapshot.claude_unread = claude_snapshot->unread;
+    s_snapshot.weather_available = (weather_snap.state == WEATHER_LIVE) ||
+                                   (weather_snap.state == WEATHER_STALE) ||
+                                   (weather_snap.state == WEATHER_REFRESHING);
+    s_snapshot.weather_stale = (weather_snap.state == WEATHER_STALE);
+    s_snapshot.updated_at_epoch_s = weather_snap.updated_at_epoch_s;
+    copy_text(s_snapshot.weather_text, sizeof(s_snapshot.weather_text), weather_snap.text);
+    copy_text(s_snapshot.city_text, sizeof(s_snapshot.city_text), weather_snap.city);
+    s_snapshot.temperature_c_tenths = weather_snap.temperature_c_tenths;
+    s_snapshot.weather_icon_id = weather_snap.icon_id;
+    s_snapshot.claude_connected = (claude_snap.conn_state == CLAUDE_CONN_CONNECTED);
+    s_snapshot.claude_unread = claude_snap.unread;
 }
 
-const home_snapshot_t *home_service_get_snapshot(void) { return &s_snapshot; }
+void home_service_get_snapshot(home_snapshot_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    *out = s_snapshot;
+}
 
 void home_service_request_weather_refresh(void)
 {

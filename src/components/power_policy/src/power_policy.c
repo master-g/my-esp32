@@ -2,8 +2,12 @@
 
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 static power_policy_input_t s_input;
 static power_policy_output_t s_output;
+static SemaphoreHandle_t s_mutex;
 
 static bool same_input(const power_policy_input_t *a, const power_policy_input_t *b)
 {
@@ -78,6 +82,11 @@ static power_policy_output_t compute_output(const power_policy_input_t *input)
 
 esp_err_t power_policy_init(void)
 {
+    s_mutex = xSemaphoreCreateMutex();
+    if (s_mutex == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     memset(&s_input, 0, sizeof(s_input));
     memset(&s_output, 0, sizeof(s_output));
     s_input.power_source = POWER_SOURCE_USB;
@@ -96,25 +105,52 @@ bool power_policy_on_input_changed(const power_policy_input_t *input)
         return false;
     }
 
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     next_output = compute_output(input);
     changed = !same_input(&s_input, input) || !same_output(&s_output, &next_output);
     s_input = *input;
     s_output = next_output;
+    xSemaphoreGive(s_mutex);
     return changed;
 }
 
-const power_policy_input_t *power_policy_get_input(void) { return &s_input; }
+void power_policy_get_input(power_policy_input_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
 
-const power_policy_output_t *power_policy_get_output(void) { return &s_output; }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    *out = s_input;
+    xSemaphoreGive(s_mutex);
+}
+
+void power_policy_get_output(power_policy_output_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    *out = s_output;
+    xSemaphoreGive(s_mutex);
+}
 
 bool power_policy_is_refresh_mode(refresh_mode_t expected, app_id_t app_id)
 {
+    bool result = false;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     switch (app_id) {
     case APP_ID_NOTIFY:
-        return s_output.claude_mode == expected;
+        result = (s_output.claude_mode == expected);
+        break;
     case APP_ID_TRADING:
-        return s_output.market_mode == expected;
+        result = (s_output.market_mode == expected);
+        break;
     default:
-        return false;
+        break;
     }
+    xSemaphoreGive(s_mutex);
+    return result;
 }

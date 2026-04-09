@@ -10,6 +10,7 @@
 #include "app_trading.h"
 #include "bsp_board.h"
 #include "bsp_board_config.h"
+#include "bsp_display.h"
 #include "device_link.h"
 #include "esp_check.h"
 #include "esp_err.h"
@@ -84,6 +85,7 @@ esp_err_t bootstrap_start(void)
     ESP_RETURN_ON_ERROR(power_policy_init(), TAG, "power policy init failed");
     ESP_RETURN_ON_ERROR(system_state_init(), TAG, "system state init failed");
     ESP_RETURN_ON_ERROR(bsp_board_init(), TAG, "board init failed");
+    bsp_display_set_ui_callback(app_manager_process_ui_events);
     ESP_RETURN_ON_ERROR(power_runtime_init(), TAG, "power runtime init failed");
     ESP_RETURN_ON_ERROR(net_manager_init(), TAG, "net manager init failed");
     ESP_RETURN_ON_ERROR(time_service_init(), TAG, "time service init failed");

@@ -57,7 +57,7 @@ esp_err_t market_service_init(void);
 void market_service_select_pair(market_pair_id_t pair);
 void market_service_select_interval(market_interval_id_t interval);
 void market_service_on_refresh_mode_changed(refresh_mode_t mode);
-const market_snapshot_t *market_service_get_snapshot(void);
+void market_service_get_snapshot(market_snapshot_t *out);
 const market_candle_t *market_service_get_candles(market_pair_id_t pair,
                                                   market_interval_id_t interval, uint16_t *count);
 

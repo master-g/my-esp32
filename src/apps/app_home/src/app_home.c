@@ -181,19 +181,20 @@ static void refresh_weather_summary(const home_snapshot_t *snapshot)
 
 static void refresh_view(void)
 {
-    const home_snapshot_t *snapshot = home_service_get_snapshot();
+    home_snapshot_t snapshot;
     char date_line[48];
 
     if (s_view.root == NULL) {
         return;
     }
 
-    snprintf(date_line, sizeof(date_line), "%s  %s", snapshot->date_text, snapshot->weekday_text);
+    home_service_get_snapshot(&snapshot);
+    snprintf(date_line, sizeof(date_line), "%s  %s", snapshot.date_text, snapshot.weekday_text);
 
-    lv_label_set_text(s_view.time_label, snapshot->time_text);
+    lv_label_set_text(s_view.time_label, snapshot.time_text);
     lv_label_set_text(s_view.date_label, date_line);
-    refresh_weather_summary(snapshot);
-    refresh_status_bar(snapshot);
+    refresh_weather_summary(&snapshot);
+    refresh_status_bar(&snapshot);
 }
 
 static esp_err_t app_home_init(void)
@@ -297,11 +298,7 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 static void app_home_resume(void)
 {
     home_service_refresh_snapshot();
-    if (!bsp_board_lock(UINT32_MAX)) {
-        return;
-    }
     refresh_view();
-    bsp_board_unlock();
 }
 
 static void app_home_handle_event(const app_event_t *event)

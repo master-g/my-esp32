@@ -22,5 +22,6 @@ esp_err_t app_manager_switch_to(app_id_t app_id);
 app_id_t app_manager_get_foreground_app(void);
 const app_descriptor_t *app_manager_get_descriptor(app_id_t app_id);
 void app_manager_on_event(const app_event_t *event, void *context);
+void app_manager_process_ui_events(void);
 
 #endif

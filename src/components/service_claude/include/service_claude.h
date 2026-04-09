@@ -46,7 +46,7 @@ esp_err_t claude_service_init(void);
 esp_err_t claude_service_start(void);
 void claude_service_stop(void);
 void claude_service_apply_remote_snapshot(const claude_snapshot_t *snapshot);
-const claude_snapshot_t *claude_service_get_snapshot(void);
+void claude_service_get_snapshot(claude_snapshot_t *out);
 bool claude_service_has_unread(void);
 void claude_service_mark_read(uint32_t seq);
 claude_conn_state_t claude_service_get_conn_state(void);

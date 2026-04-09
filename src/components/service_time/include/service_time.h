@@ -26,7 +26,7 @@ void time_service_refresh_now(void);
 const char *time_service_get_timezone_name(void);
 const char *time_service_get_timezone_tz(void);
 esp_err_t time_service_apply_timezone_config(const char *timezone_name, const char *timezone_tz);
-const time_snapshot_t *time_service_get_snapshot(void);
+void time_service_get_snapshot(time_snapshot_t *out);
 bool time_service_is_valid(void);
 
 #endif

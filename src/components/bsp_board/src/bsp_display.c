@@ -47,6 +47,7 @@ static uint8_t *s_psram_buf_1;
 static uint8_t *s_psram_buf_2;
 static uint8_t *s_rot_buf;
 static bool s_initialized;
+static bsp_display_ui_cb_t s_ui_callback;
 
 static const axs15231b_lcd_init_cmd_t s_lcd_init_cmds[] = {
     {0x11, (uint8_t[]){0x00}, 0, 100},
@@ -104,7 +105,11 @@ static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t 
         const size_t rows = (remaining_rows > dma_chunk_rows) ? dma_chunk_rows : remaining_rows;
         const size_t byte_count = (rows * BSP_LCD_PANEL_H_RES * sizeof(uint16_t));
 
-        xSemaphoreTake(s_flush_done_semaphore, portMAX_DELAY);
+        if (xSemaphoreTake(s_flush_done_semaphore, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            ESP_LOGE(TAG, "DMA flush timeout");
+            lv_display_flush_ready(display);
+            return;
+        }
         memcpy(s_dma_buf, map, byte_count);
         esp_lcd_panel_draw_bitmap((esp_lcd_panel_handle_t)lv_display_get_user_data(display), 0,
                                   row_offset, BSP_LCD_PANEL_H_RES, row_offset + rows, s_dma_buf);
@@ -113,7 +118,9 @@ static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t 
         map += BSP_LCD_PANEL_H_RES * rows;
     }
 
-    xSemaphoreTake(s_flush_done_semaphore, portMAX_DELAY);
+    if (xSemaphoreTake(s_flush_done_semaphore, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "DMA final flush timeout");
+    }
     lv_display_flush_ready(display);
 }
 
@@ -145,7 +152,10 @@ static void lvgl_port_task(void *arg)
     (void)arg;
 
     for (;;) {
-        if (bsp_display_lock(UINT32_MAX)) {
+        if (bsp_display_lock(100)) {
+            if (s_ui_callback != NULL) {
+                s_ui_callback();
+            }
             delay_ms = lv_timer_handler();
             bsp_display_unlock();
         }
@@ -268,8 +278,12 @@ static esp_err_t init_lvgl(void)
     ESP_RETURN_ON_ERROR(esp_timer_start_periodic(lvgl_tick_timer, BSP_LVGL_TICK_MS * 1000), TAG,
                         "tick timer start failed");
 
-    xTaskCreatePinnedToCore(lvgl_port_task, "bsp_lvgl", BSP_LVGL_TASK_STACK_SIZE, NULL,
-                            BSP_LVGL_TASK_PRIORITY, NULL, 0);
+    {
+        BaseType_t ret = xTaskCreatePinnedToCore(lvgl_port_task, "bsp_lvgl",
+                                                  BSP_LVGL_TASK_STACK_SIZE, NULL,
+                                                  BSP_LVGL_TASK_PRIORITY, NULL, 0);
+        ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "lvgl task create failed");
+    }
 
     return ESP_OK;
 }
@@ -311,3 +325,5 @@ void bsp_display_unlock(void)
 lv_obj_t *bsp_display_get_app_root(void) { return s_app_root; }
 
 void bsp_display_set_backlight_percent(uint8_t percent) { bsp_backlight_set_percent(percent); }
+
+void bsp_display_set_ui_callback(bsp_display_ui_cb_t cb) { s_ui_callback = cb; }

@@ -1,6 +1,5 @@
 #include "app_notify.h"
 
-#include "bsp_board.h"
 #include "bsp_board_config.h"
 #include "lvgl.h"
 #include "service_claude.h"
@@ -39,9 +38,8 @@ static lv_obj_t *app_notify_create_root(lv_obj_t *parent)
 static void app_notify_resume(void)
 {
     claude_service_start();
-    if (s_status != NULL && bsp_board_lock(UINT32_MAX)) {
+    if (s_status != NULL) {
         lv_label_set_text(s_status, "Claude bridge connecting...");
-        bsp_board_unlock();
     }
 }
 
@@ -54,9 +52,10 @@ static void app_notify_handle_event(const app_event_t *event)
     }
 
     if (event->type == APP_EVENT_DATA_CLAUDE || event->type == APP_EVENT_ENTER) {
-        const claude_snapshot_t *snapshot = claude_service_get_snapshot();
-        lv_label_set_text_fmt(s_status, "state=%d\nunread=%s\n%s", snapshot->conn_state,
-                              snapshot->unread ? "yes" : "no", snapshot->title);
+        claude_snapshot_t snapshot;
+        claude_service_get_snapshot(&snapshot);
+        lv_label_set_text_fmt(s_status, "state=%d\nunread=%s\n%s", snapshot.conn_state,
+                              snapshot.unread ? "yes" : "no", snapshot.title);
     }
 }
 

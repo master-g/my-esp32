@@ -6,9 +6,12 @@
 #include "bsp_board.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "lvgl.h"
 
 #define APP_MANAGER_MAX_APPS APP_ID_COUNT
+#define UI_EVENT_QUEUE_LEN 16
 
 typedef struct {
     app_descriptor_t descriptor;
@@ -21,6 +24,7 @@ static const char *TAG = "app_manager";
 static app_slot_t s_slots[APP_MANAGER_MAX_APPS];
 static app_id_t s_foreground_app = APP_ID_INVALID;
 static bool s_initialized;
+static QueueHandle_t s_ui_event_queue;
 
 static app_slot_t *find_slot_mut(app_id_t app_id)
 {
@@ -40,11 +44,7 @@ static const app_slot_t *find_slot(app_id_t app_id) { return find_slot_mut(app_i
 static void dispatch_to_app(const app_slot_t *slot, const app_event_t *event)
 {
     if (slot != NULL && slot->descriptor.handle_event != NULL) {
-        if (!bsp_board_lock(UINT32_MAX)) {
-            return;
-        }
         slot->descriptor.handle_event(event);
-        bsp_board_unlock();
     }
 }
 
@@ -66,6 +66,9 @@ esp_err_t app_manager_init(void)
     }
 
     s_foreground_app = APP_ID_INVALID;
+    s_ui_event_queue = xQueueCreate(UI_EVENT_QUEUE_LEN, sizeof(app_event_type_t));
+    ESP_RETURN_ON_FALSE(s_ui_event_queue != NULL, ESP_ERR_NO_MEM, TAG,
+                        "ui event queue alloc failed");
     s_initialized = true;
     return ESP_OK;
 }
@@ -141,13 +144,14 @@ esp_err_t app_manager_switch_to(app_id_t app_id)
     if (next_slot->root != NULL) {
         lv_obj_clear_flag(next_slot->root, LV_OBJ_FLAG_HIDDEN);
     }
-    bsp_board_unlock();
 
     if (next_slot->descriptor.resume != NULL) {
         next_slot->descriptor.resume();
     }
     dispatch_to_app(next_slot, &enter_event);
     dispatch_to_app(current_slot, &leave_event);
+
+    bsp_board_unlock();
 
     ESP_LOGI(TAG, "Foreground app -> %s", app_id_to_string(app_id));
     return ESP_OK;
@@ -168,7 +172,7 @@ const app_descriptor_t *app_manager_get_descriptor(app_id_t app_id)
 
 void app_manager_on_event(const app_event_t *event, void *context)
 {
-    const app_slot_t *slot = NULL;
+    app_event_type_t event_type;
 
     (void)context;
     if (!s_initialized || event == NULL) {
@@ -179,6 +183,28 @@ void app_manager_on_event(const app_event_t *event, void *context)
         return;
     }
 
-    slot = find_slot(s_foreground_app);
-    dispatch_to_app(slot, event);
+    event_type = event->type;
+    (void)xQueueSend(s_ui_event_queue, &event_type, 0);
+}
+
+void app_manager_process_ui_events(void)
+{
+    app_event_type_t event_type;
+    const app_slot_t *slot = NULL;
+
+    if (!s_initialized) {
+        return;
+    }
+
+    while (xQueueReceive(s_ui_event_queue, &event_type, 0) == pdTRUE) {
+        slot = find_slot(s_foreground_app);
+        if (slot != NULL) {
+            app_event_t event = {
+                .type = event_type,
+                .payload = NULL,
+            };
+
+            dispatch_to_app(slot, &event);
+        }
+    }
 }

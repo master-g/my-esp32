@@ -8,8 +8,8 @@
 
 esp_err_t power_policy_init(void);
 bool power_policy_on_input_changed(const power_policy_input_t *input);
-const power_policy_input_t *power_policy_get_input(void);
-const power_policy_output_t *power_policy_get_output(void);
+void power_policy_get_input(power_policy_input_t *out);
+void power_policy_get_output(power_policy_output_t *out);
 bool power_policy_is_refresh_mode(refresh_mode_t expected, app_id_t app_id);
 
 #endif

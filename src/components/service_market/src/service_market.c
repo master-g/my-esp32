@@ -56,7 +56,14 @@ void market_service_on_refresh_mode_changed(refresh_mode_t mode)
     (void)s_refresh_mode;
 }
 
-const market_snapshot_t *market_service_get_snapshot(void) { return &s_snapshot; }
+void market_service_get_snapshot(market_snapshot_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    *out = s_snapshot;
+}
 
 const market_candle_t *market_service_get_candles(market_pair_id_t pair,
                                                   market_interval_id_t interval, uint16_t *count)

@@ -10,6 +10,7 @@
 #include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net_manager.h"
 #include "nvs.h"
@@ -20,6 +21,7 @@
 static const char *TAG = "weather_service";
 static weather_snapshot_t s_snapshot;
 static weather_location_config_t s_location_config;
+static SemaphoreHandle_t s_mutex;
 static QueueHandle_t s_command_queue;
 static int64_t s_last_request_us;
 static int64_t s_last_success_us;
@@ -82,7 +84,7 @@ static void publish_weather_event(void)
 {
     app_event_t event = {
         .type = APP_EVENT_DATA_WEATHER,
-        .payload = &s_snapshot,
+        .payload = NULL,
     };
 
     event_bus_publish(&event);
@@ -101,10 +103,12 @@ static uint32_t current_epoch_s(void)
 
 static void weather_service_mark_stale_if_needed(void)
 {
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (s_snapshot.state == WEATHER_LIVE && s_last_success_us > 0 &&
         (esp_timer_get_time() - s_last_success_us) >= WEATHER_REFRESH_INTERVAL_US) {
         s_snapshot.state = WEATHER_STALE;
     }
+    xSemaphoreGive(s_mutex);
 }
 
 static void weather_service_update_success(const weather_client_result_t *result)
@@ -129,10 +133,11 @@ static void weather_service_update_failure(void)
 
 static bool weather_service_should_auto_refresh(void)
 {
-    const power_policy_output_t *policy = power_policy_get_output();
+    power_policy_output_t policy;
     const int64_t now_us = esp_timer_get_time();
 
-    if (!net_manager_is_connected() || !policy->weather_refresh_allowed || s_refresh_in_progress) {
+    power_policy_get_output(&policy);
+    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || s_refresh_in_progress) {
         return false;
     }
 
@@ -149,10 +154,11 @@ static bool weather_service_should_auto_refresh(void)
 
 static bool weather_service_should_refresh_on_reconnect(void)
 {
-    const power_policy_output_t *policy = power_policy_get_output();
+    power_policy_output_t policy;
     const int64_t now_us = esp_timer_get_time();
 
-    if (!net_manager_is_connected() || !policy->weather_refresh_allowed || s_refresh_in_progress) {
+    power_policy_get_output(&policy);
+    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || s_refresh_in_progress) {
         return false;
     }
 
@@ -186,20 +192,26 @@ static void weather_service_task(void *arg)
         }
 
         s_refresh_in_progress = true;
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_snapshot.state = (s_last_success_us > 0) ? WEATHER_REFRESHING : s_snapshot.state;
+        xSemaphoreGive(s_mutex);
         publish_weather_event();
 
         {
             weather_client_result_t result = {0};
             if (weather_client_fetch_current(&s_location_config, &result) == ESP_OK) {
+                xSemaphoreTake(s_mutex, portMAX_DELAY);
                 weather_service_update_success(&result);
+                xSemaphoreGive(s_mutex);
                 ESP_LOGI(TAG, "Weather refresh ok: city=%s text=%s temp=%d.%dC", s_snapshot.city,
                          s_snapshot.text, s_snapshot.temperature_c_tenths / 10,
                          s_snapshot.temperature_c_tenths >= 0
                              ? s_snapshot.temperature_c_tenths % 10
                              : -(s_snapshot.temperature_c_tenths % 10));
             } else {
+                xSemaphoreTake(s_mutex, portMAX_DELAY);
                 weather_service_update_failure();
+                xSemaphoreGive(s_mutex);
                 ESP_LOGW(TAG, "Weather refresh failed");
             }
         }
@@ -235,6 +247,8 @@ esp_err_t weather_service_init(void)
 {
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     s_snapshot.state = WEATHER_EMPTY;
+    s_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_mutex != NULL, ESP_ERR_NO_MEM, TAG, "weather mutex alloc failed");
     ESP_RETURN_ON_ERROR(load_location_config_from_nvs(), TAG, "weather config load failed");
     snprintf(s_snapshot.city, sizeof(s_snapshot.city), "%s", s_location_config.city_label);
     s_command_queue = xQueueCreate(4, sizeof(weather_service_cmd_t));
@@ -246,8 +260,11 @@ esp_err_t weather_service_init(void)
     s_refresh_in_progress = false;
     ESP_RETURN_ON_ERROR(event_bus_subscribe(weather_service_event_handler, NULL), TAG,
                         "weather subscribe failed");
-    xTaskCreatePinnedToCore(weather_service_task, "weather_service", WEATHER_TASK_STACK_SIZE, NULL,
-                            4, NULL, 1);
+    {
+        BaseType_t ret = xTaskCreatePinnedToCore(weather_service_task, "weather_service",
+                                                  WEATHER_TASK_STACK_SIZE, NULL, 4, NULL, 1);
+        ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "weather task create failed");
+    }
     return ESP_OK;
 }
 
@@ -260,15 +277,20 @@ void weather_service_request_refresh(void)
     }
 
     s_last_request_us = esp_timer_get_time();
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_snapshot.state = WEATHER_REFRESHING;
+    xSemaphoreGive(s_mutex);
     publish_weather_event();
     (void)xQueueSend(s_command_queue, &cmd, 0);
 }
 
 bool weather_service_can_refresh(void)
 {
+    power_policy_output_t policy;
+
+    power_policy_get_output(&policy);
     if (!net_manager_is_connected() || s_refresh_in_progress ||
-        !power_policy_get_output()->weather_refresh_allowed) {
+        !policy.weather_refresh_allowed) {
         return false;
     }
 
@@ -299,9 +321,11 @@ esp_err_t weather_service_apply_location_config(const weather_location_config_t 
     }
 
     memcpy(&s_location_config, config, sizeof(s_location_config));
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     s_snapshot.state = WEATHER_EMPTY;
     snprintf(s_snapshot.city, sizeof(s_snapshot.city), "%s", s_location_config.city_label);
+    xSemaphoreGive(s_mutex);
     s_last_request_us = 0;
     s_last_success_us = 0;
     s_refresh_in_progress = false;
@@ -314,8 +338,14 @@ esp_err_t weather_service_apply_location_config(const weather_location_config_t 
     return ESP_OK;
 }
 
-const weather_snapshot_t *weather_service_get_snapshot(void)
+void weather_service_get_snapshot(weather_snapshot_t *out)
 {
+    if (out == NULL) {
+        return;
+    }
+
     weather_service_mark_stale_if_needed();
-    return &s_snapshot;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    *out = s_snapshot;
+    xSemaphoreGive(s_mutex);
 }
