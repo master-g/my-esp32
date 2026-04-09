@@ -8,7 +8,7 @@ idf_component_register(
     REQUIRES
         core_event_bus
         esp_http_client
-        json
+        cjson
         nvs_flash
         mbedtls
         net_manager
