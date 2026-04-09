@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "service_claude.h"
 #include "service_weather.h"
 
 typedef struct {
@@ -24,6 +25,7 @@ typedef struct {
     weather_icon_t weather_icon_id;
     bool claude_connected;
     bool claude_unread;
+    claude_run_state_t claude_run_state;
 } home_snapshot_t;
 
 esp_err_t home_service_init(void);

@@ -63,6 +63,7 @@ void home_service_refresh_snapshot(void)
     s_snapshot.weather_icon_id = weather_snap.icon_id;
     s_snapshot.claude_connected = (claude_snap.conn_state == CLAUDE_CONN_CONNECTED);
     s_snapshot.claude_unread = claude_snap.unread;
+    s_snapshot.claude_run_state = claude_snap.run_state;
 }
 
 void home_service_get_snapshot(home_snapshot_t *out)

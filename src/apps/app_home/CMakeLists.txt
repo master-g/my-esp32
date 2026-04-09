@@ -2,6 +2,10 @@ idf_component_register(
     SRCS
         "src/app_home.c"
         "src/generated/app_home_status_font.c"
+        "src/generated/sprite_idle.c"
+        "src/generated/sprite_working.c"
+        "src/generated/sprite_waiting.c"
+        "src/generated/sprite_sleeping.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

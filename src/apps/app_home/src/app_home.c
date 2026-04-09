@@ -6,7 +6,9 @@
 #include "bsp_board.h"
 #include "bsp_board_config.h"
 #include "generated/app_home_status_font.h"
+#include "generated/sprite_frames.h"
 #include "lvgl.h"
+#include "service_claude.h"
 #include "service_home.h"
 
 #define HOME_STATUS_BAR_HEIGHT 20
@@ -29,6 +31,30 @@
 #define HOME_WEATHER_TEXT_COLOR 0xe3edf2
 #define HOME_WEATHER_MUTED_COLOR 0x8da0ab
 
+#define HOME_LEFT_HALF_W 280
+#define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
+
+typedef enum {
+    SPRITE_STATE_IDLE = 0,
+    SPRITE_STATE_WORKING,
+    SPRITE_STATE_WAITING,
+    SPRITE_STATE_SLEEPING,
+    SPRITE_STATE_COUNT,
+} sprite_state_t;
+
+typedef struct {
+    const lv_image_dsc_t *frames;
+    uint8_t num_frames;
+    uint16_t period_ms;
+} sprite_anim_def_t;
+
+static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT] = {
+    [SPRITE_STATE_IDLE] = {sprite_idle_frames, SPRITE_FRAMES_PER_STATE, 333},
+    [SPRITE_STATE_WORKING] = {sprite_working_frames, SPRITE_FRAMES_PER_STATE, 250},
+    [SPRITE_STATE_WAITING] = {sprite_waiting_frames, SPRITE_FRAMES_PER_STATE, 333},
+    [SPRITE_STATE_SLEEPING] = {sprite_sleeping_frames, SPRITE_FRAMES_PER_STATE, 500},
+};
+
 typedef struct {
     lv_obj_t *root;
     lv_obj_t *status_bar;
@@ -43,9 +69,49 @@ typedef struct {
     lv_obj_t *claude_item;
     lv_obj_t *claude_icon;
     lv_obj_t *claude_dot;
+    lv_obj_t *sprite_img;
 } app_home_view_t;
 
+typedef struct {
+    sprite_state_t state;
+    const sprite_anim_def_t *anim;
+    uint8_t frame_idx;
+    lv_timer_t *timer;
+} sprite_ctx_t;
+
 static app_home_view_t s_view;
+static sprite_ctx_t s_sprite;
+
+static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
+{
+    if (!connected) {
+        return SPRITE_STATE_IDLE;
+    }
+
+    switch (rs) {
+    case CLAUDE_RUN_PROCESSING:
+    case CLAUDE_RUN_RUNNING_TOOL:
+    case CLAUDE_RUN_COMPACTING:
+        return SPRITE_STATE_WORKING;
+    case CLAUDE_RUN_WAITING_FOR_INPUT:
+        return SPRITE_STATE_WAITING;
+    case CLAUDE_RUN_ENDED:
+        return SPRITE_STATE_SLEEPING;
+    default:
+        return SPRITE_STATE_IDLE;
+    }
+}
+
+static void sprite_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_view.sprite_img == NULL || s_sprite.anim == NULL) {
+        return;
+    }
+
+    s_sprite.frame_idx = (s_sprite.frame_idx + 1) % s_sprite.anim->num_frames;
+    lv_image_set_src(s_view.sprite_img, &s_sprite.anim->frames[s_sprite.frame_idx]);
+}
 
 static void display_city_name(char *dst, size_t dst_size, const char *src)
 {
@@ -179,6 +245,26 @@ static void refresh_weather_summary(const home_snapshot_t *snapshot)
     lv_obj_set_style_text_color(s_view.weather_label, weather_color, 0);
 }
 
+static void refresh_sprite(const home_snapshot_t *snapshot)
+{
+    sprite_state_t new_state;
+
+    if (s_view.sprite_img == NULL) {
+        return;
+    }
+
+    new_state = map_run_state(snapshot->claude_run_state, snapshot->claude_connected);
+    if (new_state != s_sprite.state || s_sprite.anim == NULL) {
+        s_sprite.state = new_state;
+        s_sprite.anim = &s_sprite_anims[new_state];
+        s_sprite.frame_idx = 0;
+        lv_image_set_src(s_view.sprite_img, &s_sprite.anim->frames[0]);
+        if (s_sprite.timer != NULL) {
+            lv_timer_set_period(s_sprite.timer, s_sprite.anim->period_ms);
+        }
+    }
+}
+
 static void refresh_view(void)
 {
     home_snapshot_t snapshot;
@@ -195,6 +281,7 @@ static void refresh_view(void)
     lv_label_set_text(s_view.date_label, date_line);
     refresh_weather_summary(&snapshot);
     refresh_status_bar(&snapshot);
+    refresh_sprite(&snapshot);
 }
 
 static esp_err_t app_home_init(void)
@@ -213,6 +300,8 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     lv_obj_set_style_bg_color(root, lv_color_hex(0x0f1418), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(root, 16, 0);
+
+    /* ---- left half: status / clock / date / weather ---- */
 
     s_view.status_bar = lv_obj_create(root);
     lv_obj_remove_style_all(s_view.status_bar);
@@ -271,7 +360,7 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 
     s_view.weather_row = lv_obj_create(root);
     lv_obj_remove_style_all(s_view.weather_row);
-    lv_obj_set_size(s_view.weather_row, BSP_LCD_H_RES - 32, HOME_WEATHER_ROW_HEIGHT);
+    lv_obj_set_size(s_view.weather_row, HOME_LEFT_HALF_W, HOME_WEATHER_ROW_HEIGHT);
     lv_obj_align(s_view.weather_row, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_set_flex_flow(s_view.weather_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(s_view.weather_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
@@ -285,11 +374,25 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 
     s_view.weather_label = lv_label_create(s_view.weather_row);
     lv_obj_set_width(s_view.weather_label,
-                     BSP_LCD_H_RES - 32 - HOME_STATUS_ITEM_BOX_SIZE - HOME_WEATHER_ICON_GAP);
+                     HOME_LEFT_HALF_W - HOME_STATUS_ITEM_BOX_SIZE - HOME_WEATHER_ICON_GAP);
     lv_label_set_long_mode(s_view.weather_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_font(s_view.weather_label, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_view.weather_label, lv_color_hex(HOME_WEATHER_TEXT_COLOR), 0);
     lv_obj_set_style_translate_y(s_view.weather_label, HOME_WEATHER_TEXT_Y_OFFSET, 0);
+
+    /* ---- right half: sprite ---- */
+
+    s_view.sprite_img = lv_image_create(root);
+    lv_image_set_src(s_view.sprite_img, &sprite_idle_frames[0]);
+    lv_image_set_scale(s_view.sprite_img, HOME_SPRITE_SCALE);
+    lv_obj_set_style_image_recolor(s_view.sprite_img, lv_color_white(), 0);
+    lv_obj_set_style_image_recolor_opa(s_view.sprite_img, LV_OPA_TRANSP, 0);
+    lv_obj_align(s_view.sprite_img, LV_ALIGN_RIGHT_MID, -60, 0);
+
+    s_sprite.state = SPRITE_STATE_IDLE;
+    s_sprite.anim = &s_sprite_anims[SPRITE_STATE_IDLE];
+    s_sprite.frame_idx = 0;
+    s_sprite.timer = lv_timer_create(sprite_timer_cb, s_sprite.anim->period_ms, NULL);
 
     refresh_view();
     return root;
@@ -299,6 +402,16 @@ static void app_home_resume(void)
 {
     home_service_refresh_snapshot();
     refresh_view();
+    if (s_sprite.timer != NULL) {
+        lv_timer_resume(s_sprite.timer);
+    }
+}
+
+static void app_home_suspend(void)
+{
+    if (s_sprite.timer != NULL) {
+        lv_timer_pause(s_sprite.timer);
+    }
 }
 
 static void app_home_handle_event(const app_event_t *event)
@@ -329,7 +442,7 @@ const app_descriptor_t *app_home_get_descriptor(void)
         .init = app_home_init,
         .create_root = app_home_create_root,
         .resume = app_home_resume,
-        .suspend = NULL,
+        .suspend = app_home_suspend,
         .handle_event = app_home_handle_event,
     };
 
