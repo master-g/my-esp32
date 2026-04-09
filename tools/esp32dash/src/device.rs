@@ -496,6 +496,12 @@ struct UnixSerialPort {
     read_buf: Vec<u8>,
 }
 
+impl Drop for UnixSerialPort {
+    fn drop(&mut self) {
+        unsafe { libc::tcdrain(self.fd.as_raw_fd()) };
+    }
+}
+
 impl UnixSerialPort {
     fn open(path: &str, baud: u32) -> Result<Self> {
         let c_path = CString::new(Path::new(path).as_os_str().as_bytes())
