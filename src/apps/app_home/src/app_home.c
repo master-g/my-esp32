@@ -460,13 +460,13 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     lv_obj_set_style_radius(s_view.bubble_box, HOME_BUBBLE_RADIUS, 0);
     lv_obj_set_style_pad_hor(s_view.bubble_box, HOME_BUBBLE_PAD_H, 0);
     lv_obj_set_style_pad_ver(s_view.bubble_box, HOME_BUBBLE_PAD_V, 0);
-    lv_obj_align(s_view.bubble_box, LV_ALIGN_TOP_RIGHT, -20, 4);
+    lv_obj_align(s_view.bubble_box, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
 
     s_view.bubble_label = lv_label_create(s_view.bubble_box);
     lv_obj_set_style_max_width(s_view.bubble_label, HOME_BUBBLE_MAX_W - 2 * HOME_BUBBLE_PAD_H, 0);
     lv_label_set_long_mode(s_view.bubble_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(s_view.bubble_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_view.bubble_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_view.bubble_label, lv_color_hex(HOME_BUBBLE_TEXT_COLOR), 0);
     lv_label_set_text_static(s_view.bubble_label, "");
 
