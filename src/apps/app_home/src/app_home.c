@@ -7,6 +7,7 @@
 #include "bsp_board_config.h"
 #include "device_link.h"
 #include "generated/app_home_status_font.h"
+#include "generated/noto_sans_cjk_12.h"
 #include "generated/sprite_frames.h"
 #include "lvgl.h"
 #include "service_claude.h"
@@ -112,6 +113,7 @@ static bool s_bubble_dismissed;
 static lv_timer_t *s_unread_timer;
 static uint32_t s_unread_seq;
 static bool s_was_connected;
+static lv_font_t s_cjk_font;
 
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
@@ -446,7 +448,7 @@ static void create_approval_overlay(lv_obj_t *root)
     lv_obj_align(s_view.approval_tool_label, LV_ALIGN_TOP_LEFT, 0, 8);
 
     s_view.approval_desc_label = lv_label_create(overlay);
-    lv_obj_set_style_text_font(s_view.approval_desc_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_view.approval_desc_label, &s_cjk_font, 0);
     lv_obj_set_style_text_color(s_view.approval_desc_label, lv_color_hex(0x8899a6), 0);
     lv_obj_set_width(s_view.approval_desc_label, BSP_LCD_H_RES - 32 - 130);
     lv_label_set_long_mode(s_view.approval_desc_label, LV_LABEL_LONG_DOT);
@@ -483,6 +485,10 @@ static void show_approval_overlay(void)
 
 static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 {
+    /* Build a composite font: Montserrat 12 with CJK fallback */
+    s_cjk_font = lv_font_montserrat_12;
+    s_cjk_font.fallback = &noto_sans_cjk_12;
+
     lv_obj_t *root = lv_obj_create(parent);
 
     s_view.root = root;
@@ -597,7 +603,7 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     s_view.bubble_label = lv_label_create(s_view.bubble_box);
     lv_obj_set_style_max_width(s_view.bubble_label, HOME_BUBBLE_MAX_W - 2 * HOME_BUBBLE_PAD_H, 0);
     lv_label_set_long_mode(s_view.bubble_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(s_view.bubble_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_view.bubble_label, &s_cjk_font, 0);
     lv_obj_set_style_text_color(s_view.bubble_label, lv_color_hex(HOME_BUBBLE_TEXT_COLOR), 0);
     lv_label_set_text_static(s_view.bubble_label, "");
 

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "src/app_home.c"
         "src/generated/app_home_status_font.c"
+        "src/generated/noto_sans_cjk_12.c"
         "src/generated/sprite_idle.c"
         "src/generated/sprite_working.c"
         "src/generated/sprite_waiting.c"
