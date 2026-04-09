@@ -136,9 +136,19 @@ pub fn request_direct(
     baud: u32,
     request: RpcRequest,
 ) -> Result<Value> {
+    request_direct_with_timeout(factory, preferred_port, baud, request, RPC_TIMEOUT)
+}
+
+pub fn request_direct_with_timeout(
+    factory: Arc<dyn SessionFactory>,
+    preferred_port: Option<&str>,
+    baud: u32,
+    request: RpcRequest,
+    timeout: Duration,
+) -> Result<Value> {
     let port = resolve_port(factory.clone(), preferred_port, baud)?;
     let (mut session, _) = connect_port(factory.as_ref(), &port, baud)?;
-    perform_rpc(session.as_mut(), request, RPC_TIMEOUT)
+    perform_rpc(session.as_mut(), request, timeout)
 }
 
 pub fn send_event_direct(

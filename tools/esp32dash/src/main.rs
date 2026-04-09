@@ -25,7 +25,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
     agent::Config,
-    device::{UnixSerialFactory, discover_devices, open_direct_session, request_direct, send_event_direct},
+    device::{UnixSerialFactory, discover_devices, open_direct_session, request_direct, request_direct_with_timeout, send_event_direct},
     hooks::InstallHooksResult,
     model::{AdminErrorResponse, AdminRpcResponse, Attention, LocalHookEvent, RawHookInput, RpcRequest, RunStatus, Snapshot, WireFrame},
     normalizer::sanitize_prompt_preview,
@@ -195,6 +195,15 @@ enum ChibiCommand {
         #[arg(long, help = "Serial port (default: autodiscover)")]
         port: Option<String>,
     },
+    #[command(about = "Test the permission approval overlay on the device")]
+    Approve {
+        #[arg(long, default_value = "Bash", help = "Tool name to show")]
+        tool: String,
+        #[arg(long, default_value = "rm -rf /tmp/test", help = "Description to show")]
+        desc: String,
+        #[arg(long, help = "Serial port (default: autodiscover)")]
+        port: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -233,7 +242,7 @@ async fn main() -> Result<()> {
         Command::InstallLaunchd => install_launchd(),
         Command::UninstallLaunchd => uninstall_launchd(),
         Command::InstallHooks(args) => install_hooks(args),
-        Command::Chibi { command } => run_chibi_command(command),
+        Command::Chibi { command } => run_chibi_command(command).await,
     }
 }
 
@@ -286,7 +295,7 @@ pub(crate) async fn run_request(port: Option<&str>, request: RpcRequest) -> Resu
     )
 }
 
-fn run_chibi_command(command: ChibiCommand) -> Result<()> {
+async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
     match command {
         ChibiCommand::Test {
             state,
@@ -347,6 +356,34 @@ fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 }
             }
             println!("demo complete");
+            Ok(())
+        }
+        ChibiCommand::Approve { tool, desc, port } => {
+            println!("sending approval request: tool={tool} desc=\"{desc}\"");
+            println!("waiting for user to tap a button on the device...");
+
+            let rpc = RpcRequest {
+                method: "claude.approve".into(),
+                params: json!({
+                    "id": "chibi-test",
+                    "tool_name": tool,
+                    "description": desc,
+                }),
+            };
+
+            let result = request_direct_with_timeout(
+                Arc::new(UnixSerialFactory),
+                port.as_deref(),
+                compat::serial_baud(),
+                rpc,
+                std::time::Duration::from_secs(300),
+            )?;
+
+            let decision = result
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            println!("device responded: decision={decision}");
             Ok(())
         }
     }
