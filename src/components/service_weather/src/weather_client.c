@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cJSON.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
@@ -12,11 +13,12 @@
 static const char *TAG = "weather_client";
 
 #define WEATHER_CLIENT_URL_LEN 256
-#define WEATHER_CLIENT_RESPONSE_CAPACITY 2048
+#define WEATHER_CLIENT_RESPONSE_CAPACITY 4096
 
 typedef struct {
     char *buffer;
     size_t used;
+    bool overflow;
 } weather_http_buffer_t;
 
 static esp_err_t weather_http_event_handler(esp_http_client_event_t *event)
@@ -28,68 +30,45 @@ static esp_err_t weather_http_event_handler(esp_http_client_event_t *event)
     }
 
     if (event->event_id == HTTP_EVENT_ON_DATA && event->data != NULL && event->data_len > 0) {
-        size_t available = WEATHER_CLIENT_RESPONSE_CAPACITY - payload->used - 1;
-        size_t copy_len =
-            (available < (size_t)event->data_len) ? available : (size_t)event->data_len;
-
-        if (copy_len > 0) {
-            memcpy(payload->buffer + payload->used, event->data, copy_len);
-            payload->used += copy_len;
-            payload->buffer[payload->used] = '\0';
+        if (payload->used + (size_t)event->data_len >= WEATHER_CLIENT_RESPONSE_CAPACITY) {
+            payload->overflow = true;
+            return ESP_OK;
         }
+
+        memcpy(payload->buffer + payload->used, event->data, event->data_len);
+        payload->used += (size_t)event->data_len;
+        payload->buffer[payload->used] = '\0';
     }
 
     return ESP_OK;
 }
 
-static const char *find_json_key_value(const char *json, const char *key)
+static esp_err_t parse_current_weather(const char *json_str, weather_client_result_t *result)
 {
-    char pattern[48];
-    const char *pos = NULL;
+    cJSON *root = cJSON_Parse(json_str);
+    ESP_RETURN_ON_FALSE(root != NULL, ESP_ERR_INVALID_RESPONSE, TAG, "JSON parse failed");
 
-    if (json == NULL || key == NULL) {
-        return NULL;
+    cJSON *current = cJSON_GetObjectItem(root, "current");
+    if (current == NULL || !cJSON_IsObject(current)) {
+        cJSON_Delete(root);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_INVALID_RESPONSE, TAG, "\"current\" object missing");
     }
 
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    pos = strstr(json, pattern);
-    if (pos == NULL) {
-        return NULL;
+    cJSON *temp = cJSON_GetObjectItem(current, "temperature_2m");
+    cJSON *code = cJSON_GetObjectItem(current, "weather_code");
+    cJSON *day = cJSON_GetObjectItem(current, "is_day");
+
+    if (!cJSON_IsNumber(temp) || !cJSON_IsNumber(code) || !cJSON_IsNumber(day)) {
+        cJSON_Delete(root);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_INVALID_RESPONSE, TAG,
+                            "missing or non-numeric fields in current");
     }
 
-    return pos + strlen(pattern);
-}
+    result->temperature_c_tenths = (int16_t)(cJSON_GetNumberValue(temp) * 10.0);
+    result->weather_code = (uint16_t)cJSON_GetNumberValue(code);
+    result->is_day = ((int)cJSON_GetNumberValue(day) != 0);
 
-static const char *find_current_object(const char *json)
-{
-    const char *pos = strstr(json, "\"current\":{");
-
-    if (pos == NULL) {
-        return NULL;
-    }
-
-    return pos;
-}
-
-static esp_err_t parse_json_number(const char *json, const char *key, double *value)
-{
-    const char *cursor = find_json_key_value(json, key);
-    char *end = NULL;
-
-    ESP_RETURN_ON_FALSE(cursor != NULL, ESP_ERR_NOT_FOUND, TAG, "key not found: %s", key);
-    *value = strtod(cursor, &end);
-    ESP_RETURN_ON_FALSE(end != cursor, ESP_ERR_INVALID_RESPONSE, TAG, "invalid number for key: %s",
-                        key);
-    return ESP_OK;
-}
-
-static esp_err_t parse_json_int(const char *json, const char *key, int *value)
-{
-    double parsed = 0;
-    esp_err_t err = parse_json_number(json, key, &parsed);
-
-    ESP_RETURN_ON_ERROR(err, TAG, "failed parsing int key: %s", key);
-    *value = (int)parsed;
+    cJSON_Delete(root);
     return ESP_OK;
 }
 
@@ -101,11 +80,7 @@ esp_err_t weather_client_fetch_current(const weather_location_config_t *location
     esp_http_client_config_t config = {0};
     esp_http_client_handle_t client = NULL;
     esp_err_t err = ESP_OK;
-    double temperature_c = 0;
-    int weather_code = 0;
-    int is_day = 0;
     int status = 0;
-    const char *current_object = NULL;
 
     ESP_RETURN_ON_FALSE(result != NULL, ESP_ERR_INVALID_ARG, TAG, "result is required");
     ESP_RETURN_ON_FALSE(location != NULL, ESP_ERR_INVALID_ARG, TAG, "location is required");
@@ -132,7 +107,10 @@ esp_err_t weather_client_fetch_current(const weather_location_config_t *location
     config.crt_bundle_attach = esp_crt_bundle_attach;
 
     client = esp_http_client_init(&config);
-    ESP_RETURN_ON_FALSE(client != NULL, ESP_ERR_NO_MEM, TAG, "http client init failed");
+    if (client == NULL) {
+        free(payload.buffer);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "http client init failed");
+    }
 
     err = esp_http_client_perform(client);
     if (err != ESP_OK) {
@@ -143,31 +121,20 @@ esp_err_t weather_client_fetch_current(const weather_location_config_t *location
 
     status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+
     if (status != 200) {
         free(payload.buffer);
-        ESP_RETURN_ON_FALSE(status == 200, ESP_ERR_INVALID_RESPONSE, TAG,
-                            "unexpected weather status: %d", status);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_INVALID_RESPONSE, TAG, "unexpected weather status: %d",
+                            status);
     }
 
-    current_object = find_current_object(payload.buffer);
-    ESP_RETURN_ON_FALSE(current_object != NULL, ESP_ERR_INVALID_RESPONSE, TAG,
-                        "current object not found");
-
-    err = parse_json_number(current_object, "temperature_2m", &temperature_c);
-    if (err == ESP_OK) {
-        err = parse_json_int(current_object, "weather_code", &weather_code);
-    }
-    if (err == ESP_OK) {
-        err = parse_json_int(current_object, "is_day", &is_day);
-    }
-    if (err != ESP_OK) {
+    if (payload.overflow) {
         free(payload.buffer);
-        return err;
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_INVALID_SIZE, TAG, "response exceeded %d byte limit",
+                            WEATHER_CLIENT_RESPONSE_CAPACITY);
     }
 
-    result->temperature_c_tenths = (int16_t)(temperature_c * 10.0);
-    result->weather_code = (uint16_t)weather_code;
-    result->is_day = (is_day != 0);
+    err = parse_current_weather(payload.buffer, result);
     free(payload.buffer);
-    return ESP_OK;
+    return err;
 }
