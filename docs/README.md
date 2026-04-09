@@ -13,9 +13,8 @@
 - [design/system/app-manager-event-bus.md](./design/system/app-manager-event-bus.md): App Manager 与 Event Bus 子设计
 - [design/system/power-policy.md](./design/system/power-policy.md): 功耗策略子设计
 - [hardware/waveshare-board-baseline.md](./hardware/waveshare-board-baseline.md): Waveshare 板级基线与硬件冲突说明
-- [reports/2026-04-09-project-audit.md](./reports/2026-04-09-project-audit.md): 当前固件与 Host 工程的审计结论与证据
+- [reports/2026-04-09-project-audit.md](./reports/2026-04-09-project-audit.md): 固件与 Host 工程审计报告（历史记录）
 - [guides/dev-setup-guide.md](./guides/dev-setup-guide.md): 开发环境配置指南
 - [plans/project-progress-plan.md](./plans/project-progress-plan.md): 项目进度评估与实施计划
 - [plans/weather-system-plan.md](./plans/weather-system-plan.md): 天气系统实施计划
-- [plans/2026-04-09-audit-action-plan.md](./plans/2026-04-09-audit-action-plan.md): 针对本轮审计结果的整改顺序与放行标准
-- [plans/unified-action-plan.md](./plans/unified-action-plan.md): 统一行动计划（合并审计报告、整改方案、进度评估与天气计划）
+- [plans/unified-action-plan.md](./plans/unified-action-plan.md): 统一行动计划（当前主线路图，第一阶段已完成）

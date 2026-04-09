@@ -26,10 +26,10 @@ ESP-IDF / LVGL / FreeRTOS
 
 ### Key Components
 
-- **app_manager** (`src/components/core_app_manager/`): Manages four fixed app slots, handles app lifecycle (init, resume, suspend) and event routing.
-- **event_bus** (`src/components/core_event_bus/`): Central event distribution system.
-- **BSP Layer** (`src/components/bsp_board/`): Board support package abstracting display (AXS15231B QSPI LCD), touch (I2C), and RTC (PCF85063).
-- **Services**: Background data services for time (NTP+RTC), weather, market data, and Claude Code status.
+- **app_manager** (`src/components/core_app_manager/`): Manages four fixed app slots, handles app lifecycle (init, resume, suspend). Uses a FreeRTOS queue to route events — producers (timer, Wi-Fi, USB) enqueue event types, the LVGL task drains the queue and dispatches to the foreground app.
+- **event_bus** (`src/components/core_event_bus/`): Central event distribution system. Event payloads are NULL; subscribers use event type as a signal and query services for data.
+- **BSP Layer** (`src/components/bsp_board/`): Board support package abstracting display (AXS15231B QSPI LCD), touch (I2C), and RTC (PCF85063). The LVGL task calls a registered UI callback (`bsp_display_set_ui_callback`) each tick to process queued events.
+- **Services**: Background data services for time (NTP+RTC), weather, market data, and Claude Code status. Each service protects its snapshot with a FreeRTOS mutex and exposes a copy-out getter (`void get(X *out)`) — callers receive a stack copy, never a live pointer.
 - **Power Policy** (`src/components/power_policy/`): Manages display states (ACTIVE/DIM/SLEEP) and data collection modes based on power source.
 
 ### Event-Driven App Interface
@@ -121,7 +121,9 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodem11401 cargo run -- install-launchd
 ├── docs/                  # Design documents and guides
 │   ├── design/            # Architecture and app designs
 │   ├── hardware/          # Board specifications
-│   └── guides/            # Setup instructions
+│   ├── guides/            # Setup instructions
+│   ├── plans/             # Action plans and roadmap
+│   └── reports/           # Audit reports
 ├── sdkconfig.defaults     # Default ESP-IDF configuration
 └── CMakeLists.txt         # Project root CMake
 ```
@@ -143,10 +145,13 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodem11401 cargo run -- install-launchd
 ## Important Constraints
 
 - UI pages only consume state, never make direct HTTP, USB serial, or other transport requests
+- All LVGL operations happen on the LVGL task thread — other tasks enqueue events, never touch LVGL directly
+- Service getters use copy-out pattern (`void get(X *out)`) — callers get stack copies, never hold pointers into service state
 - Service layer handles all external data, broadcasts via event bus
 - Power policy controls data collection frequency based on power source and foreground app
 - Display uses partial double buffering (not full screen buffer) due to memory constraints
 - Apps support explicit pause/resume; Satoshi Slot must not run in background
+- Lock order: LVGL lock → service mutex. No service task may call LVGL directly
 
 ## 语言风格
 

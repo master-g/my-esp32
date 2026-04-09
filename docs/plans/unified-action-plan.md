@@ -1,81 +1,26 @@
 # 统一行动计划
 
-本文档合并了以下四份文件的内容，形成一份从现状出发、按优先级排列的完整行动路线：
-
-- `reports/2026-04-09-project-audit.md`（审计报告）
-- `plans/2026-04-09-audit-action-plan.md`（审计整改行动报告）
-- `plans/project-progress-plan.md`（项目进度评估与实施计划）
-- `plans/weather-system-plan.md`（天气系统实施计划）
+从现状出发、按优先级排列的完整行动路线。合并自审计报告、整改方案、进度评估与天气计划。
 
 ## 现状
 
 ### 已经站住的部分
 
-项目已越过纯设计阶段。ESP-IDF 工程结构、组件分层、BSP、服务骨架、四个 app 槽位都已落地。横屏显示基线已稳定，支持两种固定 landscape 安装方向。Host 侧 `esp32dash` 是独立 Rust 项目，18 个测试通过。
+项目已越过纯设计阶段。ESP-IDF 工程结构、组件分层、BSP、服务骨架、四个 app 槽位都已落地。横屏显示基线已稳定。Host 侧 `esp32dash` 是独立 Rust 项目，18 个测试通过。
 
-具体完成项：
-
-- 仓库卫生与文档同步（`.gitignore` 收口、`README.md` 对齐代码现实）
-- 固件编译基线（`ESP-IDF 6.0` 下 `idf.py build` 通过，二进制占用约 55% app 分区）
-- 横屏方向基线（软件旋转到 640×172 landscape，`app_home` 实机回归通过）
-- RTC 恢复、Wi-Fi 联网、IP 获取、SNTP 校时、NTP 写回 RTC 均已串口验证
-- `power_runtime` 已把 `power_policy` 输出执行到背光，USB 供电下保持 ACTIVE
+2026-04-09 审计暴露了 3 个高风险和 5 个中风险问题，第一阶段加固已全部完成（见下文）。
 
 ### 还没站住的部分
 
 板级闭环的异常路径（断线重连、背光 dim/sleep 端到端、触摸异常）尚未回归。`service_weather`、`service_market`、`service_claude` 仍是占位。Notify、Trading、Satoshi Slot 页面仍是空壳。全局翻页、边缘手势、分页指示器未落地。IMU 未接入。
 
-### 审计暴露的结构性风险
-
-2026-04-09 审计发现了 3 个高风险和 5 个中风险问题。核心判断是：当前骨架"能跑起来，但扛不住现场"。最主要的风险集中在固件共享状态缺乏并发边界、UI 刷新链路存在无限等待、以及 Host 侧持久化和串口边界处理不够硬。
-
-这些问题不解决就继续铺新功能，只会把不稳定点放大。所以行动路线把地基加固排在功能接线之前。
-
 ## 行动路线
 
-### 第一阶段：固件地基加固
+### ~~第一阶段：固件地基加固~~ ✅ 已完成（2026-04-09）
 
-这是全局阻塞项，优先级最高。不完成这一阶段，后续所有板级验证和数据接线都建立在不稳定模型上。
+四个动作全部落地并通过编译验证。改动覆盖 27 个源文件（+1007 / -120 行）。
 
-#### 动作 1：给运行时状态引入单一写入边界
-
-对应审计发现 #1（高风险）。
-
-范围：`event_bus`、`system_state`、`service_time`、`service_weather`、`service_claude`、`net_manager`、`service_home`。
-
-做法：不再把内部静态快照按裸指针暴露给外部长期读取。改成"复制快照到调用方 buffer"或"通过消息队列投递不可变副本"。每个 service 只在自己的 task 内修改状态，对外只给副本。
-
-完成标准：不再存在多个 task 直接读写同一个可变静态快照。`home_service` 聚合时拿到的是一致快照，而不是若干 live pointer。
-
-#### 动作 2：把 UI 更新收敛到单一线程
-
-对应审计发现 #1（高风险，UI 侧表现）和 #2（高风险）。
-
-范围：`bootstrap`、`app_manager`、所有 `app_*`、`bsp_display`。
-
-做法：引入 UI command queue。Wi-Fi 事件线程、USB reader task、天气 worker、`esp_timer` 回调不再直接驱动 LVGL 更新，只投递"需要刷新"的命令。由 LVGL 所在线程统一消费。
-
-完成标准：app 的 `handle_event()` 不再在任意发布线程里直接跑 LVGL 更新。定时器和网络事件线程里不再出现无限等待显示锁的路径。
-
-#### 动作 3：移除显示链路的无限等待
-
-对应审计发现 #2（高风险）。
-
-范围：`app_manager`、`bsp_display`、`app_notify`、其他直接拿 `bsp_board_lock()` 的路径。
-
-做法：显示锁改成有限超时，超时时记录明确日志。`lvgl_flush_cb()` 等待 flush done 时增加故障超时和错误状态。超时时优先保系统可恢复。
-
-完成标准：关键显示路径不存在无限阻塞。flush 失败时能留下足够的诊断信息。
-
-#### 动作 4：补齐 task 创建失败处理
-
-对应审计发现 #3（高风险）。
-
-范围：`bsp_display`、`power_runtime`、`service_weather`、`service_time`、`device_link`。
-
-做法：检查所有 `xTaskCreatePinnedToCore()` 返回值。启动失败时让初始化链路报错，不默默继续。`bootstrap_start()` 应该能把这类错误明确冒出来。
-
-完成标准：所有关键后台 task 都有失败检测。初始化不会在"半起半不起来"的状态下继续前进。
+动作 1（状态边界）：8 个 service 的 getter 从指针返回改为 copy-out（`void get(X *out)`），6 个 service 加了 FreeRTOS mutex，event payload 统一设为 NULL。动作 2（UI 单线程）：app_manager 引入 16 深 FreeRTOS queue，事件先入队再由 LVGL task 统一消费，app 的 resume/handle_event 不再自己拿显示锁。动作 3（有限超时）：DMA flush 等待从 portMAX_DELAY 改为 1000ms + error recovery，LVGL task 拿锁从 UINT32_MAX 改为 100ms。动作 4（task 创建检查）：5 个文件、6 个 xTaskCreatePinnedToCore 调用点加了返回值检查。
 
 ### 第二阶段：板级闭环与时间语义
 
@@ -190,9 +135,9 @@ Host 侧的问题不阻塞固件推进，但在真实数据流跑起来之前必
 
 在进入下一轮功能迭代之前，至少满足：
 
-1. 固件 UI 更新只从单一线程进入 LVGL
-2. 显示锁和 flush 路径不再有无限等待
-3. 关键后台 task 创建失败会让初始化直接失败
+1. ~~固件 UI 更新只从单一线程进入 LVGL~~ ✅
+2. ~~显示锁和 flush 路径不再有无限等待~~ ✅
+3. ~~关键后台 task 创建失败会让初始化直接失败~~ ✅
 4. RTC 采用 UTC 语义，timezone 只影响展示
 5. Host `state.json` 是原子写入
 6. 串口读缓冲有上限，worker 异常不会被静默吞掉
