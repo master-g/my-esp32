@@ -304,13 +304,35 @@ async fn post_device_rpc(
 }
 
 fn load_state(path: &PathBuf) -> Option<PersistedState> {
-    let contents = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&contents).ok()
+    let contents = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!("failed to read state file {}: {e}", path.display());
+            return None;
+        }
+    };
+    match serde_json::from_str(&contents) {
+        Ok(state) => Some(state),
+        Err(e) => {
+            warn!("corrupted state file {}, starting fresh: {e}", path.display());
+            None
+        }
+    }
 }
 
 fn persist_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
+    use std::io::Write;
+
     let json = serde_json::to_string_pretty(state)?;
-    fs::write(path, json)?;
+    let tmp_path = path.with_extension("json.tmp");
+
+    let mut file = fs::File::create(&tmp_path)
+        .with_context(|| format!("failed to create temp state file {}", tmp_path.display()))?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("failed to rename {} -> {}", tmp_path.display(), path.display()))?;
     Ok(())
 }
 

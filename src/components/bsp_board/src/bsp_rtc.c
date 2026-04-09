@@ -104,7 +104,7 @@ esp_err_t bsp_rtc_read_epoch(uint32_t *epoch_s)
 {
     uint8_t regs[7] = {0};
     struct tm tm_value = {0};
-    time_t local_time;
+    time_t utc_time;
 
     ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, "bsp_rtc", "rtc not initialized");
     ESP_RETURN_ON_FALSE(epoch_s != NULL, ESP_ERR_INVALID_ARG, "bsp_rtc", "epoch pointer required");
@@ -122,13 +122,13 @@ esp_err_t bsp_rtc_read_epoch(uint32_t *epoch_s)
     tm_value.tm_year = bcd_to_dec(regs[6]) + 100;
     tm_value.tm_isdst = -1;
 
-    local_time = mktime(&tm_value);
-    ESP_RETURN_ON_FALSE(local_time > 0, ESP_ERR_INVALID_RESPONSE, "bsp_rtc",
-                        "rtc returned invalid local time");
-    ESP_RETURN_ON_FALSE(bsp_rtc_is_time_plausible((uint32_t)local_time), ESP_ERR_INVALID_RESPONSE,
+    utc_time = timegm(&tm_value);
+    ESP_RETURN_ON_FALSE(utc_time > 0, ESP_ERR_INVALID_RESPONSE, "bsp_rtc",
+                        "rtc returned invalid utc time");
+    ESP_RETURN_ON_FALSE(bsp_rtc_is_time_plausible((uint32_t)utc_time), ESP_ERR_INVALID_RESPONSE,
                         "bsp_rtc", "rtc time not plausible");
 
-    *epoch_s = (uint32_t)local_time;
+    *epoch_s = (uint32_t)utc_time;
     return ESP_OK;
 }
 
@@ -139,7 +139,7 @@ esp_err_t bsp_rtc_write_epoch(uint32_t epoch_s)
     uint8_t regs[7];
 
     ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, "bsp_rtc", "rtc not initialized");
-    localtime_r(&raw, &tm_value);
+    gmtime_r(&raw, &tm_value);
 
     regs[0] = dec_to_bcd((uint8_t)tm_value.tm_sec) & 0x7FU;
     regs[1] = dec_to_bcd((uint8_t)tm_value.tm_min);

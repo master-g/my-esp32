@@ -24,7 +24,14 @@ pub fn serial_port() -> Option<String> {
 }
 
 pub fn serial_baud() -> u32 {
-    env_value_or("ESP32DASH_SERIAL_BAUD", &DEFAULT_SERIAL_BAUD.to_string())
-        .parse::<u32>()
-        .unwrap_or(DEFAULT_SERIAL_BAUD)
+    let raw = env_value_or("ESP32DASH_SERIAL_BAUD", &DEFAULT_SERIAL_BAUD.to_string());
+    match raw.parse::<u32>() {
+        Ok(baud) => baud,
+        Err(err) => {
+            tracing::warn!(
+                "invalid ESP32DASH_SERIAL_BAUD={raw:?} ({err}), falling back to {DEFAULT_SERIAL_BAUD}"
+            );
+            DEFAULT_SERIAL_BAUD
+        }
+    }
 }

@@ -25,6 +25,7 @@ use tokio::sync::oneshot;
 
 pub const PROTOCOL_PREFIX: &str = "@esp32dash ";
 
+const MAX_LINE_BUFFER: usize = 4096;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -83,7 +84,9 @@ impl DeviceManager {
     }
 
     pub fn send_snapshot(&self, snapshot: Snapshot) {
-        let _ = self.cmd_tx.send(WorkerCommand::UpdateSnapshot(snapshot));
+        if let Err(err) = self.cmd_tx.send(WorkerCommand::UpdateSnapshot(snapshot)) {
+            tracing::warn!("failed to queue snapshot for device worker: {err}");
+        }
     }
 
     pub async fn rpc(&self, request: RpcRequest) -> Result<Value> {
@@ -563,6 +566,13 @@ impl UnixSerialPort {
             }
 
             self.read_buf.extend_from_slice(&buf[..rc as usize]);
+
+            if self.read_buf.len() > MAX_LINE_BUFFER {
+                tracing::warn!(
+                    "serial read buffer exceeded {MAX_LINE_BUFFER} bytes without newline, discarding"
+                );
+                self.read_buf.clear();
+            }
         }
     }
 }
