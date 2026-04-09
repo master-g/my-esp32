@@ -42,6 +42,7 @@ void home_service_refresh_snapshot(void)
     s_snapshot.rtc_valid = time_snapshot->rtc_valid;
     s_snapshot.ntp_synced = time_snapshot->ntp_synced;
     s_snapshot.wifi_connected = net_snapshot->wifi_connected;
+    s_snapshot.wifi_connecting = (net_snapshot->state == NET_STATE_CONNECTING);
     copy_text(s_snapshot.time_text, sizeof(s_snapshot.time_text), time_snapshot->time_text);
     copy_text(s_snapshot.date_text, sizeof(s_snapshot.date_text), time_snapshot->date_text);
     copy_text(s_snapshot.weekday_text, sizeof(s_snapshot.weekday_text),
@@ -56,6 +57,7 @@ void home_service_refresh_snapshot(void)
     copy_text(s_snapshot.city_text, sizeof(s_snapshot.city_text), weather_snapshot->city);
     s_snapshot.temperature_c_tenths = weather_snapshot->temperature_c_tenths;
     s_snapshot.weather_icon_id = weather_snapshot->icon_id;
+    s_snapshot.claude_connected = (claude_snapshot->conn_state == CLAUDE_CONN_CONNECTED);
     s_snapshot.claude_unread = claude_snapshot->unread;
 }
 

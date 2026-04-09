@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "src/app_home.c"
+        "src/generated/app_home_status_font.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

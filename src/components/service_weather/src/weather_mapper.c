@@ -45,46 +45,47 @@ const char *weather_mapper_text_for_code(uint16_t weather_code, bool is_day)
     }
 }
 
-uint8_t weather_mapper_icon_for_code(uint16_t weather_code, bool is_day)
+weather_icon_t weather_mapper_icon_for_code(uint16_t weather_code, bool is_day)
 {
-    (void)is_day;
-
     switch (weather_code) {
     case 0:
-        return 1;
+        return is_day ? WEATHER_ICON_CLEAR_DAY : WEATHER_ICON_CLEAR_NIGHT;
     case 1:
     case 2:
+        return is_day ? WEATHER_ICON_PARTLY_CLOUDY_DAY : WEATHER_ICON_PARTLY_CLOUDY_NIGHT;
     case 3:
-        return 2;
+        return WEATHER_ICON_CLOUDY;
     case 45:
     case 48:
-        return 3;
+        return WEATHER_ICON_FOG;
     case 51:
     case 53:
     case 55:
     case 56:
     case 57:
+        return WEATHER_ICON_DRIZZLE;
     case 61:
     case 63:
+    case 80:
+    case 81:
+        return WEATHER_ICON_RAIN;
     case 65:
     case 66:
     case 67:
-    case 80:
-    case 81:
     case 82:
-        return 4;
+        return WEATHER_ICON_HEAVY_RAIN;
     case 71:
     case 73:
     case 75:
     case 77:
     case 85:
     case 86:
-        return 5;
+        return WEATHER_ICON_SNOW;
     case 95:
     case 96:
     case 99:
-        return 6;
+        return WEATHER_ICON_THUNDER;
     default:
-        return 0;
+        return WEATHER_ICON_UNKNOWN;
     }
 }

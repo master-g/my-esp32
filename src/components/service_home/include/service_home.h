@@ -5,11 +5,13 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "service_weather.h"
 
 typedef struct {
     bool rtc_valid;
     bool ntp_synced;
     bool wifi_connected;
+    bool wifi_connecting;
     bool weather_available;
     bool weather_stale;
     uint32_t updated_at_epoch_s;
@@ -19,7 +21,8 @@ typedef struct {
     char weather_text[24];
     char city_text[24];
     int16_t temperature_c_tenths;
-    uint8_t weather_icon_id;
+    weather_icon_t weather_icon_id;
+    bool claude_connected;
     bool claude_unread;
 } home_snapshot_t;
 

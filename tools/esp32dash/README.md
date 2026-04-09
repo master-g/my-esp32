@@ -20,6 +20,7 @@ cargo run -- device reboot
 cargo run -- config
 cargo run -- install-launchd
 cargo run -- uninstall-launchd
+cargo run -- install-hooks
 ```
 
 ## Environment
@@ -54,29 +55,26 @@ cargo run -- agent status
 
 ## Claude Code Hook
 
-Use [hooks/esp32dash-hook.sh](./hooks/esp32dash-hook.sh) as the hook command target. It forwards hook stdin to `esp32dash claude ingest --event-from-stdin`.
+Install the hook wrapper and update `~/.claude/settings.json` automatically:
 
-Example hook command:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/tools/esp32dash/hooks/esp32dash-hook.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
+```bash
+cargo run -- install-hooks
 ```
 
-Register the same shell wrapper for:
+Use `-f` to skip the interactive confirmation:
 
+```bash
+cargo run -- install-hooks --force
+```
+
+The command writes `~/.claude/hooks/esp32dash-hook.sh`, preserves existing Claude hooks, and only appends any missing `esp32dash` entries in `~/.claude/settings.json`.
+
+Running it again is safe. If the hook script and settings entries are already in place, the command becomes a no-op. `-f` only skips the confirmation prompt before writing changes.
+
+The hook config added by `install-hooks` covers:
+
+- `SessionStart`
+- `SessionEnd`
 - `Notification`
 - `UserPromptSubmit`
 - `PreToolUse`
@@ -84,8 +82,7 @@ Register the same shell wrapper for:
 - `Stop`
 - `SubagentStop`
 - `PreCompact`
-- `SessionStart`
-- `SessionEnd`
+- `PermissionRequest`
 
 ## launchd
 

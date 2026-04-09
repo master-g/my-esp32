@@ -1,0 +1,17 @@
+{
+  "name": "lv-font-pipeline",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local tooling for generating LVGL icon fonts for the ESP32 dashboard",
+  "license": "UNLICENSED",
+  "scripts": {
+    "fetch:sources": "./scripts/fetch_sources.sh",
+    "generate:home-status": "./scripts/generate_home_status_font.sh",
+    "build": "npm run fetch:sources && npm run generate:home-status"
+  },
+  "devDependencies": {
+    "bootstrap-icons": "1.13.1",
+    "lv_font_conv": "1.5.3",
+    "yaml": "2.8.1"
+  }
+}

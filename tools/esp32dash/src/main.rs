@@ -2,6 +2,7 @@ mod agent;
 mod compat;
 mod config_ui;
 mod device;
+mod hooks;
 mod launchd;
 mod model;
 mod normalizer;
@@ -24,6 +25,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use crate::{
     agent::Config,
     device::{UnixSerialFactory, discover_devices, request_direct},
+    hooks::InstallHooksResult,
     model::{AdminErrorResponse, AdminRpcResponse, LocalHookEvent, RawHookInput, RpcRequest},
     normalizer::sanitize_prompt_preview,
 };
@@ -75,6 +77,10 @@ enum Command {
     InstallLaunchd,
     #[command(about = "Remove the esp32dash launchd service on macOS")]
     UninstallLaunchd,
+    #[command(
+        about = "Install the Claude hook wrapper and register hooks in ~/.claude/settings.json"
+    )]
+    InstallHooks(InstallHooksArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -127,6 +133,16 @@ struct ConfigArgs {
     port: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct InstallHooksArgs {
+    #[arg(
+        short = 'f',
+        long,
+        help = "Overwrite and update without interactive confirmation"
+    )]
+    force: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -154,6 +170,7 @@ async fn main() -> Result<()> {
         Command::Config(args) => config_ui::run_config_editor(args.port).await,
         Command::InstallLaunchd => install_launchd(),
         Command::UninstallLaunchd => uninstall_launchd(),
+        Command::InstallHooks(args) => install_hooks(args),
     }
 }
 
@@ -298,6 +315,13 @@ fn uninstall_launchd() -> Result<()> {
         None => println!("{{\"ok\":true,\"removed\":null}}"),
     }
     Ok(())
+}
+
+fn install_hooks(args: InstallHooksArgs) -> Result<()> {
+    let executable = env::current_exe().context("failed to resolve current executable")?;
+    let executable = executable.canonicalize().unwrap_or(executable);
+    let result: InstallHooksResult = hooks::install_hooks(&executable, args.force)?;
+    print_json(&result)
 }
 
 fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {

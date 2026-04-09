@@ -17,6 +17,21 @@ typedef enum {
     WEATHER_ERROR,
 } weather_state_t;
 
+typedef enum {
+    WEATHER_ICON_UNKNOWN = 0,
+    WEATHER_ICON_CLEAR_DAY,
+    WEATHER_ICON_CLEAR_NIGHT,
+    WEATHER_ICON_PARTLY_CLOUDY_DAY,
+    WEATHER_ICON_PARTLY_CLOUDY_NIGHT,
+    WEATHER_ICON_CLOUDY,
+    WEATHER_ICON_FOG,
+    WEATHER_ICON_DRIZZLE,
+    WEATHER_ICON_RAIN,
+    WEATHER_ICON_HEAVY_RAIN,
+    WEATHER_ICON_SNOW,
+    WEATHER_ICON_THUNDER,
+} weather_icon_t;
+
 typedef struct {
     char city_label[WEATHER_CITY_LABEL_MAX];
     char latitude[WEATHER_COORD_TEXT_MAX];
@@ -30,7 +45,7 @@ typedef struct {
     char city[WEATHER_CITY_LABEL_MAX];
     char text[24];
     int16_t temperature_c_tenths;
-    uint8_t icon_id;
+    weather_icon_t icon_id;
 } weather_snapshot_t;
 
 esp_err_t weather_service_init(void);
