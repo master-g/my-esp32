@@ -6,6 +6,34 @@ const TITLE_MAX: usize = 32;
 const DETAIL_MAX: usize = 96;
 const PROMPT_MAX: usize = 96;
 
+/// Replace non-ASCII characters with a space, then collapse runs of whitespace.
+/// Keeps the text renderable on the ESP32's Latin-only font.
+fn ascii_safe(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut prev_space = true; // start true to trim leading
+    for ch in input.chars() {
+        if ch.is_ascii() && !ch.is_ascii_control() {
+            if ch == ' ' {
+                if !prev_space {
+                    result.push(' ');
+                    prev_space = true;
+                }
+            } else {
+                result.push(ch);
+                prev_space = false;
+            }
+        } else if !prev_space {
+            result.push(' ');
+            prev_space = true;
+        }
+    }
+    let trimmed = result.trim_end().to_string();
+    if trimmed.is_empty() && !input.trim().is_empty() {
+        return String::new();
+    }
+    trimmed
+}
+
 pub fn truncate_single_line(input: &str, max_chars: usize) -> String {
     input
         .lines()
@@ -133,9 +161,9 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
         session_id: event.session_id.clone(),
         event: event.hook_event_name.clone(),
         status: status.as_str().to_string(),
-        title: truncate_title(&title),
+        title: truncate_title(&ascii_safe(&title)),
         workspace,
-        detail,
+        detail: truncate_detail(&ascii_safe(&detail)),
         permission_mode,
         ts: event.recv_ts,
         unread,
@@ -239,7 +267,7 @@ mod tests {
     use crate::model::Snapshot;
 
     use super::{
-        apply_notification_status, build_workspace, materially_equal, normalize,
+        apply_notification_status, ascii_safe, build_workspace, materially_equal, normalize,
         sanitize_prompt_preview,
     };
     use crate::model::LocalHookEvent;
@@ -251,6 +279,31 @@ mod tests {
             sanitize_prompt_preview(prompt).as_deref(),
             Some("hello world")
         );
+    }
+
+    #[test]
+    fn ascii_safe_strips_cjk() {
+        assert_eq!(ascii_safe("hello 你好 world"), "hello world");
+    }
+
+    #[test]
+    fn ascii_safe_pure_chinese_becomes_empty() {
+        assert_eq!(ascii_safe("你好世界"), "");
+    }
+
+    #[test]
+    fn ascii_safe_mixed_preserves_ascii() {
+        assert_eq!(ascii_safe("创建文件 test.rs 并写入"), "test.rs");
+    }
+
+    #[test]
+    fn ascii_safe_emoji_stripped() {
+        assert_eq!(ascii_safe("building 🔨 stuff"), "building stuff");
+    }
+
+    #[test]
+    fn ascii_safe_pure_ascii_unchanged() {
+        assert_eq!(ascii_safe("hello world"), "hello world");
     }
 
     #[test]
