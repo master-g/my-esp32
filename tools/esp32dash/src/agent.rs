@@ -35,6 +35,8 @@ use crate::{
 
 const RING_BUFFER_CAPACITY: usize = 64;
 const PRE_TOOL_COALESCE_MS: u64 = 300;
+const INACTIVITY_TIMEOUT_SECS: u64 = 300;
+const INACTIVITY_CHECK_INTERVAL_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -84,6 +86,7 @@ struct AgentState {
     snapshot: Snapshot,
     history: VecDeque<Snapshot>,
     pending_tool: Option<PendingToolEvent>,
+    last_event_ts: std::time::Instant,
 }
 
 impl AgentState {
@@ -94,6 +97,7 @@ impl AgentState {
             snapshot: initial,
             history: VecDeque::with_capacity(RING_BUFFER_CAPACITY),
             pending_tool: None,
+            last_event_ts: std::time::Instant::now(),
         }
     }
 }
@@ -109,6 +113,41 @@ pub struct AppState {
 
 pub async fn run(config: Config) -> Result<()> {
     let app_state = build_app_state(config.clone(), Arc::new(UnixSerialFactory));
+
+    // Spawn inactivity timer
+    let inactivity_state = Arc::new(app_state.clone());
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(INACTIVITY_CHECK_INTERVAL_SECS));
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let guard = inactivity_state.state.lock().await;
+            let elapsed = guard.last_event_ts.elapsed();
+            let is_active = !matches!(
+                guard.snapshot.status.as_str(),
+                "ended" | "unknown"
+            );
+            drop(guard);
+
+            if is_active && elapsed >= Duration::from_secs(INACTIVITY_TIMEOUT_SECS) {
+                info!("inactivity timeout ({}s), transitioning to sleep", elapsed.as_secs());
+                let sleep_event = LocalHookEvent {
+                    session_id: String::new(),
+                    cwd: String::new(),
+                    hook_event_name: "Stop".into(),
+                    message: Some("Inactivity timeout".into()),
+                    prompt_preview: None,
+                    tool_name: None,
+                    tool_use_id: None,
+                    permission_mode: "default".into(),
+                    recv_ts: now_epoch(),
+                };
+                inactivity_state.ingest(sleep_event).await;
+            }
+        }
+    });
+
     let router = build_router(app_state);
 
     let listener = TcpListener::bind(config.admin_addr)
@@ -218,6 +257,7 @@ impl AppState {
     async fn process_event(self: &Arc<Self>, event: LocalHookEvent) {
         let persist = {
             let mut guard = self.state.lock().await;
+            guard.last_event_ts = std::time::Instant::now();
             let current = guard.snapshot.clone();
             let mut next = normalize(&event, &current);
             if event.hook_event_name == "Notification" {
@@ -631,7 +671,7 @@ mod tests {
         match last {
             WireFrame::Event { method, payload } => {
                 assert_eq!(method, "claude.update");
-                assert_eq!(payload["status"], "waiting_for_input");
+                assert_eq!(payload["status"], "unknown");
                 assert_eq!(
                     payload["attention"],
                     serde_json::to_value(Attention::Medium)?

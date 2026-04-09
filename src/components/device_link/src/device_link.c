@@ -950,3 +950,11 @@ void device_link_resolve_approval(approval_decision_t decision)
     s_approval_decision = decision;
     xSemaphoreGive(s_approval_sem);
 }
+
+void device_link_cancel_approval(void)
+{
+    if (s_approval_req.pending) {
+        s_approval_decision = APPROVAL_DECISION_DENY;
+        xSemaphoreGive(s_approval_sem);
+    }
+}

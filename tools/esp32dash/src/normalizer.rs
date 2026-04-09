@@ -41,7 +41,7 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
 
     let (title, detail) = match event.hook_event_name.as_str() {
         "SessionStart" => (
-            "Session ready".to_string(),
+            "Session started".to_string(),
             "Workspace available".to_string(),
         ),
         "UserPromptSubmit" => (
@@ -51,15 +51,20 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
                 .clone()
                 .unwrap_or_else(|| "User prompt received".to_string()),
         ),
-        "PreToolUse" => (
-            "Running tool".to_string(),
-            truncate_detail(
-                event
-                    .tool_name
-                    .as_deref()
-                    .unwrap_or("Tool execution started"),
-            ),
-        ),
+        "PreToolUse" => {
+            if event.tool_name.as_deref() == Some("AskUserQuestion") {
+                status = RunStatus::WaitingForInput;
+            }
+            (
+                "Running tool".to_string(),
+                truncate_detail(
+                    event
+                        .tool_name
+                        .as_deref()
+                        .unwrap_or("Tool execution started"),
+                ),
+            )
+        }
         "PostToolUse" => (
             "Tool finished".to_string(),
             truncate_detail(
@@ -89,7 +94,7 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
             unread = true;
             attention = Attention::Medium;
             (
-                "Ready for input".to_string(),
+                "Idle".to_string(),
                 truncate_detail(
                     event
                         .message
@@ -172,13 +177,13 @@ fn map_status(event: &str) -> RunStatus {
     match event {
         "UserPromptSubmit" => RunStatus::Processing,
         "PreCompact" => RunStatus::Compacting,
-        "SessionStart" => RunStatus::WaitingForInput,
+        "SessionStart" => RunStatus::Unknown,
         "SessionEnd" => RunStatus::Ended,
         "PreToolUse" => RunStatus::RunningTool,
         "PostToolUse" => RunStatus::Processing,
         "PermissionRequest" => RunStatus::WaitingForInput,
-        "Stop" => RunStatus::WaitingForInput,
-        "SubagentStop" => RunStatus::WaitingForInput,
+        "Stop" => RunStatus::Unknown,
+        "SubagentStop" => RunStatus::Unknown,
         "Notification" => RunStatus::Unknown,
         _ => RunStatus::Unknown,
     }
@@ -299,5 +304,58 @@ mod tests {
         let mut b = Snapshot::empty(2);
         b.seq = 8;
         assert!(materially_equal(&a, &b));
+    }
+
+    fn make_event(name: &str) -> LocalHookEvent {
+        LocalHookEvent {
+            session_id: "sess".into(),
+            cwd: "/tmp/project".into(),
+            hook_event_name: name.into(),
+            message: None,
+            prompt_preview: None,
+            tool_name: None,
+            tool_use_id: None,
+            permission_mode: "default".into(),
+            recv_ts: 10,
+        }
+    }
+
+    #[test]
+    fn stop_maps_to_unknown_idle() {
+        let current = Snapshot::empty(1);
+        let snapshot = normalize(&make_event("Stop"), &current);
+        assert_eq!(snapshot.status, "unknown");
+    }
+
+    #[test]
+    fn subagent_stop_maps_to_unknown_idle() {
+        let current = Snapshot::empty(1);
+        let snapshot = normalize(&make_event("SubagentStop"), &current);
+        assert_eq!(snapshot.status, "unknown");
+    }
+
+    #[test]
+    fn session_start_maps_to_unknown_idle() {
+        let current = Snapshot::empty(1);
+        let snapshot = normalize(&make_event("SessionStart"), &current);
+        assert_eq!(snapshot.status, "unknown");
+    }
+
+    #[test]
+    fn pre_tool_use_ask_user_question_maps_to_waiting() {
+        let current = Snapshot::empty(1);
+        let mut event = make_event("PreToolUse");
+        event.tool_name = Some("AskUserQuestion".into());
+        let snapshot = normalize(&event, &current);
+        assert_eq!(snapshot.status, "waiting_for_input");
+    }
+
+    #[test]
+    fn pre_tool_use_other_tool_maps_to_running_tool() {
+        let current = Snapshot::empty(1);
+        let mut event = make_event("PreToolUse");
+        event.tool_name = Some("Write".into());
+        let snapshot = normalize(&event, &current);
+        assert_eq!(snapshot.status, "running_tool");
     }
 }

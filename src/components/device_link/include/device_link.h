@@ -31,4 +31,10 @@ bool device_link_get_pending_approval(approval_request_t *out);
  */
 void device_link_resolve_approval(approval_decision_t decision);
 
+/**
+ * Cancel a pending approval (e.g., on connection loss).
+ * Resolves with DENY and unblocks the RPC handler.
+ */
+void device_link_cancel_approval(void);
+
 #endif

@@ -39,6 +39,7 @@ static void tick_1s_cb(void *arg)
     };
 
     (void)arg;
+    claude_service_check_staleness();
     event_bus_publish(&event);
 }
 

@@ -19,10 +19,10 @@
 #define HOME_STATUS_ITEM_BOX_SIZE (HOME_STATUS_ICON_SIZE + 4)
 #define HOME_STATUS_BAR_Y 4
 #define HOME_TIME_Y 30
-#define HOME_WIFI_ONLINE_COLOR 0xa6f0ff
+#define HOME_WIFI_ONLINE_COLOR 0xffffff
 #define HOME_WIFI_CONNECTING_COLOR 0xf3c76d
 #define HOME_ICON_MUTED_COLOR 0x5f6b72
-#define HOME_CLAUDE_ACTIVE_COLOR 0xe9e0cf
+#define HOME_CLAUDE_ACTIVE_COLOR 0xffffff
 #define HOME_CLAUDE_UNREAD_DOT_COLOR 0xf06c41
 #define HOME_WIFI_CONNECTING_DOT_COLOR 0xf3c76d
 #define HOME_WEATHER_ROW_HEIGHT 20
@@ -38,6 +38,7 @@
 #define HOME_BUBBLE_PAD_V 4
 #define HOME_BUBBLE_RADIUS 8
 #define HOME_BUBBLE_FADE_MS 5000
+#define HOME_UNREAD_AUTO_CLEAR_MS 5000
 
 #define HOME_LEFT_HALF_W 280
 #define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
@@ -108,6 +109,9 @@ static app_home_view_t s_view;
 static sprite_ctx_t s_sprite;
 static lv_timer_t *s_bubble_timer;
 static bool s_bubble_dismissed;
+static lv_timer_t *s_unread_timer;
+static uint32_t s_unread_seq;
+static bool s_was_connected;
 
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
@@ -220,6 +224,24 @@ static void set_status_dot_visible(lv_obj_t *dot, bool visible)
     }
 }
 
+static void unread_auto_clear_cb(lv_timer_t *t)
+{
+    (void)t;
+    claude_service_mark_read(s_unread_seq);
+    s_unread_timer = NULL;
+}
+
+static void schedule_unread_clear(uint32_t seq)
+{
+    s_unread_seq = seq;
+    if (s_unread_timer != NULL) {
+        lv_timer_reset(s_unread_timer);
+        return;
+    }
+    s_unread_timer = lv_timer_create(unread_auto_clear_cb, HOME_UNREAD_AUTO_CLEAR_MS, NULL);
+    lv_timer_set_repeat_count(s_unread_timer, 1);
+}
+
 static void refresh_status_bar(const home_snapshot_t *snapshot)
 {
     lv_color_t wifi_color = lv_color_hex(HOME_ICON_MUTED_COLOR);
@@ -238,7 +260,7 @@ static void refresh_status_bar(const home_snapshot_t *snapshot)
     if (snapshot->claude_unread) {
         claude_color = lv_color_hex(HOME_CLAUDE_ACTIVE_COLOR);
     } else if (snapshot->claude_connected) {
-        claude_color = lv_color_hex(0xaebcc4);
+        claude_color = lv_color_hex(HOME_CLAUDE_ACTIVE_COLOR);
     }
 
     lv_obj_set_style_text_color(s_view.wifi_icon, wifi_color, 0);
@@ -609,6 +631,10 @@ static void app_home_suspend(void)
         lv_timer_delete(s_bubble_timer);
         s_bubble_timer = NULL;
     }
+    if (s_unread_timer != NULL) {
+        lv_timer_delete(s_unread_timer);
+        s_unread_timer = NULL;
+    }
 }
 
 static void app_home_handle_event(const app_event_t *event)
@@ -620,12 +646,36 @@ static void app_home_handle_event(const app_event_t *event)
     switch (event->type) {
     case APP_EVENT_POWER_CHANGED:
     case APP_EVENT_NET_CHANGED:
-    case APP_EVENT_DATA_CLAUDE:
     case APP_EVENT_DATA_WEATHER:
     case APP_EVENT_TICK_1S:
         home_service_refresh_snapshot();
         refresh_view();
         break;
+    case APP_EVENT_DATA_CLAUDE: {
+        home_service_refresh_snapshot();
+        home_snapshot_t snap;
+        home_service_get_snapshot(&snap);
+
+        /* T3: auto-dismiss approval overlay on disconnect */
+        if (s_was_connected && !snap.claude_connected) {
+            if (s_view.approval_overlay != NULL &&
+                !lv_obj_has_flag(s_view.approval_overlay, LV_OBJ_FLAG_HIDDEN)) {
+                device_link_cancel_approval();
+                lv_obj_add_flag(s_view.approval_overlay, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        s_was_connected = snap.claude_connected;
+
+        /* T6: auto-clear unread dot after 5s */
+        if (snap.claude_unread) {
+            claude_snapshot_t cs;
+            claude_service_get_snapshot(&cs);
+            schedule_unread_clear(cs.seq);
+        }
+
+        refresh_view();
+        break;
+    }
     case APP_EVENT_PERMISSION_REQUEST:
         show_approval_overlay();
         break;

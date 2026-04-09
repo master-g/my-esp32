@@ -51,4 +51,11 @@ bool claude_service_has_unread(void);
 void claude_service_mark_read(uint32_t seq);
 claude_conn_state_t claude_service_get_conn_state(void);
 
+/**
+ * Check if the connection has gone stale (no update for 30s).
+ * Call this from a periodic tick. Returns true if state transitioned
+ * from CONNECTED to DISCONNECTED.
+ */
+bool claude_service_check_staleness(void);
+
 #endif
