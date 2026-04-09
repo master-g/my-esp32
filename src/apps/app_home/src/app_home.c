@@ -36,6 +36,7 @@
 #define HOME_BUBBLE_PAD_H 6
 #define HOME_BUBBLE_PAD_V 4
 #define HOME_BUBBLE_RADIUS 8
+#define HOME_BUBBLE_FADE_MS 5000
 
 #define HOME_LEFT_HALF_W 280
 #define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
@@ -89,6 +90,7 @@ typedef struct {
 
 static app_home_view_t s_view;
 static sprite_ctx_t s_sprite;
+static lv_timer_t *s_bubble_timer;
 
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
@@ -208,8 +210,12 @@ static void refresh_status_bar(const home_snapshot_t *snapshot)
 
     if (snapshot->wifi_connected) {
         wifi_color = lv_color_hex(HOME_WIFI_ONLINE_COLOR);
+        lv_label_set_text_static(s_view.wifi_icon, APP_HOME_SYMBOL_WIFI);
     } else if (snapshot->wifi_connecting) {
         wifi_color = lv_color_hex(HOME_WIFI_CONNECTING_COLOR);
+        lv_label_set_text_static(s_view.wifi_icon, APP_HOME_SYMBOL_WIFI);
+    } else {
+        lv_label_set_text_static(s_view.wifi_icon, APP_HOME_SYMBOL_WIFI_OFF);
     }
 
     if (snapshot->claude_unread) {
@@ -273,6 +279,18 @@ static void refresh_sprite(const home_snapshot_t *snapshot)
     }
 }
 
+static void bubble_fade_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_view.bubble_box != NULL) {
+        lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_bubble_timer != NULL) {
+        lv_timer_delete(s_bubble_timer);
+        s_bubble_timer = NULL;
+    }
+}
+
 static void refresh_bubble(const home_snapshot_t *snapshot)
 {
     bool show;
@@ -284,10 +302,25 @@ static void refresh_bubble(const home_snapshot_t *snapshot)
     show = (snapshot->claude_detail[0] != '\0') && (s_sprite.state != SPRITE_STATE_SLEEPING);
 
     if (show) {
+        const char *cur = lv_label_get_text(s_view.bubble_label);
+        bool text_changed = (cur == NULL || strcmp(cur, snapshot->claude_detail) != 0);
+
         lv_label_set_text(s_view.bubble_label, snapshot->claude_detail);
         lv_obj_clear_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+
+        if (text_changed) {
+            if (s_bubble_timer != NULL) {
+                lv_timer_delete(s_bubble_timer);
+            }
+            s_bubble_timer = lv_timer_create(bubble_fade_cb, HOME_BUBBLE_FADE_MS, NULL);
+            lv_timer_set_repeat_count(s_bubble_timer, 1);
+        }
     } else {
         lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+        if (s_bubble_timer != NULL) {
+            lv_timer_delete(s_bubble_timer);
+            s_bubble_timer = NULL;
+        }
     }
 }
 
@@ -459,6 +492,10 @@ static void app_home_suspend(void)
 {
     if (s_sprite.timer != NULL) {
         lv_timer_pause(s_sprite.timer);
+    }
+    if (s_bubble_timer != NULL) {
+        lv_timer_delete(s_bubble_timer);
+        s_bubble_timer = NULL;
     }
 }
 

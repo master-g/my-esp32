@@ -338,6 +338,7 @@ fn run_chibi_command(command: ChibiCommand) -> Result<()> {
 
 fn build_test_snapshot(state: &ChibiState, bubble: Option<&str>) -> Snapshot {
     let status = state.to_run_status();
+    let unread = matches!(state, ChibiState::Waiting);
     Snapshot {
         seq: 1,
         source: "chibi_test".to_string(),
@@ -349,8 +350,12 @@ fn build_test_snapshot(state: &ChibiState, bubble: Option<&str>) -> Snapshot {
         detail: bubble.unwrap_or_default().to_string(),
         permission_mode: "default".to_string(),
         ts: now_epoch(),
-        unread: true,
-        attention: Attention::Medium,
+        unread,
+        attention: if unread {
+            Attention::Medium
+        } else {
+            Attention::Low
+        },
     }
 }
 
