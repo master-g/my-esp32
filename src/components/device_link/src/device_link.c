@@ -649,7 +649,7 @@ static cJSON *build_device_info(void)
     cJSON_AddStringToObject(result, "wifi_state",
                             (net.state == NET_STATE_UP)           ? "up"
                             : (net.state == NET_STATE_CONNECTING) ? "connecting"
-                                                                   : "down");
+                                                                  : "down");
     cJSON_AddStringToObject(result, "ssid", net.ssid);
     cJSON_AddStringToObject(result, "ip_addr", net.ip_addr);
     cJSON_AddBoolToObject(result, "has_credentials", net.has_credentials);
@@ -695,8 +695,11 @@ static void handle_event_frame(const cJSON *root)
 
     if (strcmp(method->valuestring, "claude.update") == 0) {
         claude_snapshot_t snapshot = {0};
-        if (parse_claude_update(payload, &snapshot) == ESP_OK) {
+        esp_err_t err = parse_claude_update(payload, &snapshot);
+        if (err == ESP_OK) {
             claude_service_apply_remote_snapshot(&snapshot);
+        } else {
+            ESP_LOGW(TAG, "claude.update: parse failed (0x%x)", (unsigned)err);
         }
     }
 }
@@ -772,6 +775,7 @@ static void process_protocol_line(const char *line)
 
     root = cJSON_Parse(line + strlen(DEVICE_LINK_PROTOCOL_PREFIX));
     if (root == NULL) {
+        ESP_LOGW(TAG, "proto: JSON parse failed");
         return;
     }
 
@@ -795,25 +799,21 @@ static void reader_task(void *arg)
 
     (void)arg;
 
+    ESP_LOGI(TAG, "reader_task started, usb_fd=%d", s_usb_fd);
+
     for (;;) {
-        int bytes_read = (s_usb_fd >= 0) ? (int)read(s_usb_fd, buffer, sizeof(buffer)) : -1;
-        int i = 0;
+        /* Bypass VFS — read directly from driver ring buffer.
+         * The USB Serial JTAG VFS uses a global singleton context (s_ctx)
+         * shared between /dev/usbserjtag and /dev/secondary (console).
+         * Reading through VFS read() is unreliable when the secondary
+         * console is enabled. Direct driver reads work correctly. */
+        int bytes_read = usb_serial_jtag_read_bytes(buffer, sizeof(buffer), pdMS_TO_TICKS(20));
 
-        if (bytes_read < 0) {
-            if (errno == EAGAIN) {
-                vTaskDelay(pdMS_TO_TICKS(20));
-                continue;
-            }
-            vTaskDelay(pdMS_TO_TICKS(20));
+        if (bytes_read <= 0) {
             continue;
         }
 
-        if (bytes_read == 0) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-
-        for (i = 0; i < bytes_read; ++i) {
+        for (int i = 0; i < bytes_read; ++i) {
             char ch = (char)buffer[i];
 
             if (ch == '\r') {
@@ -840,7 +840,10 @@ static void reader_task(void *arg)
 esp_err_t device_link_init(void)
 {
     uint8_t mac[6] = {0};
-    usb_serial_jtag_driver_config_t usb_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    usb_serial_jtag_driver_config_t usb_config = {
+        .tx_buffer_size = 256,
+        .rx_buffer_size = 1024,
+    };
 
     if (s_started) {
         return ESP_OK;
