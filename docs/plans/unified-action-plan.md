@@ -22,47 +22,23 @@
 
 动作 1（状态边界）：8 个 service 的 getter 从指针返回改为 copy-out（`void get(X *out)`），6 个 service 加了 FreeRTOS mutex，event payload 统一设为 NULL。动作 2（UI 单线程）：app_manager 引入 16 深 FreeRTOS queue，事件先入队再由 LVGL task 统一消费，app 的 resume/handle_event 不再自己拿显示锁。动作 3（有限超时）：DMA flush 等待从 portMAX_DELAY 改为 1000ms + error recovery，LVGL task 拿锁从 UINT32_MAX 改为 100ms。动作 4（task 创建检查）：5 个文件、6 个 xTaskCreatePinnedToCore 调用点加了返回值检查。
 
-### 第二阶段：板级闭环与时间语义
-
-第一阶段修完地基之后，进入板级端到端验证。RTC 语义修正放在这个阶段，因为它属于板级正确性，不是业务功能。
+### 第二阶段：板级闭环与时间语义（部分完成）
 
 #### 动作 5：P0 板级打通验证
 
-对应项目进度计划中的 `board-bringup-validation`。
+范围：实机全链路。验证项：LCD 刷新稳定性、触摸坐标读数、RTC 读写恢复、Wi-Fi 联网与断线重连、NTP 校时写回 RTC、`power_policy` 对亮度/dim/sleep 的实际驱动效果。大部分已通过串口日志确认，背光 dim/sleep 端到端仍需回归。
 
-范围：实机全链路。
+#### ~~动作 6：把 RTC 统一成 UTC 语义~~ ✅ 已完成（2026-04-09）
 
-验证项：LCD 刷新稳定性、触摸坐标读数、RTC 读写恢复、Wi-Fi 联网与断线重连、NTP 校时写回 RTC、`power_policy` 对亮度/dim/sleep 的实际驱动效果。
-
-完成标准：在实机上完成所有验证项的至少一轮回归记录。
-
-#### 动作 6：把 RTC 统一成 UTC 语义
-
-对应审计发现 #4（中风险）。
-
-范围：`bsp_rtc`、`service_time`。
-
-做法：RTC 里只存 UTC 对应的 calendar time。timezone 只影响展示和本地格式化，不影响 RTC 持久化语义。timezone 变更后，系统显示文本更新即可，不要让已存 RTC 数据重新解释成另一套 epoch。
-
-完成标准：断网重启后，RTC 恢复结果不依赖当前 `TZ`。timezone 修改不会让 RTC 恢复出的 epoch 漂移。
+`bsp_rtc.c` 的 `localtime_r`→`gmtime_r`、`mktime`→`timegm`。RTC 芯片现在存储 UTC calendar，timezone 变更不影响 epoch 恢复。
 
 ### 第三阶段：数据服务接线
 
-板级闭环稳定后，补齐真实数据链路。天气系统的结构化解析要求（审计发现 #5）在这一阶段随 weather_client 重新实现时一并解决。
+板级闭环稳定后，补齐真实数据链路。
 
-#### 动作 7：天气服务落地
+#### ~~动作 7：天气服务落地~~ ✅ 已就绪（2026-04-09）
 
-对应天气系统实施计划全文和审计发现 #5（中风险）。
-
-上游：Open-Meteo Forecast API，请求 `current=temperature_2m,weather_code,is_day&timezone=auto`。v1 不做运行时城市搜索，不做多城市。地点配置先从 `sdkconfig` 默认值来，后续允许 NVS 覆盖。
-
-实现拆分：
-
-- `weather_service`：缓存快照、刷新调度（自动 30min、手动节流 60s）、启动时 NVS 恢复、失败保留旧缓存标记 STALE
-- `weather_client`：HTTP 请求 + **cJSON 结构化解析**（不再用字符串查找），响应体大小增加显式上限，区分"响应过大"和"结构不匹配"
-- `weather_mapper`：`weather_code` → icon_id / text，v1 压到 9 类图标（晴、多云、阴、小雨、大雨、雪、雷暴、雾、未知）
-
-完成标准：上游字段顺序变化不影响解析。响应过长、字段缺失、类型不匹配能被明确区分。Home 页面展示真实天气数据。
+审查确认：weather_client 已用 cJSON 结构化解析（非 strstr），4KB 响应上限 + overflow 检测已到位，worker task + event bus 接线完整，Home 页面消费路径畅通。Kconfig 默认配置上海坐标。需要实机联网验证。
 
 #### 动作 8：Claude 服务接线
 
@@ -80,29 +56,11 @@
 
 所有 service 统一通过 `APP_EVENT_DATA_*` 事件发布数据变更，app 不直接依赖 service 内部细节。
 
-### 第四阶段：Host 侧加固
+### ~~第四阶段：Host 侧加固~~ ✅ 已完成（2026-04-09）
 
-Host 侧的问题不阻塞固件推进，但在真实数据流跑起来之前必须修完，否则长时间运行时会出问题。
+两个动作全部落地，18 个 Rust 测试通过。
 
-#### 动作 10：把 `state.json` 改成原子写入
-
-对应审计发现 #6（中风险）。
-
-范围：`tools/esp32dash/src/agent.rs`。
-
-做法：先写临时文件，`fsync` 后再 rename 覆盖正式文件。读取失败时把"文件损坏"单独记日志，不直接静默当作首次启动。
-
-完成标准：agent 异常退出不会留下半截状态文件。状态文件损坏时有明确可见的错误信息。
-
-#### 动作 11：给串口读缓冲和 worker 通道加护栏
-
-对应审计发现 #7 和 #8（中风险）。
-
-范围：`tools/esp32dash/src/device.rs`、`tools/esp32dash/src/compat.rs`。
-
-做法：给 `read_buf` 增加最大行长，超限后丢弃当前帧并记录日志。`send_snapshot()` 不再吞掉 `send()` 错误。`ESP32DASH_SERIAL_BAUD` 解析失败时输出警告。
-
-完成标准：异常串口帧不会导致 host 内存持续增长。worker 失效和配置错误能被操作方看见。
+动作 10（state.json 原子写入）：agent.rs 的 `persist_state` 改为 write→fsync→rename 三步，`load_state` 区分文件不存在和损坏并输出 tracing::warn。动作 11（串口缓冲护栏）：device.rs 的 `read_buf` 加 4KB 上限超限丢弃，`send_snapshot` 不再吞 send 错误，compat.rs 的 baud rate 解析失败输出明确警告。
 
 ### 第五阶段：MVP UI 收口
 
@@ -138,11 +96,11 @@ Host 侧的问题不阻塞固件推进，但在真实数据流跑起来之前必
 1. ~~固件 UI 更新只从单一线程进入 LVGL~~ ✅
 2. ~~显示锁和 flush 路径不再有无限等待~~ ✅
 3. ~~关键后台 task 创建失败会让初始化直接失败~~ ✅
-4. RTC 采用 UTC 语义，timezone 只影响展示
-5. Host `state.json` 是原子写入
-6. 串口读缓冲有上限，worker 异常不会被静默吞掉
+4. ~~RTC 采用 UTC 语义，timezone 只影响展示~~ ✅
+5. ~~Host `state.json` 是原子写入~~ ✅
+6. ~~串口读缓冲有上限，worker 异常不会被静默吞掉~~ ✅
 7. `idf.py build` 和 Rust 现有测试都能稳定通过
-8. Home 页面展示真实天气数据
+8. Home 页面展示真实天气数据（代码就绪，待实机验证）
 
 ## 依赖关系
 
