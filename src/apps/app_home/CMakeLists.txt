@@ -1,8 +1,9 @@
 idf_component_register(
     SRCS
         "src/app_home.c"
+        "src/screensaver_balatro.c"
         "src/generated/app_home_status_font.c"
-        "src/generated/noto_sans_cjk_12.c"
+        "src/generated/departure_mono_55.c"
         "src/generated/sprite_idle.c"
         "src/generated/sprite_working.c"
         "src/generated/sprite_waiting.c"
@@ -15,4 +16,5 @@ idf_component_register(
         device_link
         lvgl__lvgl
         service_home
+        ui_fonts
 )

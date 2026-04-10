@@ -37,4 +37,11 @@ void device_link_resolve_approval(approval_decision_t decision);
  */
 void device_link_cancel_approval(void);
 
+/**
+ * Clear a pending approval without turning it into a DENY.
+ * Used when the host finishes the approval elsewhere and only the device UI
+ * needs to be dismissed.
+ */
+void device_link_dismiss_approval(void);
+
 #endif

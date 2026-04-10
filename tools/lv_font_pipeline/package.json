@@ -6,9 +6,16 @@
   "license": "UNLICENSED",
   "scripts": {
     "fetch:sources": "./scripts/fetch_sources.sh",
+    "fetch:departure-mono": "./scripts/fetch_departure_mono.sh",
     "generate:home-status": "./scripts/generate_home_status_font.sh",
+    "generate:departure-11": "FONT_CONFIG=./configs/departure_mono_11.conf ./scripts/generate_departure_mono_font.sh",
+    "generate:departure-22": "FONT_CONFIG=./configs/departure_mono_22.conf ./scripts/generate_departure_mono_font.sh",
+    "generate:departure-44": "FONT_CONFIG=./configs/departure_mono_44.conf ./scripts/generate_departure_mono_font.sh",
+    "generate:departure": "npm run generate:departure-11 && npm run generate:departure-22 && npm run generate:departure-44",
+    "generate:cjk-11": "FONT_CONFIG=./configs/noto_sans_cjk_11.conf ./scripts/generate_noto_sans_cjk_font.sh",
+    "generate:cjk-22": "FONT_CONFIG=./configs/noto_sans_cjk_22.conf ./scripts/generate_noto_sans_cjk_font.sh",
     "generate:cjk-12": "./scripts/generate_noto_sans_cjk_font.sh",
-    "build": "npm run fetch:sources && npm run generate:home-status"
+    "build": "npm run fetch:sources && npm run generate:home-status && npm run generate:departure"
   },
   "devDependencies": {
     "bootstrap-icons": "1.13.1",

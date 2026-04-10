@@ -25,6 +25,8 @@ const char *app_event_type_to_string(app_event_type_t type)
         return "data_bitcoin";
     case APP_EVENT_PERMISSION_REQUEST:
         return "permission_request";
+    case APP_EVENT_PERMISSION_DISMISS:
+        return "permission_dismiss";
     default:
         return "unknown";
     }

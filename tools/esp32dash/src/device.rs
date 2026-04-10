@@ -10,18 +10,19 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc,
+        mpsc as std_mpsc,
     },
     thread,
     time::{Duration, Instant},
 };
 
+use crate::approvals::ApprovalDecision;
 use crate::model::{
     DeviceHello, DeviceListEntry, RpcRequest, SerialConnectionStatus, Snapshot, WireFrame,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 pub const PROTOCOL_PREFIX: &str = "@esp32dash ";
@@ -53,15 +54,27 @@ pub struct DeviceConfig {
 
 enum WorkerCommand {
     UpdateSnapshot(Snapshot),
+    Event {
+        method: String,
+        payload: Value,
+    },
     Rpc {
         request: RpcRequest,
         reply: oneshot::Sender<Result<Value, String>>,
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceEvent {
+    ApprovalResolved {
+        id: String,
+        decision: ApprovalDecision,
+    },
+}
+
 #[derive(Clone)]
 pub struct DeviceManager {
-    cmd_tx: mpsc::Sender<WorkerCommand>,
+    cmd_tx: std_mpsc::Sender<WorkerCommand>,
     status: Arc<Mutex<SerialConnectionStatus>>,
 }
 
@@ -70,16 +83,24 @@ impl DeviceManager {
         config: DeviceConfig,
         factory: Arc<dyn SessionFactory>,
         initial_snapshot: Option<Snapshot>,
+        event_tx: mpsc::UnboundedSender<DeviceEvent>,
     ) -> Self {
         let status = Arc::new(Mutex::new(SerialConnectionStatus {
             configured_port: config.preferred_port.clone(),
             ..SerialConnectionStatus::default()
         }));
-        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = std_mpsc::channel();
         let worker_status = status.clone();
 
         thread::spawn(move || {
-            worker_loop(config, factory, worker_status, cmd_rx, initial_snapshot)
+            worker_loop(
+                config,
+                factory,
+                worker_status,
+                cmd_rx,
+                initial_snapshot,
+                event_tx,
+            )
         });
 
         Self { cmd_tx, status }
@@ -89,6 +110,15 @@ impl DeviceManager {
         if let Err(err) = self.cmd_tx.send(WorkerCommand::UpdateSnapshot(snapshot)) {
             tracing::warn!("failed to queue snapshot for device worker: {err}");
         }
+    }
+
+    pub fn send_protocol_event(&self, method: impl Into<String>, payload: Value) -> Result<()> {
+        self.cmd_tx
+            .send(WorkerCommand::Event {
+                method: method.into(),
+                payload,
+            })
+            .map_err(|_| anyhow!("device worker is unavailable"))
     }
 
     pub async fn rpc(&self, request: RpcRequest) -> Result<Value> {
@@ -157,9 +187,25 @@ pub fn send_event_direct(
     baud: u32,
     snapshot: &Snapshot,
 ) -> Result<()> {
+    send_protocol_event_direct(
+        factory,
+        preferred_port,
+        baud,
+        "claude.update",
+        serde_json::to_value(snapshot)?,
+    )
+}
+
+pub fn send_protocol_event_direct(
+    factory: Arc<dyn SessionFactory>,
+    preferred_port: Option<&str>,
+    baud: u32,
+    method: &str,
+    payload: Value,
+) -> Result<()> {
     let port = resolve_port(factory.clone(), preferred_port, baud)?;
     let (mut session, _) = connect_port(factory.as_ref(), &port, baud)?;
-    send_snapshot_update(session.as_mut(), snapshot)?;
+    send_named_event(session.as_mut(), method, payload)?;
     // Verify delivery with a round-trip RPC; the device processes
     // frames in order, so a successful response guarantees the
     // preceding event has been handled.
@@ -211,8 +257,9 @@ fn worker_loop(
     config: DeviceConfig,
     factory: Arc<dyn SessionFactory>,
     status: Arc<Mutex<SerialConnectionStatus>>,
-    cmd_rx: mpsc::Receiver<WorkerCommand>,
+    cmd_rx: std_mpsc::Receiver<WorkerCommand>,
     initial_snapshot: Option<Snapshot>,
+    event_tx: mpsc::UnboundedSender<DeviceEvent>,
 ) {
     let mut pending_snapshot = initial_snapshot.filter(|snapshot| snapshot.seq > 0);
 
@@ -246,6 +293,16 @@ fn worker_loop(
                                 break;
                             }
                         }
+                        Ok(WorkerCommand::Event { method, payload }) => {
+                            if let Err(err) = send_named_event(session.as_mut(), &method, payload) {
+                                set_last_error(
+                                    &status,
+                                    format!("failed to push event {method} over serial: {err:#}"),
+                                );
+                                set_disconnected(&status);
+                                break;
+                            }
+                        }
                         Ok(WorkerCommand::Rpc { request, reply }) => {
                             let timeout = if request.method == "claude.approve" {
                                 RPC_TIMEOUT_APPROVAL
@@ -265,16 +322,40 @@ fn worker_loop(
                                 break;
                             }
                         }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(std_mpsc::RecvTimeoutError::Timeout) => {}
                     }
 
                     match session.read_frame(READ_POLL_INTERVAL) {
-                        Ok(Some(frame)) => {
-                            if let Some(hello) = frame.into_hello() {
-                                set_connected(&status, &port, &hello);
+                        Ok(Some(frame)) => match frame {
+                            WireFrame::Hello {
+                                protocol_version,
+                                device_id,
+                                product,
+                                capabilities,
+                            } => {
+                                set_connected(
+                                    &status,
+                                    &port,
+                                    &DeviceHello {
+                                        protocol_version,
+                                        device_id,
+                                        product,
+                                        capabilities,
+                                    },
+                                );
                             }
-                        }
+                            WireFrame::Event { method, payload } => {
+                                if let Some(device_event) = parse_device_event(&method, &payload) {
+                                    if let Err(err) = event_tx.send(device_event) {
+                                        warn!(
+                                            "dropping device event because receiver is gone: {err}"
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
                         Ok(None) => {}
                         Err(err) => {
                             set_last_error(&status, format!("serial session dropped: {err:#}"));
@@ -291,11 +372,12 @@ fn worker_loop(
                     Ok(WorkerCommand::UpdateSnapshot(snapshot)) => {
                         pending_snapshot = Some(snapshot)
                     }
+                    Ok(WorkerCommand::Event { .. }) => {}
                     Ok(WorkerCommand::Rpc { reply, .. }) => {
                         let _ = reply.send(Err("no compatible device connected".to_string()));
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
         }
@@ -415,10 +497,33 @@ fn perform_rpc(
 }
 
 fn send_snapshot_update(session: &mut dyn DeviceSession, snapshot: &Snapshot) -> Result<()> {
-    session.write_frame(&WireFrame::event(
-        "claude.update",
-        serde_json::to_value(snapshot)?,
-    ))
+    send_named_event(session, "claude.update", serde_json::to_value(snapshot)?)
+}
+
+fn send_named_event(session: &mut dyn DeviceSession, method: &str, payload: Value) -> Result<()> {
+    session.write_frame(&WireFrame::event(method, payload))
+}
+
+fn parse_device_event(method: &str, payload: &Value) -> Option<DeviceEvent> {
+    if method != "claude.approval.resolved" {
+        return None;
+    }
+
+    let id = payload.get("id")?.as_str()?.to_string();
+    let decision = match payload.get("decision")?.as_str()? {
+        "allow" => ApprovalDecision::Allow,
+        "deny" => ApprovalDecision::Deny,
+        "yolo" => ApprovalDecision::Yolo,
+        other => {
+            warn!(
+                decision = other,
+                "ignoring unknown approval decision from device"
+            );
+            return None;
+        }
+    };
+
+    Some(DeviceEvent::ApprovalResolved { id, decision })
 }
 
 fn set_connected(status: &Arc<Mutex<SerialConnectionStatus>>, port: &str, hello: &DeviceHello) {
@@ -802,5 +907,24 @@ mod tests {
             }
             other => panic!("unexpected frame: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_device_approval_event() {
+        let event = parse_device_event(
+            "claude.approval.resolved",
+            &json!({
+                "id": "approval-1",
+                "decision": "allow",
+            }),
+        );
+
+        assert_eq!(
+            event,
+            Some(DeviceEvent::ApprovalResolved {
+                id: "approval-1".into(),
+                decision: ApprovalDecision::Allow,
+            })
+        );
     }
 }

@@ -7,8 +7,19 @@ This directory contains tracked generated assets used by the Home page.
 - Generation pipeline: `tools/lv_font_pipeline/scripts/generate_home_status_font.sh`
 - License and provenance: `tools/lv_font_pipeline/README.md`
 
+`departure_mono_55`
+- Purpose: screensaver-only display font for the centered clock. Kept local to `app_home` so the
+  rest of the shared UI font scale can stay unchanged.
+- Upstream font family: Departure Mono.
+- Upstream artifact reference: `rektdeckard/departure-mono`, `DepartureMono-Regular.otf`.
+- License: SIL Open Font License 1.1.
+  See `third_party/fonts/departure-mono/OFL-1.1.txt`.
+- Regeneration: reuse `tools/lv_font_pipeline/scripts/generate_departure_mono_font.sh` with the
+  same glyph range and a 55px config mirroring the command recorded in `departure_mono_55.c`.
+
 `noto_sans_cjk_12`
-- Purpose: 12px / 2bpp fallback font for bubble text and approval descriptions.
+- Purpose: tracked glyph-source font used to keep host-side sanitizer coverage aligned with the
+  device CJK subset. The shared runtime CJK fallback fonts now live under `src/components/ui_fonts/`.
 - Upstream font family: Noto Sans CJK SC / Noto Sans SC.
 - Upstream artifact reference: `notofonts/noto-cjk`, `Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf`
   and `Sans/SubsetOTF/SC/NotoSansSC-Regular.otf`.

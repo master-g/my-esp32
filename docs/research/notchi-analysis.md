@@ -251,3 +251,154 @@ Notchi 有一个实际缺陷：如果 Claude Code 兼容工具（如 opencode）
 最小防御，作为最后防线。如果 host agent 因为自身 bug 没有发送 session 清理指令，ESP32 对长时间无心跳的 session 做本地超时。正常情况下不应该走到这一层。
 
 **综合策略的优先级**：PID 存活检查 > 超时淘汰 > 上限熔断 > ESP32 本地超时。PID 检查最精确，超时淘汰最通用，上限熔断最粗暴但最安全，ESP32 本地超时是最后的保险。
+
+## 八、情感分析系统（深入分析）
+
+### 触发时机与前置条件
+
+Emotion 分析只在一个场景触发：interactive session 里用户提交 prompt（`UserPromptSubmit` 事件）。两个前提条件缺一不可：`session.isInteractive` 为 true（排除 `claude -p` / `--print` 模式），且 `event.userPrompt` 非空。
+
+分析在 `NotchiStateMachine.handleEvent()` 中以 `Task {}` 异步发起，不阻塞 UI 事件循环。调用链：`EmotionAnalyzer.shared.analyze(prompt)` → `EmotionState.recordEmotion(emotion, intensity, prompt)`。
+
+### API 调用细节
+
+#### 模型选择
+
+默认模型 `claude-haiku-4-5-20251001`（Claude Haiku 4.5），可通过 `~/.claude/settings.json` 的 `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` 环境变量覆盖。选 Haiku 的理由：分类任务不需要强推理，Haiku 廉价且延迟低。
+
+#### System Prompt
+
+硬编码在 `EmotionAnalyzer.systemPrompt`（`EmotionAnalyzer.swift:84-93`），关键设计：
+
+- 三个分类的边界定义得非常精确。Happy 仅限"对 AI 或结果的正面情感"（explicit praise、gratitude、celebration），Sad 仅限"沮丧/愤怒/受挫"（frustration、anger、feeling stuck）
+- 特别把"对工作内容的热情"和"感叹号表达紧迫感"排除在 happy 之外——编程场景中 `gotta fix this bug!` 不算 happy
+- 大写文本（ALL CAPS）作为 intensity 增强的信号，额外加 0.2-0.3
+- 明确要求"拿不准就 neutral"，避免过度解读
+
+#### API Key 解析链
+
+`EmotionAnalyzer.resolveAPIConfig()` 按优先级查找凭证：
+
+1. **Keychain**：`KeychainManager.getAnthropicApiKey(allowInteraction: false)`，用户在 Notchi 设置面板手动输入的 key
+2. **Claude settings.json**：读取 `~/.claude/settings.json` 的 `env` 字段，提取 `ANTHROPIC_AUTH_TOKEN`
+
+如果两条路都走不通，直接返回 `("neutral", 0.0)`，不弹窗不报错。
+
+同时读取 `ANTHROPIC_BASE_URL` 并做路径规范化——支持用户通过代理访问 API（如中转服务器）。路径规范化逻辑（`buildMessagesURL`）处理了常见写法：裸域名自动追加 `/v1/messages`，已有 `/v1` 追加 `/messages`，已有完整路径则保留。
+
+#### 请求构造
+
+```json
+{
+  "model": "claude-haiku-4-5-20251001",
+  "max_tokens": 50,
+  "system": "<分类指令>",
+  "messages": [{"role": "user", "content": "<用户 prompt>"}]
+}
+```
+
+`max_tokens` 设为 50，因为分类输出只是一个短 JSON 对象。HTTP header 带 `x-api-key` 和 `anthropic-version: 2023-06-01`。
+
+#### 响应解析与容错
+
+`callHaiku` 的解析流程：
+
+1. 解码 Haiku 的标准响应（`HaikuResponse.content[0].text`）
+2. `extractJSON` 剥离 LLM 输出中常见的 markdown code block（` ```json ... ``` `），并在前后有多余文字时提取第一个 `{` 到最后一个 `}` 之间的内容
+3. `JSONDecoder` 解码为 `EmotionResponse { emotion: String, intensity: Double }`
+4. `emotion` 做白名单校验（`["happy", "sad", "neutral"]`），不在列表中的值降级为 neutral
+5. `intensity` 裁剪到 `[0.0, 1.0]` 区间
+
+任何环节失败（网络错误、HTTP 非 200、JSON 解析失败），一律返回 `("neutral", 0.0)`。没有重试逻辑。这意味着 API 不可用时，emotion 系统对用户体验没有负面影响——sprite 保持 neutral。
+
+### EmotionState 累积衰减模型
+
+这是整个 emotion 系统最精巧的部分。`EmotionState` 维护的不是"当前情绪"这个单一变量，而是 happy 和 sad 两个独立的累积分数（字典 `[NotchiEmotion: Double]`，只存 `.happy` 和 `.sad` 两个 key）。
+
+#### 参数一览
+
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| `intensityDampen` | 0.5 | 单次判断的 intensity 在叠加前先减半 |
+| `interEmotionDecay` | 0.9 | 非 neutral 判断压制其他 emotion 的系数 |
+| `neutralCounterDecay` | 0.85 | neutral 判断主动消解所有情绪的系数 |
+| `decayRate` | 0.92 | 全局衰减系数（每 60 秒触发一次） |
+| `decayInterval` | 60s | 全局衰减周期 |
+| `sadThreshold` | 0.45 | sad 的触发阈值 |
+| `happyThreshold` | 0.6 | happy 的触发阈值 |
+| `sobEscalationThreshold` | 0.9 | sad 升级为 sob 的阈值 |
+
+#### 记录新判断（`recordEmotion`）
+
+- **非 neutral 判断**（happy 或 sad）：`intensity × 0.5` 叠加到对应 emotion 的累积分数上（上限 1.0）。同时对另一个 emotion 的分数乘以 0.9——"如果你 happy 了，你之前的 sad 分数会被轻微压制"
+- **neutral 判断**：所有非 neutral 分数乘以 0.85。neutral 不是"什么都不做"，而是主动消解已有情绪
+
+#### 全局衰减（`decayAll`）
+
+状态机初始化时创建一个永不停止的 `Task`（`startEmotionDecayTimer`），每 60 秒对所有活跃 session 调用 `decayAll()`：每个分数乘以 0.92，低于 0.01 直接归零。衰减有变化时才更新 `currentEmotion`，避免无效的 UI 刷新。
+
+#### 阈值判定（`updateCurrentEmotion`）
+
+取分数最高的那个 emotion，看是否达到阈值。sad 阈值更低（0.45），happy 更高（0.6）——表达不满比表达满意更容易被检测到。如果 sad 分数 ≥ 0.9，升级为 `sob`。
+
+这个模型的直觉：用户情绪在多次交互中逐渐累积或消退。单次 happy 不会立刻让角色跳起来，但连续几次 happy 的语气，角色的 happy 分数会稳步上升。反过来，持续沮丧会让 sad 分数越积越高直到触发 sob。一段时间的 neutral 交互或单纯的空闲（靠全局衰减），情绪会自然回归 neutral。
+
+### Emotion 对视觉表现的影响
+
+Emotion 通过两条途径影响 sprite 的最终呈现。
+
+#### Sprite Sheet 覆盖矩阵
+
+Notchi 为每种 `(task, emotion)` 组合准备了独立的 sprite sheet 图片。实际 assets 目录中的覆盖情况：
+
+| | neutral | happy | sad | sob |
+|---|---|---|---|---|
+| idle | ✅ | ✅ | ✅ | ✅ |
+| working | ✅ | ✅ | ✅ | ✅ |
+| waiting | ✅ | ✅ | ✅ | ✅ |
+| sleeping | ✅ | ✅ | ❌ | ❌ |
+| compacting | ✅ | ✅ | ❌ | ❌ |
+
+sleeping 和 compacting 状态没有 sad/sob 的 sprite sheet。`NotchiState.spriteSheetName` 的 fallback 链兜底：精确匹配 → 如果是 sob 且没有对应 sprite 就降级到 sad → 最终降级到 neutral。所以 sleeping + sad 的组合实际显示 `sleeping_neutral`。
+
+每个 sprite sheet 是一张横向排列多帧的图片。大多数状态 6 帧 6 列，compacting 是 5 帧 5 列。
+
+#### 运动参数调节
+
+Emotion 不仅换贴图，还直接修改角色的运动行为：
+
+| 参数 | neutral | happy | sad | sob |
+|------|---------|-------|-----|-----|
+| Sway（摇摆幅度） | 0.5° | 1.0° | 0.25° | 0.15° |
+| Bob（上下浮动） | task 原始值 | task 原始值 | task 值 × 0.5 | 0（停止浮动） |
+| Tremble（水平颤抖） | 无 | 无 | 无 | ~2Hz, 0.2pt |
+| Walk（散步） | 由 task 决定 | 由 task 决定 | 由 task 决定 | 禁止 |
+
+Sway 是以 sprite 底部为锚点的正弦波旋转，越开心摇得越欢。Tremble 通过 `sin(date * 2π * 2) * amplitude` 计算，只在 sob 状态激活，通过 `SessionSpriteView` 的 30fps `TimelineView` 驱动。Bob 在 sob 时完全停止（角色"僵住了"），sad 时减半（动作迟缓）。
+
+### 对 ESP32 项目的借鉴
+
+#### 分析位置：host agent 侧
+
+Notchi 把 emotion 分析放在 macOS app 侧。我们的架构里，对应位置是 esp32dash host agent。ESP32 不应该承担 LLM API 调用，原因：
+
+- ESP32 的 Wi-Fi 连接不稳定，API 调用可能超时
+- JSON 解析和 HTTP 请求占用 RAM 和 CPU
+- API key 管理在嵌入式设备上更复杂
+
+Host agent 已经能拿到 `UserPromptSubmit` 事件的 `user_prompt` 字段，在那里做分析然后把 emotion 分类结果通过 serial 下发给 ESP32 即可。
+
+#### 替代方案：不做 LLM 调用
+
+Notchi 选 Haiku 是因为桌面 app 有稳定网络和充足资源。在 host agent 侧可以考虑更轻量的方案：
+
+- **关键词匹配**：一个简单的正则/词表就能覆盖大多数场景——"thank"、"great job"、"awesome" → happy，"wrong"、"broken"、"doesn't work"、"wtf" → sad。优点是零延迟零成本，缺点是对隐含情感和反讽无能为力
+- **本地小模型**：如果 host agent 机器上有 Ollama 或类似服务，可以用本地模型做分类，避免 API 费用和网络延迟
+
+两种方案可以共存：默认用关键词，用户配置了 API key 时升级到 LLM 调用。
+
+#### 累积衰减模型值得移植
+
+`EmotionState` 的累积衰减模型不依赖任何 Apple 框架，是一个纯数值算法，可以直接在 Rust（host agent 侧）中实现。它的价值在于避免了"单次判断决定情绪"的抖动问题——用户偶尔抱怨一句不会立刻让角色哭起来，需要持续的情绪信号才能改变角色的表情。
+
+核心参数（dampen、decay rate、threshold）可以通过 serial 作为配置项下发给 host agent，用户在 ESP32 的设置页面可以调节情绪灵敏度。但初期建议直接硬编码 Notchi 的参数，经过验证再考虑可配置性。

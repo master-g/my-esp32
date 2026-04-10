@@ -9,4 +9,5 @@ idf_component_register(
         lvgl__lvgl
         power_policy
         service_market
+        ui_fonts
 )

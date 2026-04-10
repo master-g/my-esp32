@@ -28,7 +28,7 @@ use crate::{
     agent::Config,
     device::{
         UnixSerialFactory, discover_devices, open_direct_session, request_direct,
-        request_direct_with_timeout, send_event_direct,
+        request_direct_with_timeout, send_event_direct, send_protocol_event_direct,
     },
     hooks::InstallHooksResult,
     model::{
@@ -220,6 +220,26 @@ enum ChibiCommand {
         #[arg(long, help = "Serial port (default: autodiscover)")]
         port: Option<String>,
     },
+    #[command(
+        about = "Show the approval overlay, then dismiss it as if approval happened on the host"
+    )]
+    ApproveDismiss {
+        #[arg(long, default_value = "Bash", help = "Tool name to show")]
+        tool: String,
+        #[arg(long, default_value = "rm -rf /tmp/test", help = "Description to show")]
+        desc: String,
+        #[arg(
+            long,
+            default_value_t = 1500,
+            help = "Milliseconds to keep the overlay visible before dismissing it"
+        )]
+        delay_ms: u64,
+        #[arg(
+            long,
+            help = "Serial port for direct fallback when the local agent is unavailable"
+        )]
+        port: Option<String>,
+    },
     #[command(about = "Force the Home screensaver on or off for quick testing")]
     Screensaver {
         #[arg(value_enum, help = "Whether to enter or exit the screensaver")]
@@ -409,6 +429,34 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             println!("device responded: decision={decision}");
             Ok(())
         }
+        ChibiCommand::ApproveDismiss {
+            tool,
+            desc,
+            delay_ms,
+            port,
+        } => {
+            let scenario = build_approve_dismiss_scenario(&tool, &desc);
+            let client = Client::new();
+            let base_url = admin_base_url();
+            let delay = std::time::Duration::from_millis(delay_ms);
+
+            if local_agent_available(&client, &base_url).await {
+                println!(
+                    "showing approval overlay via local agent: tool={} desc=\"{}\"",
+                    scenario.display_tool_name, scenario.description
+                );
+                run_approve_dismiss_scenario(&client, &base_url, &scenario, delay).await?;
+                println!("dismiss confirmed by local agent");
+            } else {
+                println!(
+                    "local agent unavailable, falling back to direct serial smoke test: tool={} desc=\"{}\"",
+                    scenario.display_tool_name, scenario.description
+                );
+                run_approve_dismiss_direct(port.as_deref(), &scenario, delay).await?;
+                println!("direct dismiss sequence sent");
+            }
+            Ok(())
+        }
         ChibiCommand::Screensaver { action, port } => {
             let enabled = matches!(action, ScreensaverAction::Enter);
             run_request(
@@ -421,10 +469,7 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 },
             )
             .await?;
-            println!(
-                "screensaver {}",
-                if enabled { "entered" } else { "exited" }
-            );
+            println!("screensaver {}", if enabled { "entered" } else { "exited" });
             Ok(())
         }
     }
@@ -451,6 +496,216 @@ fn build_test_snapshot(state: &ChibiState, bubble: Option<&str>) -> Snapshot {
             Attention::Low
         },
     }
+}
+
+#[derive(Debug, Clone)]
+struct ApproveDismissScenario {
+    approval_id: String,
+    display_tool_name: String,
+    description: String,
+    request_event: LocalHookEvent,
+    clear_event: LocalHookEvent,
+}
+
+fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScenario {
+    let now_ms = now_epoch_millis();
+    let display_tool_name = sanitize_tool_name(tool).unwrap_or_else(|| "unknown".into());
+    let description = sanitize_approval_summary(desc);
+    let approval_id = build_approval_id(now_ms, &display_tool_name);
+    let session_id = format!("approve-dismiss-{now_ms:x}");
+    let tool_use_id = format!("tool-{approval_id}");
+    let cwd = env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let request_event = LocalHookEvent {
+        session_id: session_id.clone(),
+        cwd: cwd.clone(),
+        hook_event_name: "PermissionRequest".into(),
+        message: None,
+        prompt_preview: None,
+        tool_name: Some(display_tool_name.clone()),
+        tool_use_id: Some(tool_use_id.clone()),
+        permission_mode: "default".into(),
+        recv_ts: now_epoch(),
+    };
+    let clear_event = LocalHookEvent {
+        session_id,
+        cwd,
+        hook_event_name: "PreToolUse".into(),
+        message: None,
+        prompt_preview: None,
+        tool_name: Some(display_tool_name.clone()),
+        tool_use_id: Some(tool_use_id),
+        permission_mode: "default".into(),
+        recv_ts: now_epoch(),
+    };
+
+    ApproveDismissScenario {
+        approval_id,
+        display_tool_name,
+        description,
+        request_event,
+        clear_event,
+    }
+}
+
+async fn run_approve_dismiss_scenario(
+    client: &Client,
+    base_url: &str,
+    scenario: &ApproveDismissScenario,
+    delay: std::time::Duration,
+) -> Result<()> {
+    post_agent_event(client, base_url, &scenario.request_event).await?;
+    submit_agent_approval(client, base_url, scenario).await?;
+    tokio::time::sleep(delay).await;
+    post_agent_event(client, base_url, &scenario.clear_event).await?;
+    wait_for_approval_dismissal(client, base_url, &scenario.approval_id).await
+}
+
+async fn local_agent_available(client: &Client, base_url: &str) -> bool {
+    match client
+        .get(format!("{base_url}/v1/agent/status"))
+        .timeout(std::time::Duration::from_millis(300))
+        .send()
+        .await
+    {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+async fn post_agent_event(client: &Client, base_url: &str, event: &LocalHookEvent) -> Result<()> {
+    client
+        .post(format!("{base_url}/v1/claude/events"))
+        .json(event)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to send {} event to local agent",
+                event.hook_event_name
+            )
+        })?
+        .error_for_status()
+        .with_context(|| format!("local agent rejected {} event", event.hook_event_name))?;
+    Ok(())
+}
+
+async fn submit_agent_approval(
+    client: &Client,
+    base_url: &str,
+    scenario: &ApproveDismissScenario,
+) -> Result<()> {
+    client
+        .post(format!("{base_url}/v1/claude/approvals"))
+        .json(&json!({
+            "id": &scenario.approval_id,
+            "tool_name": &scenario.display_tool_name,
+            "tool_input_summary": &scenario.description,
+            "permission_mode": "default",
+            "session_id": &scenario.request_event.session_id,
+            "tool_use_id": scenario.request_event.tool_use_id.as_deref(),
+        }))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .context("failed to submit approval to local agent")?
+        .error_for_status()
+        .context("local agent rejected approval submission")?;
+    Ok(())
+}
+
+async fn run_approve_dismiss_direct(
+    port: Option<&str>,
+    scenario: &ApproveDismissScenario,
+    delay: std::time::Duration,
+) -> Result<()> {
+    let factory = Arc::new(UnixSerialFactory);
+    let baud = compat::serial_baud();
+
+    request_direct(
+        factory.clone(),
+        port,
+        baud,
+        RpcRequest {
+            method: "home.screensaver".into(),
+            params: json!({
+                "enabled": false,
+            }),
+        },
+    )?;
+
+    send_protocol_event_direct(
+        factory.clone(),
+        port,
+        baud,
+        "claude.approval.request",
+        json!({
+            "id": &scenario.approval_id,
+            "tool_name": &scenario.display_tool_name,
+            "description": &scenario.description,
+        }),
+    )?;
+
+    tokio::time::sleep(delay).await;
+
+    send_protocol_event_direct(
+        factory,
+        port,
+        baud,
+        "claude.approval.dismiss",
+        json!({
+            "id": &scenario.approval_id,
+        }),
+    )?;
+
+    Ok(())
+}
+
+async fn wait_for_approval_dismissal(
+    client: &Client,
+    base_url: &str,
+    approval_id: &str,
+) -> Result<()> {
+    let poll_interval = std::time::Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+    while std::time::Instant::now() <= deadline {
+        let response = client
+            .get(format!("{base_url}/v1/claude/approvals/{approval_id}"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .with_context(|| format!("failed to poll approval {approval_id} from local agent"))?;
+
+        if response.status().is_success() {
+            let body: Value = response.json().await.unwrap_or_default();
+            let approval = body.get("approval").unwrap_or(&Value::Null);
+            if approval
+                .get("dismissed")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            if approval
+                .get("decision")
+                .and_then(|value| value.as_str())
+                .is_some()
+            {
+                return Err(anyhow!(
+                    "approval {approval_id} was resolved on device before host dismiss test completed"
+                ));
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+
+    Err(anyhow!(
+        "approval {approval_id} was not dismissed by the local agent within 5s"
+    ))
 }
 
 async fn ingest_from_stdin() -> Result<()> {
@@ -641,11 +896,12 @@ async fn approve_from_stdin() -> Result<()> {
         .unwrap_or_else(|| "default".into());
 
     let approval_id = build_approval_id(now_epoch_millis(), &tool_name);
+    let event = serde_json::from_str::<RawHookInput>(&stdin)
+        .ok()
+        .map(sanitize_raw_event);
 
     // Also ingest as a normal event so the dashboard updates
-    let ingest_raw: std::result::Result<RawHookInput, _> = serde_json::from_str(&stdin);
-    if let Ok(raw_event) = ingest_raw {
-        let event = sanitize_raw_event(raw_event);
+    if let Some(event) = event.as_ref() {
         let client = Client::new();
         let _ = client
             .post(format!("{}/v1/claude/events", admin_base_url()))
@@ -664,15 +920,24 @@ async fn approve_from_stdin() -> Result<()> {
             "tool_name": display_tool_name,
             "tool_input_summary": tool_input_summary,
             "permission_mode": permission_mode,
+            "session_id": event.as_ref().map(|value| value.session_id.as_str()).unwrap_or_default(),
+            "tool_use_id": event.as_ref().and_then(|value| value.tool_use_id.as_deref()),
         }))
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
 
-    if let Err(err) = submit_response {
-        warn!("agent unavailable for approval: {err}");
-        // Agent not running — let Claude Code show its normal permission dialog
-        return Ok(());
+    match submit_response {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => {
+            warn!("approval submit failed with status {}", response.status());
+            return Ok(());
+        }
+        Err(err) => {
+            warn!("agent unavailable for approval: {err}");
+            // Agent not running — let Claude Code show its normal permission dialog
+            return Ok(());
+        }
     }
 
     // Poll for decision
@@ -723,6 +988,14 @@ async fn approve_from_stdin() -> Result<()> {
             .unwrap_or(false);
         if !resolved {
             continue;
+        }
+
+        let dismissed = approval
+            .get("dismissed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if dismissed {
+            return Ok(());
         }
 
         let decision = approval
@@ -793,4 +1066,151 @@ fn summarize_tool_input(raw: &Value) -> String {
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        http::StatusCode,
+        routing::{get, post},
+    };
+    use tokio::{net::TcpListener, sync::Mutex};
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct RecordedRequest {
+        path: String,
+        body: Value,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeAgentState {
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        dismissed: Arc<Mutex<bool>>,
+    }
+
+    async fn record_event(
+        State(state): State<FakeAgentState>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state.requests.lock().await.push(RecordedRequest {
+            path: "/v1/claude/events".into(),
+            body: body.clone(),
+        });
+        if body.get("hook_event_name").and_then(|value| value.as_str()) == Some("PreToolUse") {
+            *state.dismissed.lock().await = true;
+        }
+        Json(json!({ "ok": true }))
+    }
+
+    async fn record_approval(
+        State(state): State<FakeAgentState>,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        state.requests.lock().await.push(RecordedRequest {
+            path: "/v1/claude/approvals".into(),
+            body,
+        });
+        (StatusCode::CREATED, Json(json!({ "ok": true })))
+    }
+
+    async fn get_approval(
+        State(state): State<FakeAgentState>,
+        Path(id): Path<String>,
+    ) -> Json<Value> {
+        let dismissed = *state.dismissed.lock().await;
+        Json(json!({
+            "ok": true,
+            "approval": {
+                "id": id,
+                "resolved": dismissed,
+                "dismissed": dismissed,
+                "timed_out": false,
+                "decision": Value::Null,
+                "tool_name": "Bash",
+                "tool_input_summary": "rm -rf /tmp/test",
+            }
+        }))
+    }
+
+    #[tokio::test]
+    async fn local_agent_available_detects_running_agent() -> Result<()> {
+        let router = Router::new().route(
+            "/v1/agent/status",
+            get(|| async { Json(json!({ "ok": true })) }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let available = local_agent_available(&Client::new(), &format!("http://{addr}")).await;
+
+        server.abort();
+        assert!(available);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approve_dismiss_scenario_uses_agent_event_flow() -> Result<()> {
+        let state = FakeAgentState::default();
+        let router = Router::new()
+            .route("/v1/claude/events", post(record_event))
+            .route("/v1/claude/approvals", post(record_approval))
+            .route("/v1/claude/approvals/{id}", get(get_approval))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let scenario = build_approve_dismiss_scenario("Bash", "rm -rf /tmp/test");
+        run_approve_dismiss_scenario(
+            &Client::new(),
+            &format!("http://{addr}"),
+            &scenario,
+            std::time::Duration::ZERO,
+        )
+        .await?;
+
+        let requests = state.requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].path, "/v1/claude/events");
+        assert_eq!(requests[0].body["hook_event_name"], "PermissionRequest");
+        assert_eq!(requests[1].path, "/v1/claude/approvals");
+        assert_eq!(requests[1].body["id"], scenario.approval_id);
+        assert_eq!(
+            requests[1].body["session_id"],
+            scenario.request_event.session_id
+        );
+        assert_eq!(
+            requests[1].body["tool_use_id"],
+            scenario
+                .request_event
+                .tool_use_id
+                .as_deref()
+                .unwrap_or_default()
+        );
+        assert_eq!(requests[2].path, "/v1/claude/events");
+        assert_eq!(requests[2].body["hook_event_name"], "PreToolUse");
+        assert_eq!(
+            requests[2].body["session_id"],
+            scenario.clear_event.session_id
+        );
+        assert_eq!(
+            requests[2].body["tool_use_id"],
+            scenario
+                .clear_event
+                .tool_use_id
+                .as_deref()
+                .unwrap_or_default()
+        );
+
+        server.abort();
+        Ok(())
+    }
 }

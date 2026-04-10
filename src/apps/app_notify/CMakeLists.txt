@@ -8,4 +8,5 @@ idf_component_register(
         core_app_manager
         lvgl__lvgl
         service_claude
+        ui_fonts
 )

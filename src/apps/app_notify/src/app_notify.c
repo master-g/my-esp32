@@ -3,6 +3,9 @@
 #include "bsp_board_config.h"
 #include "lvgl.h"
 #include "service_claude.h"
+#include "ui_fonts.h"
+
+#define APP_NOTIFY_BODY_Y 44
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_status;
@@ -22,7 +25,7 @@ static lv_obj_t *app_notify_create_root(lv_obj_t *parent)
 
     title = lv_label_create(s_root);
     lv_label_set_text(title, "Notify");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(title, ui_font_text_22(), 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xf3e8ff), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -30,8 +33,9 @@ static lv_obj_t *app_notify_create_root(lv_obj_t *parent)
     lv_label_set_text(s_status, "Claude bridge pending");
     lv_obj_set_width(s_status, BSP_LCD_H_RES - 32);
     lv_label_set_long_mode(s_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_status, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(s_status, lv_color_hex(0xd5cbe8), 0);
-    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 0, 56);
+    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 0, APP_NOTIFY_BODY_Y);
     return s_root;
 }
 

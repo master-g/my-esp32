@@ -21,7 +21,10 @@ cargo run -- config
 cargo run -- install-launchd
 cargo run -- uninstall-launchd
 cargo run -- install-hooks
+cargo run -- chibi approve-dismiss --delay-ms 1500
 ```
+
+`chibi approve-dismiss` prefers the real host-side approval flow. When the local agent is reachable, it posts a synthetic `PermissionRequest`, submits a matching approval, then posts a follow-up `PreToolUse` event so the agent dismisses the ESP32 overlay through the same path used by normal Claude hooks. If the local agent is unavailable, it falls back to a direct serial smoke test and first forces `home.screensaver` off so the overlay is visible.
 
 ## Environment
 
@@ -102,7 +105,7 @@ Protocol frames share the same serial line as normal ESP-IDF logs. Only lines st
 Device hello:
 
 ```json
-@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","claude.update"]}
+@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved"]}
 ```
 
 Host request:
@@ -127,4 +130,16 @@ Host Claude update:
 
 ```json
 @esp32dash {"type":"event","method":"claude.update","payload":{"seq":7,"source":"claude_code","status":"waiting_for_input","title":"Ready for input","workspace":"project-foo","detail":"Previous action completed","permission_mode":"default","ts":1743957128,"unread":true,"attention":"medium","session_id":"sess-1","event":"Stop"}}
+```
+
+Host approval request:
+
+```json
+@esp32dash {"type":"event","method":"claude.approval.request","payload":{"id":"approval-1","tool_name":"Bash","description":"rm -rf /tmp/test"}}
+```
+
+Host approval dismiss:
+
+```json
+@esp32dash {"type":"event","method":"claude.approval.dismiss","payload":{"id":"approval-1"}}
 ```

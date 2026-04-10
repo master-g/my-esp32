@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "src/ui_fonts.c"
+        "src/generated/departure_mono_11.c"
+        "src/generated/departure_mono_22.c"
+        "src/generated/departure_mono_44.c"
+        "src/generated/noto_sans_cjk_11.c"
+        "src/generated/noto_sans_cjk_22.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        lvgl__lvgl
+)

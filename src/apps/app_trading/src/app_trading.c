@@ -4,6 +4,9 @@
 #include "lvgl.h"
 #include "power_policy.h"
 #include "service_market.h"
+#include "ui_fonts.h"
+
+#define APP_TRADING_BODY_Y 44
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_status;
@@ -23,15 +26,16 @@ static lv_obj_t *app_trading_create_root(lv_obj_t *parent)
 
     title = lv_label_create(s_root);
     lv_label_set_text(title, "Trading");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(title, ui_font_text_22(), 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xe7ffd7), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     s_status = lv_label_create(s_root);
     lv_obj_set_width(s_status, BSP_LCD_H_RES - 32);
     lv_label_set_long_mode(s_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_status, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(s_status, lv_color_hex(0xcdd9cd), 0);
-    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 0, 56);
+    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 0, APP_TRADING_BODY_Y);
     lv_label_set_text(s_status, "Market service placeholder");
     return s_root;
 }

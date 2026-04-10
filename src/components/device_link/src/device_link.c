@@ -47,6 +47,7 @@ static int s_usb_fd = -1;
 static SemaphoreHandle_t s_approval_sem;
 static approval_request_t s_approval_req;
 static approval_decision_t s_approval_decision;
+static bool s_approval_uses_rpc;
 
 typedef struct {
     bool set_wifi_ssid;
@@ -64,8 +65,17 @@ typedef struct {
 } pending_config_t;
 
 static const char *capabilities[] = {
-    "device.info", "device.reboot", "config.export",  "config.set_many",
-    "wifi.scan",   "claude.update", "claude.approve", "home.screensaver",
+    "device.info",
+    "device.reboot",
+    "config.export",
+    "config.set_many",
+    "wifi.scan",
+    "claude.update",
+    "claude.approve",
+    "claude.approval.request",
+    "claude.approval.dismiss",
+    "claude.approval.resolved",
+    "home.screensaver",
 };
 
 static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
@@ -205,6 +215,56 @@ static void send_response_ok(const char *id, cJSON *result)
     }
     write_protocol_json(root);
     cJSON_Delete(root);
+}
+
+static void send_event_frame(const char *method, cJSON *payload)
+{
+    cJSON *root = cJSON_CreateObject();
+
+    if (root == NULL) {
+        cJSON_Delete(payload);
+        return;
+    }
+
+    cJSON_AddStringToObject(root, "type", "event");
+    cJSON_AddStringToObject(root, "method", (method != NULL) ? method : "");
+    if (payload != NULL) {
+        cJSON_AddItemToObject(root, "payload", payload);
+    }
+    write_protocol_json(root);
+    cJSON_Delete(root);
+}
+
+static void publish_ui_event(app_event_type_t type)
+{
+    app_event_t evt = {.type = type, .payload = NULL};
+    event_bus_publish(&evt);
+}
+
+static void reset_approval_state(void)
+{
+    memset(&s_approval_req, 0, sizeof(s_approval_req));
+    s_approval_decision = APPROVAL_DECISION_DENY;
+    s_approval_uses_rpc = false;
+}
+
+static esp_err_t set_pending_approval(const cJSON *req_id, const cJSON *tool, const cJSON *desc,
+                                      bool via_rpc)
+{
+    ESP_RETURN_ON_FALSE(cJSON_IsString(req_id) && req_id->valuestring != NULL, ESP_ERR_INVALID_ARG,
+                        TAG, "approval request missing id");
+
+    reset_approval_state();
+    strlcpy(s_approval_req.id, req_id->valuestring, sizeof(s_approval_req.id));
+    if (cJSON_IsString(tool)) {
+        strlcpy(s_approval_req.tool_name, tool->valuestring, sizeof(s_approval_req.tool_name));
+    }
+    if (cJSON_IsString(desc)) {
+        strlcpy(s_approval_req.description, desc->valuestring, sizeof(s_approval_req.description));
+    }
+    s_approval_req.pending = true;
+    s_approval_uses_rpc = via_rpc;
+    return ESP_OK;
 }
 
 static void send_hello(void)
@@ -711,6 +771,37 @@ static void handle_event_frame(const cJSON *root)
         } else {
             ESP_LOGW(TAG, "claude.update: parse failed (0x%x)", (unsigned)err);
         }
+        return;
+    }
+
+    if (strcmp(method->valuestring, "claude.approval.request") == 0) {
+        const cJSON *tool = cJSON_GetObjectItemCaseSensitive(payload, "tool_name");
+        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(payload, "description");
+        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
+
+        if (s_approval_req.pending) {
+            ESP_LOGW(TAG, "approval request ignored because another approval is pending");
+            return;
+        }
+        if (set_pending_approval(req_id, tool, desc, false) != ESP_OK) {
+            ESP_LOGW(TAG, "claude.approval.request: invalid payload");
+            return;
+        }
+        publish_ui_event(APP_EVENT_PERMISSION_REQUEST);
+        return;
+    }
+
+    if (strcmp(method->valuestring, "claude.approval.dismiss") == 0) {
+        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
+        if (!s_approval_req.pending || !cJSON_IsString(req_id) || req_id->valuestring == NULL) {
+            return;
+        }
+        if (strcmp(s_approval_req.id, req_id->valuestring) != 0) {
+            ESP_LOGW(TAG, "approval dismiss ignored for unknown id");
+            return;
+        }
+        device_link_dismiss_approval();
+        publish_ui_event(APP_EVENT_PERMISSION_DISMISS);
     }
 }
 
@@ -782,19 +873,13 @@ static void handle_request_frame(const cJSON *root)
         const cJSON *desc = cJSON_GetObjectItemCaseSensitive(params, "description");
         const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(params, "id");
 
-        memset(&s_approval_req, 0, sizeof(s_approval_req));
-        if (cJSON_IsString(req_id))
-            strlcpy(s_approval_req.id, req_id->valuestring, sizeof(s_approval_req.id));
-        if (cJSON_IsString(tool))
-            strlcpy(s_approval_req.tool_name, tool->valuestring, sizeof(s_approval_req.tool_name));
-        if (cJSON_IsString(desc))
-            strlcpy(s_approval_req.description, desc->valuestring,
-                    sizeof(s_approval_req.description));
-        s_approval_req.pending = true;
+        if (set_pending_approval(req_id, tool, desc, true) != ESP_OK) {
+            send_response_error(id->valuestring, "invalid_request", "approval is missing id");
+            return;
+        }
 
         /* Notify LVGL task to show approval UI */
-        app_event_t evt = {.type = APP_EVENT_PERMISSION_REQUEST, .payload = NULL};
-        event_bus_publish(&evt);
+        publish_ui_event(APP_EVENT_PERMISSION_REQUEST);
 
         /* Block until user taps a button (or timeout) */
         if (xSemaphoreTake(s_approval_sem, pdMS_TO_TICKS(APPROVAL_TIMEOUT_MS)) == pdTRUE) {
@@ -813,7 +898,7 @@ static void handle_request_frame(const cJSON *root)
             cJSON_AddStringToObject(result, "decision", "deny");
             send_response_ok(id->valuestring, result);
         }
-        s_approval_req.pending = false;
+        reset_approval_state();
         return;
     }
 
@@ -923,6 +1008,7 @@ esp_err_t device_link_init(void)
     s_approval_sem = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(s_approval_sem != NULL, ESP_ERR_NO_MEM, TAG,
                         "failed to create approval sem");
+    reset_approval_state();
     ESP_RETURN_ON_ERROR(esp_read_mac(mac, ESP_MAC_WIFI_STA), TAG, "failed to read device mac");
     if (!usb_serial_jtag_is_driver_installed()) {
         ESP_RETURN_ON_ERROR(usb_serial_jtag_driver_install(&usb_config), TAG,
@@ -962,6 +1048,27 @@ bool device_link_get_pending_approval(approval_request_t *out)
 
 void device_link_resolve_approval(approval_decision_t decision)
 {
+    if (!s_approval_req.pending) {
+        return;
+    }
+    if (!s_approval_uses_rpc) {
+        const char *decision_str = "deny";
+        cJSON *payload = cJSON_CreateObject();
+
+        if (decision == APPROVAL_DECISION_ALLOW) {
+            decision_str = "allow";
+        } else if (decision == APPROVAL_DECISION_YOLO) {
+            decision_str = "yolo";
+        }
+
+        if (payload != NULL) {
+            cJSON_AddStringToObject(payload, "id", s_approval_req.id);
+            cJSON_AddStringToObject(payload, "decision", decision_str);
+            send_event_frame("claude.approval.resolved", payload);
+        }
+        device_link_dismiss_approval();
+        return;
+    }
     s_approval_decision = decision;
     xSemaphoreGive(s_approval_sem);
 }
@@ -969,7 +1076,19 @@ void device_link_resolve_approval(approval_decision_t decision)
 void device_link_cancel_approval(void)
 {
     if (s_approval_req.pending) {
+        if (!s_approval_uses_rpc) {
+            reset_approval_state();
+            return;
+        }
         s_approval_decision = APPROVAL_DECISION_DENY;
         xSemaphoreGive(s_approval_sem);
     }
+}
+
+void device_link_dismiss_approval(void)
+{
+    if (!s_approval_req.pending) {
+        return;
+    }
+    reset_approval_state();
 }

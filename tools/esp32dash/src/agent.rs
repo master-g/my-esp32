@@ -19,13 +19,16 @@ use axum::{
     routing::{get, post},
 };
 use directories::ProjectDirs;
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, mpsc},
+};
 use tracing::{debug, info, warn};
 
 use crate::{
-    approvals::{ApprovalDecision, ApprovalRequest, ApprovalStore},
+    approvals::{ApprovalRequest, ApprovalStore},
     compat,
-    device::{DeviceConfig, DeviceManager, SessionFactory, UnixSerialFactory},
+    device::{DeviceConfig, DeviceEvent, DeviceManager, SessionFactory, UnixSerialFactory},
     model::{
         AdminErrorResponse, AdminRpcResponse, AgentStatusResponse, LocalHookEvent, PersistedState,
         RpcRequest, Snapshot,
@@ -177,6 +180,7 @@ pub async fn run(config: Config) -> Result<()> {
 
 impl AppState {
     pub async fn ingest(self: &Arc<Self>, event: LocalHookEvent) {
+        self.maybe_dismiss_approvals_for_event(&event).await;
         match event.hook_event_name.as_str() {
             "PreToolUse" => self.handle_pre_tool(event).await,
             "PostToolUse" => self.handle_post_tool(event).await,
@@ -258,6 +262,33 @@ impl AppState {
         }
     }
 
+    async fn maybe_dismiss_approvals_for_event(self: &Arc<Self>, event: &LocalHookEvent) {
+        if !event_clears_pending_approval(event) {
+            return;
+        }
+
+        let dismissed = self.approvals.dismiss_matching(event).await;
+        for approval_id in dismissed {
+            info!(
+                approval_id,
+                session_id = event.session_id,
+                hook_event = event.hook_event_name,
+                "host cleared pending approval, dismissing device overlay"
+            );
+            if let Err(err) = self.device_manager.send_protocol_event(
+                "claude.approval.dismiss",
+                serde_json::json!({ "id": approval_id }),
+            ) {
+                warn!(
+                    session_id = event.session_id,
+                    hook_event = event.hook_event_name,
+                    error = %err,
+                    "failed to push approval dismiss event to device"
+                );
+            }
+        }
+    }
+
     async fn process_event(self: &Arc<Self>, event: LocalHookEvent) {
         let persist = {
             let mut guard = self.state.lock().await;
@@ -305,6 +336,12 @@ impl AppState {
     fn serial_status(&self) -> crate::model::SerialConnectionStatus {
         self.device_manager.status()
     }
+}
+
+fn event_clears_pending_approval(event: &LocalHookEvent) -> bool {
+    !event.session_id.is_empty()
+        && event.hook_event_name != "PermissionRequest"
+        && event.hook_event_name != "Notification"
 }
 
 async fn post_event(
@@ -358,6 +395,10 @@ struct SubmitApprovalBody {
     tool_input_summary: String,
     #[serde(default = "default_permission_mode")]
     permission_mode: String,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 fn default_permission_mode() -> String {
@@ -383,6 +424,11 @@ async fn post_approval(
         tool_name: tool_name.clone(),
         tool_input_summary: tool_input_summary.clone(),
         permission_mode,
+        session_id: body.session_id.trim().to_string(),
+        tool_use_id: body
+            .tool_use_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
     };
     let id = state.approvals.submit(body.id, request.clone()).await;
     info!(
@@ -391,46 +437,16 @@ async fn post_approval(
         "approval submitted, forwarding to device"
     );
 
-    // Forward to ESP32 via RPC in background
-    let dm = state.device_manager.clone();
-    let approvals = state.approvals.clone();
-    let approval_id = id.clone();
-    tokio::spawn(async move {
-        let rpc = RpcRequest {
-            method: "claude.approve".into(),
-            params: serde_json::json!({
-                "id": transport_id,
-                "tool_name": request.tool_name,
-                "description": request.tool_input_summary,
-            }),
-        };
-        match dm.rpc(rpc).await {
-            Ok(result) => {
-                if let Some(decision_str) = result.get("decision").and_then(|v| v.as_str()) {
-                    let decision = match decision_str {
-                        "allow" => ApprovalDecision::Allow,
-                        "deny" => ApprovalDecision::Deny,
-                        "yolo" => ApprovalDecision::Yolo,
-                        _ => {
-                            warn!(decision = decision_str, "unknown device decision");
-                            ApprovalDecision::Deny
-                        }
-                    };
-                    approvals.resolve(&approval_id, decision).await;
-                    info!(approval_id, ?decision, "device resolved approval");
-                } else {
-                    warn!(approval_id, "device response missing decision field");
-                    approvals
-                        .resolve(&approval_id, ApprovalDecision::Deny)
-                        .await;
-                }
-            }
-            Err(err) => {
-                warn!(approval_id, error = %err, "failed to reach device for approval");
-                // Don't auto-deny on device error — let the CLI timeout handle it
-            }
-        }
-    });
+    if let Err(err) = state.device_manager.send_protocol_event(
+        "claude.approval.request",
+        serde_json::json!({
+            "id": transport_id,
+            "tool_name": request.tool_name,
+            "description": request.tool_input_summary,
+        }),
+    ) {
+        warn!(approval_id = id, error = %err, "failed to forward approval request to device");
+    }
 
     (
         StatusCode::CREATED,
@@ -505,18 +521,40 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
     let initial_snapshot = load_state(&config.state_path)
         .map(|persisted| persisted.snapshot)
         .unwrap_or_else(|| Snapshot::empty(now_epoch()));
+    let approvals = ApprovalStore::new();
+    let (device_event_tx, mut device_event_rx) = mpsc::unbounded_channel();
     let device_manager = DeviceManager::start(
         config.device.clone(),
         factory,
         Some(initial_snapshot.clone()),
+        device_event_tx,
     );
+
+    let approvals_for_device = approvals.clone();
+    tokio::spawn(async move {
+        while let Some(event) = device_event_rx.recv().await {
+            match event {
+                DeviceEvent::ApprovalResolved { id, decision } => {
+                    if approvals_for_device.resolve(&id, decision).await {
+                        info!(approval_id = id, ?decision, "device resolved approval");
+                    } else {
+                        warn!(
+                            approval_id = id,
+                            ?decision,
+                            "dropping approval result for unknown request"
+                        );
+                    }
+                }
+            }
+        }
+    });
 
     AppState {
         config,
         state: Arc::new(Mutex::new(AgentState::new(initial_snapshot))),
         pending_generation: Arc::new(AtomicU64::new(0)),
         device_manager,
-        approvals: ApprovalStore::new(),
+        approvals,
     }
 }
 
@@ -713,6 +751,91 @@ mod tests {
             }
             other => panic!("unexpected frame written to serial worker: {other:?}"),
         }
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn host_follow_up_event_dismisses_pending_approval_on_device() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("esp32dash-approval-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+        };
+
+        let app_state = build_app_state(
+            config,
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+        );
+        let router = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        Client::new()
+            .post(format!("http://{addr}/v1/claude/approvals"))
+            .json(&serde_json::json!({
+                "id": "approval-1",
+                "tool_name": "Bash",
+                "tool_input_summary": "rm -rf /tmp/test",
+                "permission_mode": "default",
+                "session_id": "sess-1",
+                "tool_use_id": "tool-1",
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Client::new()
+            .post(format!("http://{addr}/v1/claude/events"))
+            .json(&LocalHookEvent {
+                session_id: "sess-1".into(),
+                cwd: "/tmp/project".into(),
+                hook_event_name: "PreToolUse".into(),
+                message: None,
+                prompt_preview: None,
+                tool_name: Some("Bash".into()),
+                tool_use_id: Some("tool-1".into()),
+                permission_mode: "default".into(),
+                recv_ts: 124,
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let writes = writes.lock().expect("writes mutex poisoned");
+        assert!(writes.iter().any(|frame| {
+            matches!(
+                frame,
+                WireFrame::Event { method, payload }
+                    if method == "claude.approval.request"
+                        && payload["id"] == "approval-1"
+            )
+        }));
+        assert!(writes.iter().any(|frame| {
+            matches!(
+                frame,
+                WireFrame::Event { method, payload }
+                    if method == "claude.approval.dismiss"
+                        && payload["id"] == "approval-1"
+            )
+        }));
 
         server.abort();
         Ok(())

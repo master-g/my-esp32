@@ -7,8 +7,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
+use crate::model::LocalHookEvent;
+
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
-const CLEANUP_THRESHOLD: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +24,8 @@ pub struct ApprovalRequest {
     pub tool_name: String,
     pub tool_input_summary: String,
     pub permission_mode: String,
+    pub session_id: String,
+    pub tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,12 +36,19 @@ pub struct ApprovalStatus {
     pub decision: Option<ApprovalDecision>,
     pub resolved: bool,
     pub timed_out: bool,
+    pub dismissed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ApprovalResolution {
+    Decision(ApprovalDecision),
+    Dismissed,
 }
 
 #[derive(Debug)]
 struct Entry {
     request: ApprovalRequest,
-    decision: Option<ApprovalDecision>,
+    resolution: Option<ApprovalResolution>,
     created: Instant,
     notify: Arc<Notify>,
 }
@@ -59,7 +69,7 @@ impl ApprovalStore {
     pub async fn submit(&self, id: String, request: ApprovalRequest) -> String {
         let entry = Entry {
             request,
-            decision: None,
+            resolution: None,
             created: Instant::now(),
             notify: Arc::new(Notify::new()),
         };
@@ -71,7 +81,7 @@ impl ApprovalStore {
     pub async fn resolve(&self, id: &str, decision: ApprovalDecision) -> bool {
         let mut guard = self.inner.lock().await;
         if let Some(entry) = guard.get_mut(id) {
-            entry.decision = Some(decision);
+            entry.resolution = Some(ApprovalResolution::Decision(decision));
             entry.notify.notify_waiters();
             true
         } else {
@@ -79,18 +89,45 @@ impl ApprovalStore {
         }
     }
 
+    pub async fn dismiss_matching(&self, event: &LocalHookEvent) -> Vec<String> {
+        let mut guard = self.inner.lock().await;
+        let mut dismissed = Vec::new();
+
+        for (id, entry) in guard.iter_mut() {
+            if entry.resolution.is_some() || entry.created.elapsed() > APPROVAL_TIMEOUT {
+                continue;
+            }
+            if !matches_event(entry, event) {
+                continue;
+            }
+
+            entry.resolution = Some(ApprovalResolution::Dismissed);
+            entry.notify.notify_waiters();
+            dismissed.push(id.clone());
+        }
+
+        dismissed
+    }
+
     /// Get the current status of an approval.
     pub async fn status(&self, id: &str) -> Option<ApprovalStatus> {
         let guard = self.inner.lock().await;
         guard.get(id).map(|entry| {
-            let timed_out = entry.decision.is_none() && entry.created.elapsed() > APPROVAL_TIMEOUT;
+            let timed_out =
+                entry.resolution.is_none() && entry.created.elapsed() > APPROVAL_TIMEOUT;
+            let decision = match entry.resolution {
+                Some(ApprovalResolution::Decision(decision)) => Some(decision),
+                _ => None,
+            };
+            let dismissed = matches!(entry.resolution, Some(ApprovalResolution::Dismissed));
             ApprovalStatus {
                 id: id.to_string(),
                 tool_name: entry.request.tool_name.clone(),
                 tool_input_summary: entry.request.tool_input_summary.clone(),
-                decision: entry.decision,
-                resolved: entry.decision.is_some() || timed_out,
+                decision,
+                resolved: entry.resolution.is_some() || timed_out,
                 timed_out,
+                dismissed,
             }
         })
     }
@@ -105,8 +142,10 @@ impl ApprovalStore {
             let notify = {
                 let guard = self.inner.lock().await;
                 let entry = guard.get(id)?;
-                if entry.decision.is_some() {
-                    return entry.decision;
+                match entry.resolution {
+                    Some(ApprovalResolution::Decision(decision)) => return Some(decision),
+                    Some(ApprovalResolution::Dismissed) => return None,
+                    None => {}
                 }
                 if entry.created.elapsed() > APPROVAL_TIMEOUT {
                     return None; // timed out
@@ -120,26 +159,22 @@ impl ApprovalStore {
             }
         }
     }
+}
 
-    /// Get the oldest pending approval (for device dispatch).
-    pub async fn oldest_pending(&self) -> Option<(String, ApprovalRequest)> {
-        let guard = self.inner.lock().await;
-        guard
-            .iter()
-            .filter(|(_, entry)| entry.decision.is_none() && entry.created.elapsed() < APPROVAL_TIMEOUT)
-            .min_by_key(|(_, entry)| entry.created)
-            .map(|(id, entry)| (id.clone(), entry.request.clone()))
+fn matches_event(entry: &Entry, event: &LocalHookEvent) -> bool {
+    if entry.request.session_id.is_empty() || event.session_id.is_empty() {
+        return false;
+    }
+    if entry.request.session_id != event.session_id {
+        return false;
     }
 
-    /// Clean up expired entries.
-    pub async fn cleanup(&self) {
-        let mut guard = self.inner.lock().await;
-        if guard.len() < CLEANUP_THRESHOLD {
-            return;
-        }
-        guard.retain(|_, entry| {
-            entry.created.elapsed() < APPROVAL_TIMEOUT * 2
-        });
+    match (
+        entry.request.tool_use_id.as_deref(),
+        event.tool_use_id.as_deref(),
+    ) {
+        (Some(expected), Some(actual)) => expected == actual,
+        _ => true,
     }
 }
 
@@ -157,6 +192,8 @@ mod tests {
                     tool_name: "Bash".into(),
                     tool_input_summary: "rm -rf /tmp".into(),
                     permission_mode: "default".into(),
+                    session_id: "sess-1".into(),
+                    tool_use_id: Some("tool-1".into()),
                 },
             )
             .await;
@@ -164,12 +201,14 @@ mod tests {
         let status = store.status(&id).await.unwrap();
         assert!(!status.resolved);
         assert!(status.decision.is_none());
+        assert!(!status.dismissed);
 
         assert!(store.resolve(&id, ApprovalDecision::Allow).await);
 
         let status = store.status(&id).await.unwrap();
         assert!(status.resolved);
         assert_eq!(status.decision, Some(ApprovalDecision::Allow));
+        assert!(!status.dismissed);
     }
 
     #[tokio::test]
@@ -182,6 +221,8 @@ mod tests {
                     tool_name: "Edit".into(),
                     tool_input_summary: "edit file.rs".into(),
                     permission_mode: "default".into(),
+                    session_id: "sess-1".into(),
+                    tool_use_id: Some("tool-2".into()),
                 },
             )
             .await;
@@ -197,5 +238,59 @@ mod tests {
             .wait_for_decision(&id, Duration::from_millis(10))
             .await;
         assert_eq!(decision, Some(ApprovalDecision::Deny));
+    }
+
+    #[tokio::test]
+    async fn dismisses_matching_pending_approvals() {
+        let store = ApprovalStore::new();
+        let matching = store
+            .submit(
+                "approve-1".into(),
+                ApprovalRequest {
+                    tool_name: "Bash".into(),
+                    tool_input_summary: "rm -rf /tmp".into(),
+                    permission_mode: "default".into(),
+                    session_id: "sess-1".into(),
+                    tool_use_id: Some("tool-1".into()),
+                },
+            )
+            .await;
+        let other = store
+            .submit(
+                "approve-2".into(),
+                ApprovalRequest {
+                    tool_name: "Edit".into(),
+                    tool_input_summary: "edit file.rs".into(),
+                    permission_mode: "default".into(),
+                    session_id: "sess-2".into(),
+                    tool_use_id: Some("tool-2".into()),
+                },
+            )
+            .await;
+
+        let dismissed = store
+            .dismiss_matching(&LocalHookEvent {
+                session_id: "sess-1".into(),
+                cwd: "/tmp/project".into(),
+                hook_event_name: "PreToolUse".into(),
+                message: None,
+                prompt_preview: None,
+                tool_name: Some("Bash".into()),
+                tool_use_id: Some("tool-1".into()),
+                permission_mode: "default".into(),
+                recv_ts: 1,
+            })
+            .await;
+
+        assert_eq!(dismissed, vec![matching.clone()]);
+
+        let matching_status = store.status(&matching).await.unwrap();
+        assert!(matching_status.resolved);
+        assert!(matching_status.dismissed);
+        assert!(matching_status.decision.is_none());
+
+        let other_status = store.status(&other).await.unwrap();
+        assert!(!other_status.resolved);
+        assert!(!other_status.dismissed);
     }
 }

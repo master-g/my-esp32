@@ -2,6 +2,9 @@
 
 #include "bsp_board_config.h"
 #include "lvgl.h"
+#include "ui_fonts.h"
+
+#define APP_SLOT_BODY_Y 44
 
 static lv_obj_t *s_root;
 
@@ -21,17 +24,18 @@ static lv_obj_t *app_satoshi_slot_create_root(lv_obj_t *parent)
 
     title = lv_label_create(s_root);
     lv_label_set_text(title, "Satoshi Slot");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(title, ui_font_text_22(), 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xffd08a), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     body = lv_label_create(s_root);
     lv_obj_set_width(body, BSP_LCD_H_RES - 32);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(body, ui_font_text_11(), 0);
     lv_label_set_text(
         body, "Compute path reserved.\nPolicy wiring is active,\nalgorithm not yet attached.");
     lv_obj_set_style_text_color(body, lv_color_hex(0xf1d8b5), 0);
-    lv_obj_align(body, LV_ALIGN_TOP_LEFT, 0, 56);
+    lv_obj_align(body, LV_ALIGN_TOP_LEFT, 0, APP_SLOT_BODY_Y);
     return s_root;
 }
 

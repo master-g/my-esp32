@@ -7,13 +7,20 @@
 #include "bsp_board_config.h"
 #include "device_link.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "generated/app_home_status_font.h"
-#include "generated/noto_sans_cjk_12.h"
+#include "generated/departure_mono_55.h"
 #include "generated/sprite_frames.h"
 #include "esp_timer.h"
 #include "lvgl.h"
+#include "screensaver_balatro.h"
 #include "service_claude.h"
 #include "service_home.h"
+#include "service_time.h"
+#include "ui_fonts.h"
+
+#define TAG "app_home"
 
 #define HOME_STATUS_BAR_HEIGHT 20
 #define HOME_STATUS_BAR_WIDTH 80
@@ -21,7 +28,8 @@
 #define HOME_STATUS_ICON_SIZE 16
 #define HOME_STATUS_ITEM_BOX_SIZE (HOME_STATUS_ICON_SIZE + 4)
 #define HOME_STATUS_BAR_Y 4
-#define HOME_TIME_Y 30
+#define HOME_TIME_Y 33
+#define HOME_DATE_Y 88
 #define HOME_WIFI_ONLINE_COLOR 0xffffff
 #define HOME_WIFI_CONNECTING_COLOR 0xf3c76d
 #define HOME_ICON_MUTED_COLOR 0x5f6b72
@@ -31,13 +39,13 @@
 #define HOME_WEATHER_ROW_HEIGHT 20
 #define HOME_WEATHER_ICON_GAP 8
 #define HOME_WEATHER_ICON_Y_OFFSET 0
-#define HOME_WEATHER_TEXT_Y_OFFSET 2
+#define HOME_WEATHER_TEXT_Y_OFFSET 3
 #define HOME_WEATHER_TEXT_COLOR 0xe3edf2
 #define HOME_WEATHER_MUTED_COLOR 0x8da0ab
 #define HOME_BG_BASE_COLOR 0x0f1418
 #define HOME_BUBBLE_BG_COLOR 0x1e2830
 #define HOME_BUBBLE_TEXT_COLOR 0xe3edf2
-#define HOME_BUBBLE_MAX_W 200
+#define HOME_BUBBLE_MAX_W 220
 #define HOME_BUBBLE_PAD_H 6
 #define HOME_BUBBLE_PAD_V 4
 #define HOME_BUBBLE_RADIUS 8
@@ -45,6 +53,16 @@
 #define HOME_UNREAD_AUTO_CLEAR_MS 5000
 #define HOME_SCREENSAVER_IDLE_US (30LL * 60 * 1000000LL)
 #define HOME_SCREENSAVER_TIME_COLOR 0xf3f8ff
+#define HOME_SCREENSAVER_TIME_LETTER_SPACE 3
+#define HOME_SCREENSAVER_FX_W 160
+#define HOME_SCREENSAVER_FX_H 43
+#define HOME_SCREENSAVER_FX_SCALE 1024U
+#define HOME_SCREENSAVER_FX_PERIOD_MS 33
+#define HOME_SCREENSAVER_FX_PHASE_STEP 2
+#define HOME_SCREENSAVER_DEBUG_X 20
+#define HOME_SCREENSAVER_DEBUG_Y 20
+#define HOME_SCREENSAVER_DEBUG_COLOR 0xa7b6c2
+#define HOME_TIME_REFRESH_MS 200
 
 #define HOME_LEFT_HALF_W 280
 #define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
@@ -82,6 +100,7 @@ typedef struct {
     lv_obj_t *root;
     lv_obj_t *screensaver_overlay;
     lv_obj_t *screensaver_time_label;
+    lv_obj_t *screensaver_fps_label;
     lv_obj_t *status_bar;
     lv_obj_t *time_label;
     lv_obj_t *date_label;
@@ -113,6 +132,20 @@ typedef struct {
     lv_timer_t *timer;
 } sprite_ctx_t;
 
+typedef struct {
+    lv_obj_t *canvas;
+    lv_obj_t *image;
+    lv_timer_t *timer;
+    uint8_t *buf;
+    uint16_t phase_deg;
+    uint8_t frame_count;
+    uint16_t fps_x10;
+    uint16_t render_ms_x10;
+    uint16_t perf_frames;
+    uint32_t perf_render_total_us;
+    int64_t perf_window_start_us;
+} screensaver_fx_t;
+
 typedef enum {
     HOME_DISPLAY_NORMAL = 0,
     HOME_DISPLAY_SCREENSAVER,
@@ -120,17 +153,20 @@ typedef enum {
 
 static app_home_view_t s_view;
 static sprite_ctx_t s_sprite;
+static screensaver_fx_t s_screensaver_fx;
 static lv_timer_t *s_bubble_timer;
 static bool s_bubble_dismissed;
 static lv_timer_t *s_unread_timer;
 static uint32_t s_unread_seq;
 static bool s_was_connected;
-static lv_font_t s_cjk_font;
 static int64_t s_last_claude_activity_us;
 static home_display_mode_t s_display_mode;
+static lv_timer_t *s_time_refresh_timer;
 
 static void refresh_view(void);
 static int64_t home_now_us(void);
+static void update_screensaver_time_label(const home_snapshot_t *snapshot);
+static void update_screensaver_perf_label(void);
 
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
@@ -165,7 +201,141 @@ static void sprite_timer_cb(lv_timer_t *t)
 
 static int64_t home_now_us(void) { return esp_timer_get_time(); }
 
+static void time_refresh_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_display_mode != HOME_DISPLAY_NORMAL || s_view.time_label == NULL) {
+        return;
+    }
+
+    time_service_refresh_now();
+    home_service_refresh_snapshot();
+    home_snapshot_t snap;
+    home_service_get_snapshot(&snap);
+    lv_label_set_text(s_view.time_label, snap.time_text);
+}
+
 static void reset_screensaver_idle_deadline(void) { s_last_claude_activity_us = home_now_us(); }
+
+static void update_screensaver_perf_label(void)
+{
+    char text[32];
+
+    if (s_view.screensaver_fps_label == NULL) {
+        return;
+    }
+
+    if (s_screensaver_fx.fps_x10 == 0) {
+        lv_label_set_text_static(s_view.screensaver_fps_label, "--.- fps\n-. -ms cpu");
+        return;
+    }
+
+    snprintf(text, sizeof(text), "%u.%u fps\n%u.%ums cpu", s_screensaver_fx.fps_x10 / 10,
+             s_screensaver_fx.fps_x10 % 10, s_screensaver_fx.render_ms_x10 / 10,
+             s_screensaver_fx.render_ms_x10 % 10);
+    lv_label_set_text(s_view.screensaver_fps_label, text);
+}
+
+static void render_screensaver_background(void)
+{
+    lv_draw_buf_t *draw_buf;
+    lv_color32_t *pixels;
+    uint32_t stride_px;
+
+    if (s_screensaver_fx.canvas == NULL || s_screensaver_fx.buf == NULL) {
+        return;
+    }
+
+    draw_buf = lv_canvas_get_draw_buf(s_screensaver_fx.canvas);
+    if (draw_buf == NULL || draw_buf->data == NULL) {
+        return;
+    }
+
+    pixels = (lv_color32_t *)draw_buf->data;
+    stride_px = draw_buf->header.stride / sizeof(lv_color32_t);
+
+    balatro_render(pixels, stride_px, s_screensaver_fx.phase_deg);
+
+    if (s_screensaver_fx.image != NULL) {
+        lv_obj_invalidate(s_screensaver_fx.image);
+    }
+}
+
+static void screensaver_fx_timer_cb(lv_timer_t *t)
+{
+    int64_t frame_start_us;
+    int64_t frame_end_us;
+    uint32_t render_us;
+    int64_t window_elapsed_us;
+
+    (void)t;
+    if (s_display_mode != HOME_DISPLAY_SCREENSAVER) {
+        return;
+    }
+
+    frame_start_us = home_now_us();
+    s_screensaver_fx.phase_deg =
+        (uint16_t)((s_screensaver_fx.phase_deg + HOME_SCREENSAVER_FX_PHASE_STEP) % 360U);
+    render_screensaver_background();
+    frame_end_us = home_now_us();
+    render_us = (uint32_t)(frame_end_us - frame_start_us);
+
+    if (s_screensaver_fx.perf_window_start_us == 0) {
+        s_screensaver_fx.perf_window_start_us = frame_start_us;
+    }
+
+    s_screensaver_fx.perf_frames++;
+    s_screensaver_fx.perf_render_total_us += render_us;
+
+    window_elapsed_us = frame_end_us - s_screensaver_fx.perf_window_start_us;
+    if (window_elapsed_us >= 500000) {
+        s_screensaver_fx.fps_x10 =
+            (uint16_t)((s_screensaver_fx.perf_frames * 10000000LL + window_elapsed_us / 2) /
+                       window_elapsed_us);
+        s_screensaver_fx.render_ms_x10 =
+            (uint16_t)((s_screensaver_fx.perf_render_total_us * 10ULL +
+                        (s_screensaver_fx.perf_frames * 500ULL)) /
+                       ((uint64_t)s_screensaver_fx.perf_frames * 1000ULL));
+        update_screensaver_perf_label();
+        s_screensaver_fx.perf_frames = 0;
+        s_screensaver_fx.perf_render_total_us = 0;
+        s_screensaver_fx.perf_window_start_us = frame_end_us;
+    }
+
+    /* Refresh screensaver time label roughly once per second (~30 frames at 33ms) */
+    if (++s_screensaver_fx.frame_count >= 30) {
+        s_screensaver_fx.frame_count = 0;
+        time_service_refresh_now();
+        home_service_refresh_snapshot();
+        home_snapshot_t snap;
+        home_service_get_snapshot(&snap);
+        update_screensaver_time_label(&snap);
+    }
+}
+
+static void start_screensaver_fx(void)
+{
+    if (s_screensaver_fx.timer == NULL) {
+        return;
+    }
+
+    s_screensaver_fx.frame_count = 0;
+    s_screensaver_fx.fps_x10 = 0;
+    s_screensaver_fx.render_ms_x10 = 0;
+    s_screensaver_fx.perf_frames = 0;
+    s_screensaver_fx.perf_render_total_us = 0;
+    s_screensaver_fx.perf_window_start_us = 0;
+    update_screensaver_perf_label();
+    render_screensaver_background();
+    lv_timer_resume(s_screensaver_fx.timer);
+}
+
+static void stop_screensaver_fx(void)
+{
+    if (s_screensaver_fx.timer != NULL) {
+        lv_timer_pause(s_screensaver_fx.timer);
+    }
+}
 
 static void update_screensaver_time_label(const home_snapshot_t *snapshot)
 {
@@ -227,12 +397,16 @@ static void enter_screensaver(const home_snapshot_t *snapshot)
 {
     if (s_display_mode == HOME_DISPLAY_SCREENSAVER) {
         update_screensaver_time_label(snapshot);
+        start_screensaver_fx();
         return;
     }
 
     s_display_mode = HOME_DISPLAY_SCREENSAVER;
     if (s_sprite.timer != NULL) {
         lv_timer_pause(s_sprite.timer);
+    }
+    if (s_time_refresh_timer != NULL) {
+        lv_timer_pause(s_time_refresh_timer);
     }
     if (s_bubble_timer != NULL) {
         lv_timer_delete(s_bubble_timer);
@@ -243,6 +417,7 @@ static void enter_screensaver(const home_snapshot_t *snapshot)
     if (s_view.screensaver_overlay != NULL) {
         lv_obj_clear_flag(s_view.screensaver_overlay, LV_OBJ_FLAG_HIDDEN);
     }
+    start_screensaver_fx();
 }
 
 static void exit_screensaver(void)
@@ -252,12 +427,16 @@ static void exit_screensaver(void)
     }
 
     s_display_mode = HOME_DISPLAY_NORMAL;
+    stop_screensaver_fx();
     if (s_view.screensaver_overlay != NULL) {
         lv_obj_add_flag(s_view.screensaver_overlay, LV_OBJ_FLAG_HIDDEN);
     }
     set_normal_view_hidden(false);
     if (s_sprite.timer != NULL) {
         lv_timer_resume(s_sprite.timer);
+    }
+    if (s_time_refresh_timer != NULL) {
+        lv_timer_resume(s_time_refresh_timer);
     }
 }
 
@@ -275,6 +454,7 @@ static void screensaver_touch_cb(lv_event_t *e)
 static void create_screensaver_overlay(lv_obj_t *root)
 {
     lv_obj_t *overlay = lv_obj_create(root);
+    size_t fx_buf_size = HOME_SCREENSAVER_FX_W * HOME_SCREENSAVER_FX_H * sizeof(lv_color32_t);
 
     lv_obj_remove_style_all(overlay);
     lv_obj_set_size(overlay, BSP_LCD_H_RES, BSP_LCD_V_RES);
@@ -285,13 +465,51 @@ static void create_screensaver_overlay(lv_obj_t *root)
     lv_obj_add_event_cb(overlay, screensaver_touch_cb, LV_EVENT_PRESSED, NULL);
     s_view.screensaver_overlay = overlay;
 
+    s_screensaver_fx.buf = heap_caps_malloc(fx_buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_screensaver_fx.buf == NULL) {
+        s_screensaver_fx.buf = heap_caps_malloc(fx_buf_size, MALLOC_CAP_8BIT);
+    }
+
+    if (s_screensaver_fx.buf != NULL) {
+        s_screensaver_fx.canvas = lv_canvas_create(overlay);
+        lv_canvas_set_buffer(s_screensaver_fx.canvas, s_screensaver_fx.buf, HOME_SCREENSAVER_FX_W,
+                             HOME_SCREENSAVER_FX_H, LV_COLOR_FORMAT_ARGB8888);
+        lv_obj_add_flag(s_screensaver_fx.canvas, LV_OBJ_FLAG_HIDDEN);
+
+        s_screensaver_fx.image = lv_image_create(overlay);
+        lv_image_set_src(s_screensaver_fx.image, lv_canvas_get_image(s_screensaver_fx.canvas));
+        lv_image_set_scale(s_screensaver_fx.image, HOME_SCREENSAVER_FX_SCALE);
+        lv_obj_center(s_screensaver_fx.image);
+
+        balatro_init(HOME_SCREENSAVER_FX_W, HOME_SCREENSAVER_FX_H);
+
+        s_screensaver_fx.phase_deg = 0;
+        render_screensaver_background();
+
+        s_screensaver_fx.timer =
+            lv_timer_create(screensaver_fx_timer_cb, HOME_SCREENSAVER_FX_PERIOD_MS, NULL);
+        lv_timer_pause(s_screensaver_fx.timer);
+    } else {
+        ESP_LOGW(TAG, "screensaver fx buffer allocation failed; using static background");
+    }
+
     s_view.screensaver_time_label = lv_label_create(overlay);
-    lv_obj_set_style_text_font(s_view.screensaver_time_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(s_view.screensaver_time_label, &departure_mono_55, 0);
     lv_obj_set_style_text_color(s_view.screensaver_time_label,
                                 lv_color_hex(HOME_SCREENSAVER_TIME_COLOR), 0);
-    lv_obj_set_style_text_letter_space(s_view.screensaver_time_label, 3, 0);
+    lv_obj_set_style_text_letter_space(s_view.screensaver_time_label,
+                                       HOME_SCREENSAVER_TIME_LETTER_SPACE, 0);
     lv_obj_center(s_view.screensaver_time_label);
     lv_label_set_text_static(s_view.screensaver_time_label, "--:--");
+
+    s_view.screensaver_fps_label = lv_label_create(overlay);
+    lv_obj_set_style_text_font(s_view.screensaver_fps_label, ui_font_text_11(), 0);
+    lv_obj_set_style_text_color(s_view.screensaver_fps_label,
+                                lv_color_hex(HOME_SCREENSAVER_DEBUG_COLOR), 0);
+    lv_obj_set_style_text_align(s_view.screensaver_fps_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(s_view.screensaver_fps_label, LV_ALIGN_TOP_LEFT, HOME_SCREENSAVER_DEBUG_X,
+                 HOME_SCREENSAVER_DEBUG_Y);
+    lv_label_set_text_static(s_view.screensaver_fps_label, "--.- fps\n-. -ms cpu");
 }
 
 static void display_city_name(char *dst, size_t dst_size, const char *src)
@@ -570,7 +788,7 @@ static lv_obj_t *create_approval_btn(lv_obj_t *parent, const char *text, uint32_
 
     lv_obj_t *label = lv_label_create(btn);
     lv_label_set_text(label, text);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_center(label);
 
@@ -595,18 +813,18 @@ static void create_approval_overlay(lv_obj_t *root)
 
     /* Info row (top): tool name + description side by side */
     s_view.approval_tool_label = lv_label_create(overlay);
-    lv_obj_set_style_text_font(s_view.approval_tool_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_view.approval_tool_label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(s_view.approval_tool_label, lv_color_hex(0xe9e0cf), 0);
     lv_label_set_long_mode(s_view.approval_tool_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_view.approval_tool_label, 120);
+    lv_obj_set_width(s_view.approval_tool_label, 132);
     lv_obj_align(s_view.approval_tool_label, LV_ALIGN_TOP_LEFT, 0, 8);
 
     s_view.approval_desc_label = lv_label_create(overlay);
-    lv_obj_set_style_text_font(s_view.approval_desc_label, &s_cjk_font, 0);
+    lv_obj_set_style_text_font(s_view.approval_desc_label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(s_view.approval_desc_label, lv_color_hex(0x8899a6), 0);
-    lv_obj_set_width(s_view.approval_desc_label, BSP_LCD_H_RES - 32 - 130);
+    lv_obj_set_width(s_view.approval_desc_label, BSP_LCD_H_RES - 32 - 140);
     lv_label_set_long_mode(s_view.approval_desc_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_view.approval_desc_label, LV_ALIGN_TOP_LEFT, 130, 10);
+    lv_obj_align(s_view.approval_desc_label, LV_ALIGN_TOP_LEFT, 140, 10);
 
     /* Button row (bottom): three buttons side by side */
     lv_obj_t *btn_row = lv_obj_create(overlay);
@@ -618,12 +836,12 @@ static void create_approval_overlay(lv_obj_t *root)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(btn_row, APPROVE_BTN_GAP, 0);
 
-    s_view.approval_btn_allow = create_approval_btn(btn_row, LV_SYMBOL_OK " Accept",
-                                                    APPROVE_ALLOW_COLOR, APPROVAL_DECISION_ALLOW);
-    s_view.approval_btn_deny = create_approval_btn(btn_row, LV_SYMBOL_CLOSE " Decline",
-                                                   APPROVE_DENY_COLOR, APPROVAL_DECISION_DENY);
-    s_view.approval_btn_yolo = create_approval_btn(btn_row, LV_SYMBOL_SHUFFLE " YOLO",
-                                                   APPROVE_YOLO_COLOR, APPROVAL_DECISION_YOLO);
+    s_view.approval_btn_allow =
+        create_approval_btn(btn_row, "Accept", APPROVE_ALLOW_COLOR, APPROVAL_DECISION_ALLOW);
+    s_view.approval_btn_deny =
+        create_approval_btn(btn_row, "Decline", APPROVE_DENY_COLOR, APPROVAL_DECISION_DENY);
+    s_view.approval_btn_yolo =
+        create_approval_btn(btn_row, "YOLO", APPROVE_YOLO_COLOR, APPROVAL_DECISION_YOLO);
 }
 
 static void show_approval_overlay(void)
@@ -639,10 +857,6 @@ static void show_approval_overlay(void)
 
 static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 {
-    /* Build a composite font: Montserrat 12 with CJK fallback */
-    s_cjk_font = lv_font_montserrat_12;
-    s_cjk_font.fallback = &noto_sans_cjk_12;
-
     lv_obj_t *root = lv_obj_create(parent);
 
     s_view.root = root;
@@ -702,14 +916,14 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     lv_obj_add_flag(s_view.claude_dot, LV_OBJ_FLAG_HIDDEN);
 
     s_view.time_label = lv_label_create(root);
-    lv_obj_set_style_text_font(s_view.time_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(s_view.time_label, ui_font_display_44(), 0);
     lv_obj_set_style_text_color(s_view.time_label, lv_color_hex(0xa6f0ff), 0);
     lv_obj_align(s_view.time_label, LV_ALIGN_TOP_LEFT, 0, HOME_TIME_Y);
 
     s_view.date_label = lv_label_create(root);
-    lv_obj_set_style_text_font(s_view.date_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_view.date_label, ui_font_text_22(), 0);
     lv_obj_set_style_text_color(s_view.date_label, lv_color_hex(0xb7c4cc), 0);
-    lv_obj_align(s_view.date_label, LV_ALIGN_TOP_LEFT, 2, 94);
+    lv_obj_align(s_view.date_label, LV_ALIGN_TOP_LEFT, 0, HOME_DATE_Y);
 
     s_view.weather_row = lv_obj_create(root);
     lv_obj_remove_style_all(s_view.weather_row);
@@ -729,7 +943,7 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     lv_obj_set_width(s_view.weather_label,
                      HOME_LEFT_HALF_W - HOME_STATUS_ITEM_BOX_SIZE - HOME_WEATHER_ICON_GAP);
     lv_label_set_long_mode(s_view.weather_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_font(s_view.weather_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_view.weather_label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(s_view.weather_label, lv_color_hex(HOME_WEATHER_TEXT_COLOR), 0);
     lv_obj_set_style_translate_y(s_view.weather_label, HOME_WEATHER_TEXT_Y_OFFSET, 0);
 
@@ -759,7 +973,7 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     s_view.bubble_label = lv_label_create(s_view.bubble_box);
     lv_obj_set_style_max_width(s_view.bubble_label, HOME_BUBBLE_MAX_W - 2 * HOME_BUBBLE_PAD_H, 0);
     lv_label_set_long_mode(s_view.bubble_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(s_view.bubble_label, &s_cjk_font, 0);
+    lv_obj_set_style_text_font(s_view.bubble_label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(s_view.bubble_label, lv_color_hex(HOME_BUBBLE_TEXT_COLOR), 0);
     lv_label_set_text_static(s_view.bubble_label, "");
 
@@ -767,6 +981,8 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     s_sprite.anim = &s_sprite_anims[SPRITE_STATE_IDLE];
     s_sprite.frame_idx = 0;
     s_sprite.timer = lv_timer_create(sprite_timer_cb, s_sprite.anim->period_ms, NULL);
+
+    s_time_refresh_timer = lv_timer_create(time_refresh_cb, HOME_TIME_REFRESH_MS, NULL);
 
     /* ---- approval overlay (must be last for z-order) ---- */
     create_approval_overlay(root);
@@ -785,10 +1001,14 @@ static void app_home_resume(void)
     if (s_view.screensaver_overlay != NULL) {
         lv_obj_add_flag(s_view.screensaver_overlay, LV_OBJ_FLAG_HIDDEN);
     }
+    stop_screensaver_fx();
     set_normal_view_hidden(false);
     refresh_view();
     if (s_sprite.timer != NULL) {
         lv_timer_resume(s_sprite.timer);
+    }
+    if (s_time_refresh_timer != NULL) {
+        lv_timer_resume(s_time_refresh_timer);
     }
 }
 
@@ -796,6 +1016,9 @@ static void app_home_suspend(void)
 {
     if (s_sprite.timer != NULL) {
         lv_timer_pause(s_sprite.timer);
+    }
+    if (s_time_refresh_timer != NULL) {
+        lv_timer_pause(s_time_refresh_timer);
     }
     if (s_bubble_timer != NULL) {
         lv_timer_delete(s_bubble_timer);
@@ -805,6 +1028,7 @@ static void app_home_suspend(void)
         lv_timer_delete(s_unread_timer);
         s_unread_timer = NULL;
     }
+    stop_screensaver_fx();
 }
 
 static esp_err_t app_home_handle_control(app_control_type_t type, const void *payload)
@@ -892,6 +1116,11 @@ static void app_home_handle_event(const app_event_t *event)
         reset_screensaver_idle_deadline();
         exit_screensaver();
         show_approval_overlay();
+        break;
+    case APP_EVENT_PERMISSION_DISMISS:
+        if (s_view.approval_overlay != NULL) {
+            lv_obj_add_flag(s_view.approval_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
         break;
     default:
         break;
