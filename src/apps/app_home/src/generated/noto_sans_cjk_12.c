@@ -1,4 +1,12 @@
 /*******************************************************************************
+ * Derived from Noto Sans SC / Noto Sans CJK SC.
+ * Upstream copyright: (c) 2014-2021 Adobe (http://www.adobe.com/).
+ * License: SIL Open Font License 1.1.
+ * See third_party/fonts/noto-sans-cjk/OFL-1.1.txt and
+ * src/apps/app_home/src/generated/README.md.
+ ******************************************************************************/
+
+/*******************************************************************************
  * Size: 12 px
  * Bpp: 2
  * Opts: --font /tmp/NotoSansSC.ttf --symbols

@@ -7,6 +7,7 @@ mod hooks;
 mod launchd;
 mod model;
 mod normalizer;
+mod text_sanitize;
 
 use std::{
     env,
@@ -25,10 +26,19 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
     agent::Config,
-    device::{UnixSerialFactory, discover_devices, open_direct_session, request_direct, request_direct_with_timeout, send_event_direct},
+    device::{
+        UnixSerialFactory, discover_devices, open_direct_session, request_direct,
+        request_direct_with_timeout, send_event_direct,
+    },
     hooks::InstallHooksResult,
-    model::{AdminErrorResponse, AdminRpcResponse, Attention, LocalHookEvent, RawHookInput, RpcRequest, RunStatus, Snapshot, WireFrame},
-    normalizer::sanitize_prompt_preview,
+    model::{
+        AdminErrorResponse, AdminRpcResponse, Attention, LocalHookEvent, RawHookInput, RpcRequest,
+        RunStatus, Snapshot, WireFrame,
+    },
+    text_sanitize::{
+        build_approval_id, sanitize_approval_summary, sanitize_message, sanitize_permission_mode,
+        sanitize_prompt_preview, sanitize_tool_name,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -168,6 +178,12 @@ enum ChibiState {
     Sleeping,
 }
 
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum ScreensaverAction {
+    Enter,
+    Exit,
+}
+
 impl ChibiState {
     fn to_run_status(&self) -> RunStatus {
         match self {
@@ -202,6 +218,13 @@ enum ChibiCommand {
         #[arg(long, default_value = "rm -rf /tmp/test", help = "Description to show")]
         desc: String,
         #[arg(long, help = "Serial port (default: autodiscover)")]
+        port: Option<String>,
+    },
+    #[command(about = "Force the Home screensaver on or off for quick testing")]
+    Screensaver {
+        #[arg(value_enum, help = "Whether to enter or exit the screensaver")]
+        action: ScreensaverAction,
+        #[arg(long, help = "Serial port (default: autodiscover or running agent)")]
         port: Option<String>,
     },
 }
@@ -386,6 +409,24 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             println!("device responded: decision={decision}");
             Ok(())
         }
+        ChibiCommand::Screensaver { action, port } => {
+            let enabled = matches!(action, ScreensaverAction::Enter);
+            run_request(
+                port.as_deref(),
+                RpcRequest {
+                    method: "home.screensaver".into(),
+                    params: json!({
+                        "enabled": enabled,
+                    }),
+                },
+            )
+            .await?;
+            println!(
+                "screensaver {}",
+                if enabled { "entered" } else { "exited" }
+            );
+            Ok(())
+        }
     }
 }
 
@@ -517,10 +558,15 @@ fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
     let message = raw
         .message
         .or(raw.reason)
-        .map(|message| trim_text(&message, 96))
-        .filter(|message| !message.is_empty());
+        .and_then(|message| sanitize_message(&message));
 
     let prompt_preview = raw.prompt.as_deref().and_then(sanitize_prompt_preview);
+    let permission_mode = raw
+        .permission_mode
+        .as_deref()
+        .map(sanitize_permission_mode)
+        .filter(|mode| !mode.is_empty())
+        .unwrap_or_else(|| "default".into());
 
     LocalHookEvent {
         session_id: raw.session_id,
@@ -528,25 +574,11 @@ fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
         hook_event_name: raw.hook_event_name,
         message,
         prompt_preview,
-        tool_name: raw
-            .tool_name
-            .map(|tool| trim_text(&tool, 48))
-            .filter(|tool| !tool.is_empty()),
+        tool_name: raw.tool_name.and_then(|tool| sanitize_tool_name(&tool)),
         tool_use_id: raw.tool_use_id,
-        permission_mode: raw.permission_mode.unwrap_or_else(|| "default".into()),
+        permission_mode,
         recv_ts: now_epoch(),
     }
-}
-
-fn trim_text(input: &str, max_chars: usize) -> String {
-    input
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .chars()
-        .take(max_chars)
-        .collect()
 }
 
 fn now_epoch() -> u64 {
@@ -554,6 +586,13 @@ fn now_epoch() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn now_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn admin_base_url() -> String {
@@ -590,20 +629,18 @@ async fn approve_from_stdin() -> Result<()> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
+    let display_tool_name = sanitize_tool_name(&tool_name).unwrap_or_else(|| "unknown".into());
 
     let tool_input_summary = summarize_tool_input(&raw);
 
     let permission_mode = raw
         .get("permission_mode")
         .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
+        .map(sanitize_permission_mode)
+        .filter(|mode| !mode.is_empty())
+        .unwrap_or_else(|| "default".into());
 
-    let approval_id = format!(
-        "approval-{}-{}",
-        now_epoch(),
-        tool_name.chars().take(16).collect::<String>()
-    );
+    let approval_id = build_approval_id(now_epoch_millis(), &tool_name);
 
     // Also ingest as a normal event so the dashboard updates
     let ingest_raw: std::result::Result<RawHookInput, _> = serde_json::from_str(&stdin);
@@ -624,7 +661,7 @@ async fn approve_from_stdin() -> Result<()> {
         .post(format!("{}/v1/claude/approvals", admin_base_url()))
         .json(&json!({
             "id": approval_id,
-            "tool_name": tool_name,
+            "tool_name": display_tool_name,
             "tool_input_summary": tool_input_summary,
             "permission_mode": permission_mode,
         }))
@@ -671,9 +708,7 @@ async fn approve_from_stdin() -> Result<()> {
             .await;
 
         let body: Value = match response {
-            Ok(resp) if resp.status().is_success() => {
-                resp.json().await.unwrap_or_default()
-            }
+            Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
             _ => continue,
         };
 
@@ -682,7 +717,10 @@ async fn approve_from_stdin() -> Result<()> {
             None => continue,
         };
 
-        let resolved = approval.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+        let resolved = approval
+            .get("resolved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !resolved {
             continue;
         }
@@ -739,15 +777,15 @@ fn summarize_tool_input(raw: &Value) -> String {
 
     // For Bash, show the command
     if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
-        return trim_text(cmd, 80);
+        return sanitize_approval_summary(cmd);
     }
     // For Edit/Write, show the file path
     if let Some(path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-        return trim_text(path, 80);
+        return sanitize_approval_summary(path);
     }
     // For other tools, compact JSON
     match serde_json::to_string(tool_input) {
-        Ok(s) => trim_text(&s, 80),
+        Ok(s) => sanitize_approval_summary(&s),
         Err(_) => String::new(),
     }
 }

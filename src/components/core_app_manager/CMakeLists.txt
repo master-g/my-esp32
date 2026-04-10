@@ -7,4 +7,5 @@ idf_component_register(
         bsp_board
         core_types
         lvgl__lvgl
+        core_system_state
 )

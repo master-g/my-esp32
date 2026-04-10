@@ -6,6 +6,7 @@ idf_component_register(
     REQUIRES
         bsp_board
         cjson
+        core_app_manager
         core_event_bus
         core_types
         esp_app_format

@@ -1,10 +1,21 @@
 #ifndef APP_MANAGER_H
 #define APP_MANAGER_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "core_types/app_event.h"
 #include "core_types/app_id.h"
 #include "core_types/lvgl_forward.h"
 #include "esp_err.h"
+
+typedef enum {
+    APP_CONTROL_HOME_SCREENSAVER = 0,
+} app_control_type_t;
+
+typedef struct {
+    bool enabled;
+} app_control_home_screensaver_t;
 
 typedef struct {
     app_id_t id;
@@ -14,11 +25,14 @@ typedef struct {
     void (*resume)(void);
     void (*suspend)(void);
     void (*handle_event)(const app_event_t *event);
+    esp_err_t (*handle_control)(app_control_type_t type, const void *payload);
 } app_descriptor_t;
 
 esp_err_t app_manager_init(void);
 esp_err_t app_manager_register(const app_descriptor_t *descriptor);
 esp_err_t app_manager_switch_to(app_id_t app_id);
+esp_err_t app_manager_request_switch_to(app_id_t app_id, uint32_t timeout_ms);
+esp_err_t app_manager_request_home_screensaver(bool enabled, uint32_t timeout_ms);
 app_id_t app_manager_get_foreground_app(void);
 const app_descriptor_t *app_manager_get_descriptor(app_id_t app_id);
 void app_manager_on_event(const app_event_t *event, void *context);

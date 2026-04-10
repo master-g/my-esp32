@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "app_manager.h"
 #include "bsp_board_config.h"
 #include "cJSON.h"
 #include "driver/usb_serial_jtag.h"
@@ -34,6 +35,7 @@
 #define DEVICE_LINK_LINE_MAX 768
 #define DEVICE_LINK_HELLO_INTERVAL_MS 1000
 #define APPROVAL_TIMEOUT_MS 300000
+#define UI_CONTROL_TIMEOUT_MS 2000
 
 static const char *TAG = "device_link";
 static SemaphoreHandle_t s_stdout_lock;
@@ -63,7 +65,7 @@ typedef struct {
 
 static const char *capabilities[] = {
     "device.info", "device.reboot", "config.export",  "config.set_many",
-    "wifi.scan",   "claude.update", "claude.approve",
+    "wifi.scan",   "claude.update", "claude.approve", "home.screensaver",
 };
 
 static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
@@ -812,6 +814,19 @@ static void handle_request_frame(const cJSON *root)
             send_response_ok(id->valuestring, result);
         }
         s_approval_req.pending = false;
+        return;
+    }
+
+    if (strcmp(method->valuestring, "home.screensaver") == 0) {
+        const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(params, "enabled");
+        esp_err_t err =
+            app_manager_request_home_screensaver(cJSON_IsTrue(enabled), UI_CONTROL_TIMEOUT_MS);
+
+        if (err != ESP_OK) {
+            send_response_error(id->valuestring, "ui_control_failed", esp_err_to_name(err));
+            return;
+        }
+        send_response_ok(id->valuestring, cJSON_CreateObject());
         return;
     }
 

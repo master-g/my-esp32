@@ -115,7 +115,7 @@ typedef enum {
 
 - `ENTER` / `LEAVE`：只发给相关页面
 - `TOUCH`：只发给前台页面
-- `TICK_1S`：只发给前台页面
+- `TICK_1S`：只发给前台页面，用于低频状态刷新
 - `NET_CHANGED` / `POWER_CHANGED`：发给前台页面，必要时允许广播给全部页面
 - `DATA_*`：默认只发给前台页面；页面切回前台后通过 service 快照补状态
 
@@ -123,6 +123,7 @@ typedef enum {
 
 - 页面主要通过拉快照恢复，不依赖事件历史重放
 - `event_bus` 不做复杂持久队列
+- 显式 UI 控制命令（例如强制切页、进入 Home screensaver）不走 `event_bus`，改由 `app_manager` 的 UI control queue 送入 LVGL 线程
 
 ## 7. 与 Service 的边界
 
@@ -174,5 +175,5 @@ esp_err_t event_bus_publish(const app_event_t *event);
 
 ---
 
-*文档版本: 1.0*  
+*文档版本: 1.0*
 *创建日期: 2026-04-07*

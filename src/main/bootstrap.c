@@ -110,7 +110,6 @@ esp_err_t bootstrap_start(void)
                             "tick timer start failed");
     }
 
-    system_state_set_foreground_app(APP_ID_HOME);
     ESP_RETURN_ON_ERROR(app_manager_switch_to(APP_ID_HOME), TAG, "failed to switch to home");
 
     ESP_LOGI(TAG, "Firmware scaffold initialized");

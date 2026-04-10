@@ -16,6 +16,7 @@ What is intentionally not tracked here:
 - temporary debug dumps or intermediate font artifacts
 
 The first target is the Home icon font, which is used by the Home page status bar and weather summary.
+The second tracked target is the Home page CJK fallback font for bubble text and approval descriptions.
 
 ## Current source policy
 
@@ -29,12 +30,24 @@ The checked-in config now builds a single Home icon font that includes:
 
 The generation script resolves every configured icon name from the cached upstream metadata and keeps the order from `ICON_SPECS`. The checked-in config copies the package `WOFF` instead of `WOFF2`, because the current `lv_font_conv` build in this repo does not accept `WOFF2`.
 
+For CJK text we keep a tracked `noto_sans_cjk_12` output under `src/apps/app_home/src/generated/`.
+That font is derived from Noto Sans SC / Noto Sans CJK SC. The upstream font binary is not vendored
+in this repository; regeneration expects either:
+
+- `NOTO_SANS_SC_SOURCE_FONT=/abs/path/to/NotoSansSC-Regular.otf`, or
+- a copied cache file at `.cache/upstream/NotoSansSC-Regular.otf`
+
+The glyph list is extracted from the tracked `noto_sans_cjk_12.c` comment block so host-side text
+sanitization can stay aligned with the device font coverage.
+
 ## Upstream sources
 
 - `lv_font_conv`: https://github.com/lvgl/lv_font_conv
 - `bootstrap-icons`: https://www.npmjs.com/package/bootstrap-icons
 - Bootstrap Icons catalog: https://icons.getbootstrap.com/
 - Bootstrap Icons font metadata: `font/bootstrap-icons.json` in the npm package
+- `notofonts/noto-cjk`: https://github.com/notofonts/noto-cjk
+- Noto Sans SC license copy: `third_party/fonts/noto-sans-cjk/OFL-1.1.txt`
 
 The configured icon unicodes are resolved from the cached metadata file during generation. JSON flat maps such as `bootstrap-icons.json` and Font Awesome style YAML metadata are both supported.
 
@@ -61,6 +74,12 @@ Generate the Home icon font into the tracked source tree:
 npm run generate:home-status
 ```
 
+Generate the tracked CJK fallback font:
+
+```bash
+NOTO_SANS_SC_SOURCE_FONT=/abs/path/to/NotoSansSC-Regular.otf npm run generate:cjk-12
+```
+
 Or do both:
 
 ```bash
@@ -73,5 +92,7 @@ The generation script writes the LVGL font files to:
 
 - `src/apps/app_home/src/generated/app_home_status_font.c`
 - `src/apps/app_home/src/generated/app_home_status_font.h`
+- `src/apps/app_home/src/generated/noto_sans_cjk_12.c`
+- `src/apps/app_home/src/generated/noto_sans_cjk_12.h`
 
 These generated files are meant to be tracked in git. The source webfont and all process artifacts stay ignored under this tool directory.

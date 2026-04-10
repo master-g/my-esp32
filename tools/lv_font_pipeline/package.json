@@ -7,6 +7,7 @@
   "scripts": {
     "fetch:sources": "./scripts/fetch_sources.sh",
     "generate:home-status": "./scripts/generate_home_status_font.sh",
+    "generate:cjk-12": "./scripts/generate_noto_sans_cjk_font.sh",
     "build": "npm run fetch:sources && npm run generate:home-status"
   },
   "devDependencies": {

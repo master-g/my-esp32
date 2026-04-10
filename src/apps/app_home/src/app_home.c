@@ -6,9 +6,11 @@
 #include "bsp_board.h"
 #include "bsp_board_config.h"
 #include "device_link.h"
+#include "esp_check.h"
 #include "generated/app_home_status_font.h"
 #include "generated/noto_sans_cjk_12.h"
 #include "generated/sprite_frames.h"
+#include "esp_timer.h"
 #include "lvgl.h"
 #include "service_claude.h"
 #include "service_home.h"
@@ -29,9 +31,10 @@
 #define HOME_WEATHER_ROW_HEIGHT 20
 #define HOME_WEATHER_ICON_GAP 8
 #define HOME_WEATHER_ICON_Y_OFFSET 0
-#define HOME_WEATHER_TEXT_Y_OFFSET 1
+#define HOME_WEATHER_TEXT_Y_OFFSET 2
 #define HOME_WEATHER_TEXT_COLOR 0xe3edf2
 #define HOME_WEATHER_MUTED_COLOR 0x8da0ab
+#define HOME_BG_BASE_COLOR 0x0f1418
 #define HOME_BUBBLE_BG_COLOR 0x1e2830
 #define HOME_BUBBLE_TEXT_COLOR 0xe3edf2
 #define HOME_BUBBLE_MAX_W 200
@@ -40,6 +43,8 @@
 #define HOME_BUBBLE_RADIUS 8
 #define HOME_BUBBLE_FADE_MS 5000
 #define HOME_UNREAD_AUTO_CLEAR_MS 5000
+#define HOME_SCREENSAVER_IDLE_US (30LL * 60 * 1000000LL)
+#define HOME_SCREENSAVER_TIME_COLOR 0xf3f8ff
 
 #define HOME_LEFT_HALF_W 280
 #define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
@@ -75,6 +80,8 @@ static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT] = {
 
 typedef struct {
     lv_obj_t *root;
+    lv_obj_t *screensaver_overlay;
+    lv_obj_t *screensaver_time_label;
     lv_obj_t *status_bar;
     lv_obj_t *time_label;
     lv_obj_t *date_label;
@@ -106,6 +113,11 @@ typedef struct {
     lv_timer_t *timer;
 } sprite_ctx_t;
 
+typedef enum {
+    HOME_DISPLAY_NORMAL = 0,
+    HOME_DISPLAY_SCREENSAVER,
+} home_display_mode_t;
+
 static app_home_view_t s_view;
 static sprite_ctx_t s_sprite;
 static lv_timer_t *s_bubble_timer;
@@ -114,6 +126,11 @@ static lv_timer_t *s_unread_timer;
 static uint32_t s_unread_seq;
 static bool s_was_connected;
 static lv_font_t s_cjk_font;
+static int64_t s_last_claude_activity_us;
+static home_display_mode_t s_display_mode;
+
+static void refresh_view(void);
+static int64_t home_now_us(void);
 
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
@@ -144,6 +161,137 @@ static void sprite_timer_cb(lv_timer_t *t)
 
     s_sprite.frame_idx = (s_sprite.frame_idx + 1) % s_sprite.anim->num_frames;
     lv_image_set_src(s_view.sprite_img, &s_sprite.anim->frames[s_sprite.frame_idx]);
+}
+
+static int64_t home_now_us(void) { return esp_timer_get_time(); }
+
+static void reset_screensaver_idle_deadline(void) { s_last_claude_activity_us = home_now_us(); }
+
+static void update_screensaver_time_label(const home_snapshot_t *snapshot)
+{
+    char time_text[6] = "--:--";
+
+    if (snapshot != NULL && snapshot->time_text[0] != '\0' && snapshot->time_text[0] != '-') {
+        memcpy(time_text, snapshot->time_text, 5);
+        time_text[5] = '\0';
+    }
+
+    if (s_view.screensaver_time_label != NULL) {
+        lv_label_set_text(s_view.screensaver_time_label, time_text);
+    }
+}
+
+static void set_normal_view_hidden(bool hidden)
+{
+    if (s_view.status_bar != NULL) {
+        if (hidden) {
+            lv_obj_add_flag(s_view.status_bar, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(s_view.status_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_view.time_label != NULL) {
+        if (hidden) {
+            lv_obj_add_flag(s_view.time_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(s_view.time_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_view.date_label != NULL) {
+        if (hidden) {
+            lv_obj_add_flag(s_view.date_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(s_view.date_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_view.weather_row != NULL) {
+        if (hidden) {
+            lv_obj_add_flag(s_view.weather_row, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(s_view.weather_row, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_view.sprite_img != NULL) {
+        if (hidden) {
+            lv_obj_add_flag(s_view.sprite_img, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(s_view.sprite_img, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (hidden && s_view.bubble_box != NULL) {
+        lv_obj_add_flag(s_view.bubble_box, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void enter_screensaver(const home_snapshot_t *snapshot)
+{
+    if (s_display_mode == HOME_DISPLAY_SCREENSAVER) {
+        update_screensaver_time_label(snapshot);
+        return;
+    }
+
+    s_display_mode = HOME_DISPLAY_SCREENSAVER;
+    if (s_sprite.timer != NULL) {
+        lv_timer_pause(s_sprite.timer);
+    }
+    if (s_bubble_timer != NULL) {
+        lv_timer_delete(s_bubble_timer);
+        s_bubble_timer = NULL;
+    }
+    set_normal_view_hidden(true);
+    update_screensaver_time_label(snapshot);
+    if (s_view.screensaver_overlay != NULL) {
+        lv_obj_clear_flag(s_view.screensaver_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void exit_screensaver(void)
+{
+    if (s_display_mode != HOME_DISPLAY_SCREENSAVER) {
+        return;
+    }
+
+    s_display_mode = HOME_DISPLAY_NORMAL;
+    if (s_view.screensaver_overlay != NULL) {
+        lv_obj_add_flag(s_view.screensaver_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+    set_normal_view_hidden(false);
+    if (s_sprite.timer != NULL) {
+        lv_timer_resume(s_sprite.timer);
+    }
+}
+
+static void screensaver_touch_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_display_mode == HOME_DISPLAY_SCREENSAVER) {
+        reset_screensaver_idle_deadline();
+        exit_screensaver();
+        home_service_refresh_snapshot();
+        refresh_view();
+    }
+}
+
+static void create_screensaver_overlay(lv_obj_t *root)
+{
+    lv_obj_t *overlay = lv_obj_create(root);
+
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, BSP_LCD_H_RES, BSP_LCD_V_RES);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(HOME_BG_BASE_COLOR), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(overlay, LV_ALIGN_TOP_LEFT, -16, -16);
+    lv_obj_add_event_cb(overlay, screensaver_touch_cb, LV_EVENT_PRESSED, NULL);
+    s_view.screensaver_overlay = overlay;
+
+    s_view.screensaver_time_label = lv_label_create(overlay);
+    lv_obj_set_style_text_font(s_view.screensaver_time_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(s_view.screensaver_time_label,
+                                lv_color_hex(HOME_SCREENSAVER_TIME_COLOR), 0);
+    lv_obj_set_style_text_letter_space(s_view.screensaver_time_label, 3, 0);
+    lv_obj_center(s_view.screensaver_time_label);
+    lv_label_set_text_static(s_view.screensaver_time_label, "--:--");
 }
 
 static void display_city_name(char *dst, size_t dst_size, const char *src)
@@ -378,6 +526,12 @@ static void refresh_view(void)
     }
 
     home_service_get_snapshot(&snapshot);
+
+    if (s_display_mode == HOME_DISPLAY_SCREENSAVER) {
+        update_screensaver_time_label(&snapshot);
+        return;
+    }
+
     snprintf(date_line, sizeof(date_line), "%s  %s", snapshot.date_text, snapshot.weekday_text);
 
     lv_label_set_text(s_view.time_label, snapshot.time_text);
@@ -494,9 +648,11 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     s_view.root = root;
     lv_obj_remove_style_all(root);
     lv_obj_set_size(root, BSP_LCD_H_RES, BSP_LCD_V_RES);
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x0f1418), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(HOME_BG_BASE_COLOR), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(root, 16, 0);
+
+    create_screensaver_overlay(root);
 
     /* ---- left half: status / clock / date / weather ---- */
 
@@ -615,6 +771,8 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
     /* ---- approval overlay (must be last for z-order) ---- */
     create_approval_overlay(root);
 
+    s_display_mode = HOME_DISPLAY_NORMAL;
+    reset_screensaver_idle_deadline();
     refresh_view();
     return root;
 }
@@ -622,6 +780,12 @@ static lv_obj_t *app_home_create_root(lv_obj_t *parent)
 static void app_home_resume(void)
 {
     home_service_refresh_snapshot();
+    s_display_mode = HOME_DISPLAY_NORMAL;
+    reset_screensaver_idle_deadline();
+    if (s_view.screensaver_overlay != NULL) {
+        lv_obj_add_flag(s_view.screensaver_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+    set_normal_view_hidden(false);
     refresh_view();
     if (s_sprite.timer != NULL) {
         lv_timer_resume(s_sprite.timer);
@@ -643,6 +807,36 @@ static void app_home_suspend(void)
     }
 }
 
+static esp_err_t app_home_handle_control(app_control_type_t type, const void *payload)
+{
+    if (s_view.root == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    switch (type) {
+    case APP_CONTROL_HOME_SCREENSAVER: {
+        const app_control_home_screensaver_t *control = payload;
+        home_snapshot_t snapshot;
+
+        ESP_RETURN_ON_FALSE(control != NULL, ESP_ERR_INVALID_ARG, "app_home",
+                            "screensaver control is required");
+        home_service_refresh_snapshot();
+        home_service_get_snapshot(&snapshot);
+
+        if (control->enabled) {
+            enter_screensaver(&snapshot);
+        } else {
+            reset_screensaver_idle_deadline();
+            exit_screensaver();
+            refresh_view();
+        }
+        return ESP_OK;
+    }
+    default:
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+}
+
 static void app_home_handle_event(const app_event_t *event)
 {
     if (event == NULL) {
@@ -650,10 +844,20 @@ static void app_home_handle_event(const app_event_t *event)
     }
 
     switch (event->type) {
+    case APP_EVENT_TICK_1S:
+        home_service_refresh_snapshot();
+        if (s_display_mode != HOME_DISPLAY_SCREENSAVER &&
+            (home_now_us() - s_last_claude_activity_us) >= HOME_SCREENSAVER_IDLE_US) {
+            home_snapshot_t snap;
+            home_service_get_snapshot(&snap);
+            enter_screensaver(&snap);
+            break;
+        }
+        refresh_view();
+        break;
     case APP_EVENT_POWER_CHANGED:
     case APP_EVENT_NET_CHANGED:
     case APP_EVENT_DATA_WEATHER:
-    case APP_EVENT_TICK_1S:
         home_service_refresh_snapshot();
         refresh_view();
         break;
@@ -661,6 +865,8 @@ static void app_home_handle_event(const app_event_t *event)
         home_service_refresh_snapshot();
         home_snapshot_t snap;
         home_service_get_snapshot(&snap);
+        reset_screensaver_idle_deadline();
+        exit_screensaver();
 
         /* T3: auto-dismiss approval overlay on disconnect */
         if (s_was_connected && !snap.claude_connected) {
@@ -683,6 +889,8 @@ static void app_home_handle_event(const app_event_t *event)
         break;
     }
     case APP_EVENT_PERMISSION_REQUEST:
+        reset_screensaver_idle_deadline();
+        exit_screensaver();
         show_approval_overlay();
         break;
     default:
@@ -700,6 +908,7 @@ const app_descriptor_t *app_home_get_descriptor(void)
         .resume = app_home_resume,
         .suspend = app_home_suspend,
         .handle_event = app_home_handle_event,
+        .handle_control = app_home_handle_control,
     };
 
     return &descriptor;

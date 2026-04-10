@@ -31,6 +31,10 @@ use crate::{
         RpcRequest, Snapshot,
     },
     normalizer::{apply_notification_status, materially_equal, normalize},
+    text_sanitize::{
+        sanitize_approval_summary, sanitize_permission_mode, sanitize_tool_name,
+        sanitize_transport_id,
+    },
 };
 
 const RING_BUFFER_CAPACITY: usize = 64;
@@ -124,14 +128,14 @@ pub async fn run(config: Config) -> Result<()> {
             interval.tick().await;
             let guard = inactivity_state.state.lock().await;
             let elapsed = guard.last_event_ts.elapsed();
-            let is_active = !matches!(
-                guard.snapshot.status.as_str(),
-                "ended" | "unknown"
-            );
+            let is_active = !matches!(guard.snapshot.status.as_str(), "ended" | "unknown");
             drop(guard);
 
             if is_active && elapsed >= Duration::from_secs(INACTIVITY_TIMEOUT_SECS) {
-                info!("inactivity timeout ({}s), transitioning to sleep", elapsed.as_secs());
+                info!(
+                    "inactivity timeout ({}s), transitioning to sleep",
+                    elapsed.as_secs()
+                );
                 let sleep_event = LocalHookEvent {
                     session_id: String::new(),
                     cwd: String::new(),
@@ -364,15 +368,26 @@ async fn post_approval(
     State(state): State<AppState>,
     Json(body): Json<SubmitApprovalBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let tool_name = sanitize_tool_name(&body.tool_name).unwrap_or_else(|| "unknown".into());
+    let tool_input_summary = sanitize_approval_summary(&body.tool_input_summary);
+    let permission_mode = {
+        let mode = sanitize_permission_mode(&body.permission_mode);
+        if mode.is_empty() {
+            "default".into()
+        } else {
+            mode
+        }
+    };
+    let transport_id = sanitize_transport_id(&body.id);
     let request = ApprovalRequest {
-        tool_name: body.tool_name.clone(),
-        tool_input_summary: body.tool_input_summary.clone(),
-        permission_mode: body.permission_mode.clone(),
+        tool_name: tool_name.clone(),
+        tool_input_summary: tool_input_summary.clone(),
+        permission_mode,
     };
     let id = state.approvals.submit(body.id, request.clone()).await;
     info!(
         approval_id = id,
-        tool = body.tool_name,
+        tool = tool_name,
         "approval submitted, forwarding to device"
     );
 
@@ -384,7 +399,7 @@ async fn post_approval(
         let rpc = RpcRequest {
             method: "claude.approve".into(),
             params: serde_json::json!({
-                "id": approval_id,
+                "id": transport_id,
                 "tool_name": request.tool_name,
                 "description": request.tool_input_summary,
             }),
@@ -405,7 +420,9 @@ async fn post_approval(
                     info!(approval_id, ?decision, "device resolved approval");
                 } else {
                     warn!(approval_id, "device response missing decision field");
-                    approvals.resolve(&approval_id, ApprovalDecision::Deny).await;
+                    approvals
+                        .resolve(&approval_id, ApprovalDecision::Deny)
+                        .await;
                 }
             }
             Err(err) => {
@@ -415,7 +432,10 @@ async fn post_approval(
         }
     });
 
-    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": id })))
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "ok": true, "id": id })),
+    )
 }
 
 async fn get_approval(
@@ -423,14 +443,20 @@ async fn get_approval(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match state.approvals.status(&id).await {
-        Some(status) => (StatusCode::OK, Json(serde_json::json!({
-            "ok": true,
-            "approval": status,
-        }))),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "ok": false,
-            "error": "approval not found",
-        }))),
+        Some(status) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "approval": status,
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "approval not found",
+            })),
+        ),
     }
 }
 
@@ -446,7 +472,10 @@ fn load_state(path: &PathBuf) -> Option<PersistedState> {
     match serde_json::from_str(&contents) {
         Ok(state) => Some(state),
         Err(e) => {
-            warn!("corrupted state file {}, starting fresh: {e}", path.display());
+            warn!(
+                "corrupted state file {}, starting fresh: {e}",
+                path.display()
+            );
             None
         }
     }
@@ -462,8 +491,13 @@ fn persist_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
         .with_context(|| format!("failed to create temp state file {}", tmp_path.display()))?;
     file.write_all(json.as_bytes())?;
     file.sync_all()?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("failed to rename {} -> {}", tmp_path.display(), path.display()))?;
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to rename {} -> {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
     Ok(())
 }
 
