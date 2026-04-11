@@ -5,8 +5,8 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
+        app_settings
         app_home
-        app_notify
         app_satoshi_slot
         app_trading
         bsp_board
@@ -21,6 +21,7 @@ idf_component_register(
         service_claude
         service_home
         service_market
+        service_settings
         service_time
         service_weather
         lvgl__lvgl

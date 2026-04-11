@@ -1,12 +1,9 @@
 #include "device_link.h"
 
 #include <stdbool.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "app_manager.h"
 #include "bsp_board_config.h"
@@ -34,6 +31,8 @@
 #define DEVICE_LINK_PROTOCOL_VERSION 1
 #define DEVICE_LINK_LINE_MAX 768
 #define DEVICE_LINK_HELLO_INTERVAL_MS 1000
+#define DEVICE_LINK_WRITE_TIMEOUT_MS 20
+#define DEVICE_LINK_WRITE_CHUNK_BYTES 128
 #define APPROVAL_TIMEOUT_MS 300000
 #define UI_CONTROL_TIMEOUT_MS 2000
 
@@ -41,7 +40,6 @@ static const char *TAG = "device_link";
 static SemaphoreHandle_t s_stdout_lock;
 static char s_device_id[32];
 static bool s_started;
-static int s_usb_fd = -1;
 
 /* Approval state — shared between reader task and LVGL task */
 static SemaphoreHandle_t s_approval_sem;
@@ -50,15 +48,11 @@ static approval_decision_t s_approval_decision;
 static bool s_approval_uses_rpc;
 
 typedef struct {
-    bool set_wifi_ssid;
-    bool set_wifi_password;
     bool set_timezone_name;
     bool set_timezone_tz;
     bool set_weather_city;
     bool set_weather_latitude;
     bool set_weather_longitude;
-    char wifi_ssid[NET_MANAGER_SSID_MAX];
-    char wifi_password[NET_MANAGER_PASSWORD_MAX];
     char timezone_name[TIME_SERVICE_TIMEZONE_NAME_MAX];
     char timezone_tz[TIME_SERVICE_TIMEZONE_TZ_MAX];
     weather_location_config_t weather;
@@ -70,6 +64,9 @@ static const char *capabilities[] = {
     "config.export",
     "config.set_many",
     "wifi.scan",
+    "wifi.profiles.list",
+    "wifi.profile.add",
+    "wifi.profile.remove",
     "claude.update",
     "claude.approve",
     "claude.approval.request",
@@ -131,6 +128,7 @@ static void write_protocol_json(cJSON *root)
     char *line = NULL;
     size_t json_len = 0;
     size_t prefix_len = strlen(DEVICE_LINK_PROTOCOL_PREFIX);
+    size_t line_len = 0;
 
     if (root == NULL) {
         return;
@@ -144,28 +142,41 @@ static void write_protocol_json(cJSON *root)
     json_len = strlen(json);
     line = malloc(prefix_len + json_len + 2);
     if (line != NULL) {
+        size_t written = 0;
+
         memcpy(line, DEVICE_LINK_PROTOCOL_PREFIX, prefix_len);
         memcpy(line + prefix_len, json, json_len);
         line[prefix_len + json_len] = '\n';
         line[prefix_len + json_len + 1] = '\0';
+        line_len = prefix_len + json_len + 1;
         if (s_stdout_lock != NULL) {
             (void)xSemaphoreTake(s_stdout_lock, portMAX_DELAY);
         }
-        if (s_usb_fd >= 0) {
-            size_t remaining = prefix_len + json_len + 1;
-            const char *cursor = line;
-            while (remaining > 0) {
-                ssize_t rc = write(s_usb_fd, cursor, remaining);
-                if (rc > 0) {
-                    cursor += rc;
-                    remaining -= (size_t)rc;
-                    continue;
+
+        /* Direct CLI calls connect only long enough to issue one command.
+         * Periodic hello frames must not spin forever once the host closes the port. */
+        if (usb_serial_jtag_is_connected()) {
+            while (written < line_len) {
+                size_t chunk_len = line_len - written;
+                int rc;
+
+                if (chunk_len > DEVICE_LINK_WRITE_CHUNK_BYTES) {
+                    chunk_len = DEVICE_LINK_WRITE_CHUNK_BYTES;
                 }
-                if (rc < 0 && errno == EAGAIN) {
-                    vTaskDelay(pdMS_TO_TICKS(10));
-                    continue;
+
+                rc = usb_serial_jtag_write_bytes(line + written, chunk_len,
+                                                 pdMS_TO_TICKS(DEVICE_LINK_WRITE_TIMEOUT_MS));
+                if (rc <= 0) {
+                    ESP_LOGD(TAG, "protocol tx dropped after %u/%u bytes", (unsigned)written,
+                             (unsigned)line_len);
+                    break;
                 }
-                break;
+
+                written += (size_t)rc;
+            }
+
+            if (written == line_len) {
+                (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(DEVICE_LINK_WRITE_TIMEOUT_MS));
             }
         }
         if (s_stdout_lock != NULL) {
@@ -353,7 +364,6 @@ static esp_err_t write_namespace_strings(const char *namespace_name, const char 
 
 static cJSON *build_config_export(void)
 {
-    net_credentials_summary_t wifi = {0};
     weather_location_config_t weather = {0};
     cJSON *result = cJSON_CreateObject();
     cJSON *items = cJSON_CreateArray();
@@ -365,30 +375,7 @@ static cJSON *build_config_export(void)
         return NULL;
     }
 
-    net_manager_get_credentials_summary(&wifi);
     weather_service_get_location_config(&weather);
-
-    item = cJSON_CreateObject();
-    cJSON_AddStringToObject(item, "group", "wifi");
-    cJSON_AddStringToObject(item, "label", "Wi-Fi SSID");
-    cJSON_AddStringToObject(item, "key", "wifi.ssid");
-    cJSON_AddStringToObject(item, "value", wifi.ssid);
-    cJSON_AddStringToObject(item, "value_type", "string");
-    cJSON_AddBoolToObject(item, "mutable", true);
-    cJSON_AddBoolToObject(item, "secret", false);
-    cJSON_AddBoolToObject(item, "has_value", wifi.ssid[0] != '\0');
-    cJSON_AddItemToArray(items, item);
-
-    item = cJSON_CreateObject();
-    cJSON_AddStringToObject(item, "group", "wifi");
-    cJSON_AddStringToObject(item, "label", "Wi-Fi Password");
-    cJSON_AddStringToObject(item, "key", "wifi.password");
-    cJSON_AddNullToObject(item, "value");
-    cJSON_AddStringToObject(item, "value_type", "string");
-    cJSON_AddBoolToObject(item, "mutable", true);
-    cJSON_AddBoolToObject(item, "secret", true);
-    cJSON_AddBoolToObject(item, "has_value", wifi.has_password);
-    cJSON_AddItemToArray(items, item);
 
     item = cJSON_CreateObject();
     cJSON_AddStringToObject(item, "group", "time");
@@ -455,13 +442,9 @@ static cJSON *build_config_export(void)
 
 static esp_err_t apply_pending_config(const pending_config_t *pending, cJSON **result_out)
 {
-    net_credentials_summary_t current_wifi = {0};
     weather_location_config_t current_weather = {0};
-    char final_ssid[NET_MANAGER_SSID_MAX] = {0};
-    char final_password[NET_MANAGER_PASSWORD_MAX] = {0};
     char final_timezone_name[TIME_SERVICE_TIMEZONE_NAME_MAX] = {0};
     char final_timezone_tz[TIME_SERVICE_TIMEZONE_TZ_MAX] = {0};
-    bool wifi_changed = false;
     bool time_changed = false;
     bool weather_changed = false;
     cJSON *result = cJSON_CreateObject();
@@ -473,35 +456,10 @@ static esp_err_t apply_pending_config(const pending_config_t *pending, cJSON **r
         return ESP_ERR_NO_MEM;
     }
 
-    net_manager_get_credentials_summary(&current_wifi);
     weather_service_get_location_config(&current_weather);
-    snprintf(final_ssid, sizeof(final_ssid), "%s", current_wifi.ssid);
     snprintf(final_timezone_name, sizeof(final_timezone_name), "%s",
              time_service_get_timezone_name());
     snprintf(final_timezone_tz, sizeof(final_timezone_tz), "%s", time_service_get_timezone_tz());
-
-    if (pending->set_wifi_ssid) {
-        snprintf(final_ssid, sizeof(final_ssid), "%s", pending->wifi_ssid);
-        wifi_changed = true;
-    }
-    if (pending->set_wifi_password) {
-        snprintf(final_password, sizeof(final_password), "%s", pending->wifi_password);
-        wifi_changed = true;
-    }
-    if (pending->set_wifi_ssid && !pending->set_wifi_password &&
-        strcmp(final_ssid, current_wifi.ssid) == 0) {
-        wifi_changed = false;
-    }
-    if (wifi_changed && strcmp(final_ssid, current_wifi.ssid) != 0 && !pending->set_wifi_password) {
-        cJSON_Delete(result);
-        cJSON_Delete(updated);
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (wifi_changed && final_ssid[0] == '\0' && final_password[0] != '\0') {
-        cJSON_Delete(result);
-        cJSON_Delete(updated);
-        return ESP_ERR_INVALID_ARG;
-    }
 
     if (pending->set_timezone_name) {
         snprintf(final_timezone_name, sizeof(final_timezone_name), "%s", pending->timezone_name);
@@ -538,23 +496,6 @@ static esp_err_t apply_pending_config(const pending_config_t *pending, cJSON **r
         cJSON_Delete(result);
         cJSON_Delete(updated);
         return ESP_ERR_INVALID_ARG;
-    }
-
-    if (wifi_changed) {
-        const char *keys[] = {"ssid", "password"};
-        const char *values[] = {final_ssid, final_password};
-        bool writes[] = {pending->set_wifi_ssid, pending->set_wifi_password};
-        ESP_RETURN_ON_ERROR(write_namespace_strings("wifi", keys, values, writes, 2), TAG,
-                            "failed to persist wifi config");
-        ESP_RETURN_ON_ERROR(net_manager_apply_credentials(
-                                final_ssid, pending->set_wifi_password ? final_password : ""),
-                            TAG, "failed to apply wifi config");
-        if (pending->set_wifi_ssid) {
-            cJSON_AddItemToArray(updated, cJSON_CreateString("wifi.ssid"));
-        }
-        if (pending->set_wifi_password) {
-            cJSON_AddItemToArray(updated, cJSON_CreateString("wifi.password"));
-        }
     }
 
     if (time_changed) {
@@ -619,17 +560,6 @@ static esp_err_t parse_set_many_params(const cJSON *params, pending_config_t *pe
             return ESP_ERR_INVALID_ARG;
         }
 
-        if (strcmp(key->valuestring, "wifi.ssid") == 0 && cJSON_IsString(value)) {
-            pending->set_wifi_ssid = true;
-            snprintf(pending->wifi_ssid, sizeof(pending->wifi_ssid), "%s", value->valuestring);
-            continue;
-        }
-        if (strcmp(key->valuestring, "wifi.password") == 0 && cJSON_IsString(value)) {
-            pending->set_wifi_password = true;
-            snprintf(pending->wifi_password, sizeof(pending->wifi_password), "%s",
-                     value->valuestring);
-            continue;
-        }
         if (strcmp(key->valuestring, "time.timezone_name") == 0 && cJSON_IsString(value)) {
             pending->set_timezone_name = true;
             snprintf(pending->timezone_name, sizeof(pending->timezone_name), "%s",
@@ -666,6 +596,35 @@ static esp_err_t parse_set_many_params(const cJSON *params, pending_config_t *pe
     return ESP_OK;
 }
 
+static cJSON *build_wifi_profiles_result(void)
+{
+    net_profile_summary_t profiles[NET_PROFILE_MAX] = {0};
+    size_t profile_count = 0;
+    size_t i = 0;
+    cJSON *result = cJSON_CreateObject();
+    cJSON *array = cJSON_CreateArray();
+
+    if (result == NULL || array == NULL) {
+        cJSON_Delete(result);
+        cJSON_Delete(array);
+        return NULL;
+    }
+
+    net_manager_list_profiles(profiles, sizeof(profiles) / sizeof(profiles[0]), &profile_count);
+    for (i = 0; i < profile_count; ++i) {
+        cJSON *item = cJSON_CreateObject();
+
+        cJSON_AddStringToObject(item, "ssid", profiles[i].ssid);
+        cJSON_AddBoolToObject(item, "hidden", profiles[i].hidden);
+        cJSON_AddBoolToObject(item, "has_password", profiles[i].has_password);
+        cJSON_AddBoolToObject(item, "active", profiles[i].active);
+        cJSON_AddItemToArray(array, item);
+    }
+
+    cJSON_AddItemToObject(result, "profiles", array);
+    return result;
+}
+
 static cJSON *build_wifi_scan_result(void)
 {
     net_scan_ap_t aps[16] = {0};
@@ -691,7 +650,7 @@ static cJSON *build_wifi_scan_result(void)
         cJSON_AddStringToObject(item, "ssid", aps[i].ssid);
         cJSON_AddNumberToObject(item, "rssi", aps[i].rssi);
         cJSON_AddStringToObject(item, "auth_mode", wifi_auth_mode_to_string(aps[i].auth_mode));
-        cJSON_AddBoolToObject(item, "auth_required", aps[i].auth_mode != WIFI_AUTH_OPEN);
+        cJSON_AddBoolToObject(item, "auth_required", net_manager_scan_ap_auth_required(&aps[i]));
         cJSON_AddItemToArray(array, item);
     }
 
@@ -862,6 +821,65 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
+    if (strcmp(method->valuestring, "wifi.profiles.list") == 0) {
+        cJSON *result = build_wifi_profiles_result();
+        if (result == NULL) {
+            send_response_error(id->valuestring, "list_failed", "Wi-Fi profile list failed");
+            return;
+        }
+        send_response_ok(id->valuestring, result);
+        return;
+    }
+
+    if (strcmp(method->valuestring, "wifi.profile.add") == 0) {
+        const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(params, "ssid");
+        const cJSON *password = cJSON_GetObjectItemCaseSensitive(params, "password");
+        const cJSON *hidden = cJSON_GetObjectItemCaseSensitive(params, "hidden");
+        const char *password_value = NULL;
+        esp_err_t err;
+
+        if (!cJSON_IsString(ssid) || ssid->valuestring == NULL) {
+            send_response_error(id->valuestring, "invalid_request", "ssid is required");
+            return;
+        }
+        if (password != NULL && !cJSON_IsString(password) && !cJSON_IsNull(password)) {
+            send_response_error(id->valuestring, "invalid_request",
+                                "password must be a string when provided");
+            return;
+        }
+
+        if (cJSON_IsString(password)) {
+            password_value = password->valuestring;
+        }
+
+        err = net_manager_add_or_update_profile(ssid->valuestring, password_value,
+                                                cJSON_IsTrue(hidden));
+        if (err != ESP_OK) {
+            send_response_error(id->valuestring, "profile_add_failed", esp_err_to_name(err));
+            return;
+        }
+        send_response_ok(id->valuestring, cJSON_CreateObject());
+        return;
+    }
+
+    if (strcmp(method->valuestring, "wifi.profile.remove") == 0) {
+        const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(params, "ssid");
+        esp_err_t err;
+
+        if (!cJSON_IsString(ssid) || ssid->valuestring == NULL) {
+            send_response_error(id->valuestring, "invalid_request", "ssid is required");
+            return;
+        }
+
+        err = net_manager_remove_profile(ssid->valuestring);
+        if (err != ESP_OK) {
+            send_response_error(id->valuestring, "profile_remove_failed", esp_err_to_name(err));
+            return;
+        }
+        send_response_ok(id->valuestring, cJSON_CreateObject());
+        return;
+    }
+
     if (strcmp(method->valuestring, "claude.approve") == 0) {
         /* Already have a pending approval — reject new one */
         if (s_approval_req.pending) {
@@ -953,7 +971,7 @@ static void reader_task(void *arg)
 
     (void)arg;
 
-    ESP_LOGI(TAG, "reader_task started, usb_fd=%d", s_usb_fd);
+    ESP_LOGI(TAG, "reader_task started");
 
     for (;;) {
         /* Bypass VFS — read directly from driver ring buffer.
@@ -1019,8 +1037,6 @@ esp_err_t device_link_init(void)
     ESP_RETURN_ON_ERROR(usb_serial_jtag_vfs_register(), TAG,
                         "failed to register usb_serial_jtag vfs");
     usb_serial_jtag_vfs_use_driver();
-    s_usb_fd = open("/dev/usbserjtag", O_RDWR | O_NONBLOCK);
-    ESP_RETURN_ON_FALSE(s_usb_fd >= 0, ESP_FAIL, TAG, "failed to open /dev/usbserjtag");
     snprintf(s_device_id, sizeof(s_device_id), "esp32-dashboard-%02x%02x%02x", mac[3], mac[4],
              mac[5]);
 

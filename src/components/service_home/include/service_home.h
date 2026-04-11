@@ -30,7 +30,6 @@ typedef struct {
 } home_snapshot_t;
 
 esp_err_t home_service_init(void);
-void home_service_refresh_snapshot(void);
 void home_service_get_snapshot(home_snapshot_t *out);
 void home_service_request_weather_refresh(void);
 bool home_service_can_refresh_weather(void);

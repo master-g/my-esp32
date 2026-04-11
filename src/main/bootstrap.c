@@ -5,7 +5,7 @@
 
 #include "app_home.h"
 #include "app_manager.h"
-#include "app_notify.h"
+#include "app_settings.h"
 #include "app_satoshi_slot.h"
 #include "app_trading.h"
 #include "bsp_board.h"
@@ -24,6 +24,7 @@
 #include "service_claude.h"
 #include "service_home.h"
 #include "service_market.h"
+#include "service_settings.h"
 #include "service_time.h"
 #include "service_weather.h"
 #include "system_state.h"
@@ -57,9 +58,9 @@ static esp_err_t register_apps(void)
 {
     const app_descriptor_t *descriptors[] = {
         app_home_get_descriptor(),
-        app_notify_get_descriptor(),
         app_trading_get_descriptor(),
         app_satoshi_slot_get_descriptor(),
+        app_settings_get_descriptor(),
     };
     size_t i = 0;
 
@@ -94,6 +95,7 @@ esp_err_t bootstrap_start(void)
     ESP_RETURN_ON_ERROR(claude_service_init(), TAG, "claude service init failed");
     ESP_RETURN_ON_ERROR(market_service_init(), TAG, "market service init failed");
     ESP_RETURN_ON_ERROR(home_service_init(), TAG, "home service init failed");
+    ESP_RETURN_ON_ERROR(settings_service_init(), TAG, "settings service init failed");
     ESP_RETURN_ON_ERROR(net_manager_start(), TAG, "net manager start failed");
     ESP_RETURN_ON_ERROR(time_service_start(), TAG, "time service start failed");
     ESP_RETURN_ON_ERROR(device_link_init(), TAG, "device link init failed");

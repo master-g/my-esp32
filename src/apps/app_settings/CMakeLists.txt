@@ -1,12 +1,12 @@
 idf_component_register(
     SRCS
-        "src/app_notify.c"
+        "src/app_settings.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        bsp_board
         core_app_manager
+        esp_wifi
         lvgl__lvgl
-        service_claude
+        service_settings
         ui_fonts
 )

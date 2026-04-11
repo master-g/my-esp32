@@ -44,7 +44,6 @@ typedef enum {
 
 typedef enum {
     APP_ID_HOME = 0,
-    APP_ID_NOTIFY,
     APP_ID_TRADING,
     APP_ID_SATOSHI_SLOT,
 } app_id_t;
@@ -122,13 +121,11 @@ typedef struct {
 
 | 条件 | Claude | Market | Weather |
 |------|--------|--------|---------|
-| USB + Notify + ACTIVE | `REALTIME` | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` |
+| USB + Home + ACTIVE | `REALTIME` | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` |
 | USB + Trading + ACTIVE | `BACKGROUND_CACHE` | `REALTIME` | `BACKGROUND_CACHE` |
-| USB + Home + ACTIVE | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` |
 | USB + Satoshi Slot + ACTIVE | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` |
-| Battery + Notify + ACTIVE | `INTERACTIVE_POLL` | `PAUSED` | `BACKGROUND_CACHE` |
+| Battery + Home + ACTIVE | `INTERACTIVE_POLL` | `PAUSED` | `BACKGROUND_CACHE` |
 | Battery + Trading + ACTIVE | `BACKGROUND_CACHE` | `INTERACTIVE_POLL` | `BACKGROUND_CACHE` |
-| Battery + Home + ACTIVE | `BACKGROUND_CACHE` | `PAUSED` | `BACKGROUND_CACHE` |
 | 任何页面 + DIM | `BACKGROUND_CACHE` | `PAUSED` | `BACKGROUND_CACHE` |
 | 任何页面 + SLEEP | `PAUSED` | `PAUSED` | `PAUSED` |
 
@@ -248,7 +245,7 @@ bool power_policy_is_refresh_mode(refresh_mode_t expected, app_id_t app);
 ### 11.2 页面模式切换
 
 - 切到 `Trading` 前台时，`market_mode` 正确提升
-- 切到 `Notify` 前台时，`claude_mode` 正确提升
+- 切到 `Home` 前台时，`claude_mode` 正确提升
 
 ### 11.3 低功耗
 
@@ -268,5 +265,5 @@ bool power_policy_is_refresh_mode(refresh_mode_t expected, app_id_t app);
 
 ---
 
-*文档版本: 1.0*  
+*文档版本: 1.0*
 *创建日期: 2026-04-07*

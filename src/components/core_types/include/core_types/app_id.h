@@ -5,9 +5,9 @@
 
 typedef enum {
     APP_ID_HOME = 0,
-    APP_ID_NOTIFY,
     APP_ID_TRADING,
     APP_ID_SATOSHI_SLOT,
+    APP_ID_SETTINGS,
     APP_ID_COUNT,
     APP_ID_INVALID = 0xff,
 } app_id_t;

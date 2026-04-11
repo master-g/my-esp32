@@ -31,6 +31,7 @@ typedef struct {
 esp_err_t app_manager_init(void);
 esp_err_t app_manager_register(const app_descriptor_t *descriptor);
 esp_err_t app_manager_switch_to(app_id_t app_id);
+esp_err_t app_manager_post_switch_to(app_id_t app_id);
 esp_err_t app_manager_request_switch_to(app_id_t app_id, uint32_t timeout_ms);
 esp_err_t app_manager_request_home_screensaver(bool enabled, uint32_t timeout_ms);
 app_id_t app_manager_get_foreground_app(void);

@@ -9,6 +9,7 @@
 
 #define NET_MANAGER_SSID_MAX 33
 #define NET_MANAGER_PASSWORD_MAX 65
+#define NET_PROFILE_MAX 5
 
 typedef enum {
     NET_STATE_DOWN = 0,
@@ -30,7 +31,15 @@ typedef struct {
 typedef struct {
     char ssid[NET_MANAGER_SSID_MAX];
     bool has_password;
-} net_credentials_summary_t;
+    bool hidden;
+    bool active;
+} net_profile_summary_t;
+
+typedef struct {
+    bool configured;
+    char ssid[NET_MANAGER_SSID_MAX];
+    bool hidden;
+} net_active_profile_t;
 
 typedef struct {
     char ssid[NET_MANAGER_SSID_MAX];
@@ -43,10 +52,13 @@ esp_err_t net_manager_start(void);
 void net_manager_get_snapshot(net_snapshot_t *out);
 bool net_manager_is_connected(void);
 bool net_manager_has_credentials(void);
-void net_manager_get_credentials_summary(net_credentials_summary_t *summary);
-esp_err_t net_manager_apply_credentials(const char *ssid, const char *password);
+void net_manager_list_profiles(net_profile_summary_t *out, size_t max, size_t *out_count);
+void net_manager_get_active_profile(net_active_profile_t *out);
+esp_err_t net_manager_add_or_update_profile(const char *ssid, const char *password, bool hidden);
+esp_err_t net_manager_remove_profile(const char *ssid);
 esp_err_t net_manager_scan_access_points(net_scan_ap_t *results, size_t max_results,
                                          size_t *out_count);
+bool net_manager_scan_ap_auth_required(const net_scan_ap_t *result);
 void net_manager_set_connected_for_test(bool connected);
 
 #endif

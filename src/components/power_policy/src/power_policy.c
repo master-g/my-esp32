@@ -48,16 +48,14 @@ static power_policy_output_t compute_output(const power_policy_input_t *input)
         output.claude_mode = REFRESH_MODE_BACKGROUND_CACHE;
         output.market_mode = REFRESH_MODE_PAUSED;
     } else if (input->power_source == POWER_SOURCE_USB) {
-        output.claude_mode = (input->foreground_app == APP_ID_NOTIFY)
-                                 ? REFRESH_MODE_REALTIME
-                                 : REFRESH_MODE_BACKGROUND_CACHE;
+        output.claude_mode = (input->foreground_app == APP_ID_HOME) ? REFRESH_MODE_REALTIME
+                                                                    : REFRESH_MODE_BACKGROUND_CACHE;
         output.market_mode = (input->foreground_app == APP_ID_TRADING)
                                  ? REFRESH_MODE_REALTIME
                                  : REFRESH_MODE_BACKGROUND_CACHE;
     } else {
-        output.claude_mode = (input->foreground_app == APP_ID_NOTIFY)
-                                 ? REFRESH_MODE_INTERACTIVE_POLL
-                                 : REFRESH_MODE_BACKGROUND_CACHE;
+        output.claude_mode = (input->foreground_app == APP_ID_HOME) ? REFRESH_MODE_INTERACTIVE_POLL
+                                                                    : REFRESH_MODE_BACKGROUND_CACHE;
         output.market_mode = (input->foreground_app == APP_ID_TRADING)
                                  ? REFRESH_MODE_INTERACTIVE_POLL
                                  : REFRESH_MODE_PAUSED;
@@ -142,7 +140,7 @@ bool power_policy_is_refresh_mode(refresh_mode_t expected, app_id_t app_id)
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     switch (app_id) {
-    case APP_ID_NOTIFY:
+    case APP_ID_HOME:
         result = (s_output.claude_mode == expected);
         break;
     case APP_ID_TRADING:

@@ -21,14 +21,10 @@ struct ExportItem {
     key: String,
     #[serde(default)]
     value: Option<Value>,
-    #[serde(default)]
-    has_value: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
 struct DeviceConfigState {
-    wifi_ssid: String,
-    wifi_password_has_value: bool,
     timezone_name: Option<String>,
     timezone_tz: String,
     weather_city_label: String,
@@ -38,17 +34,8 @@ struct DeviceConfigState {
 
 #[derive(Debug, Default, Clone)]
 struct PendingChanges {
-    wifi_ssid: Option<String>,
-    wifi_password: PasswordChange,
     timezone: Option<TimeZoneChoice>,
     weather: Option<WeatherChoice>,
-}
-
-#[derive(Debug, Default, Clone)]
-enum PasswordChange {
-    #[default]
-    Unchanged,
-    Set(String),
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +68,35 @@ impl fmt::Display for WeatherChoice {
 #[derive(Debug, Clone, Deserialize)]
 struct WiFiScanResponse {
     aps: Vec<WiFiScanEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WiFiProfilesResponse {
+    profiles: Vec<WiFiProfileEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct WiFiProfileEntry {
+    ssid: String,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    has_password: bool,
+    #[serde(default)]
+    active: bool,
+}
+
+impl fmt::Display for WiFiProfileEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}",
+            self.ssid,
+            if self.hidden { " [hidden]" } else { "" },
+            if self.active { " [active]" } else { "" },
+            if self.has_password { "" } else { " [open]" }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,7 +138,7 @@ impl fmt::Display for ConfigMenuChoice {
             Self::Wifi(label) | Self::Time(label) | Self::Weather(label) | Self::Submit(label) => {
                 f.write_str(label)
             }
-            Self::Cancel => f.write_str("Cancel without submitting changes"),
+            Self::Cancel => f.write_str("Exit without submitting pending time/weather changes"),
         }
     }
 }
@@ -148,26 +164,24 @@ struct GeocodingResult {
 
 pub async fn run_config_editor(port: Option<String>) -> Result<()> {
     let current = load_current_config(port.as_deref()).await?;
+    let mut wifi_profiles = load_wifi_profiles(port.as_deref()).await?;
     let mut pending = PendingChanges::default();
 
     loop {
         let choice = prompt_select(
             "Select a configuration area to update",
-            build_menu_choices(&current, &pending),
+            build_menu_choices(&current, &wifi_profiles, &pending),
         )?;
 
         let Some(choice) = choice else {
-            println!("Canceled. No configuration changes were submitted.");
+            println!("Exited configuration editor.");
             return Ok(());
         };
 
         match choice {
             ConfigMenuChoice::Wifi(_) => {
-                if let Some((ssid, password)) =
-                    edit_wifi(&current, &pending, port.as_deref()).await?
-                {
-                    pending.wifi_ssid = Some(ssid);
-                    pending.wifi_password = password;
+                if edit_wifi_profiles(&wifi_profiles, port.as_deref()).await? {
+                    wifi_profiles = load_wifi_profiles(port.as_deref()).await?;
                 }
             }
             ConfigMenuChoice::Time(_) => {
@@ -182,7 +196,7 @@ pub async fn run_config_editor(port: Option<String>) -> Result<()> {
             }
             ConfigMenuChoice::Submit(_) => {
                 if !pending.has_changes() {
-                    println!("No pending changes. Nothing to submit.");
+                    println!("No pending timezone or weather changes.");
                     return Ok(());
                 }
 
@@ -190,7 +204,9 @@ pub async fn run_config_editor(port: Option<String>) -> Result<()> {
                 let Some(confirm) =
                     prompt_confirm("Submit these changes to the device now?", true)?
                 else {
-                    println!("Canceled. No configuration changes were submitted.");
+                    println!(
+                        "Exited configuration editor without submitting pending time/weather changes."
+                    );
                     return Ok(());
                 };
                 if !confirm {
@@ -211,7 +227,9 @@ pub async fn run_config_editor(port: Option<String>) -> Result<()> {
                 return Ok(());
             }
             ConfigMenuChoice::Cancel => {
-                println!("Canceled. No configuration changes were submitted.");
+                println!(
+                    "Exited configuration editor without submitting pending time/weather changes."
+                );
                 return Ok(());
             }
         }
@@ -230,12 +248,24 @@ async fn load_current_config(port: Option<&str>) -> Result<DeviceConfigState> {
     parse_config_state(&value)
 }
 
+async fn load_wifi_profiles(port: Option<&str>) -> Result<Vec<WiFiProfileEntry>> {
+    let value = run_request(
+        port,
+        RpcRequest {
+            method: "wifi.profiles.list".into(),
+            params: json!({}),
+        },
+    )
+    .await?;
+    let response: WiFiProfilesResponse = serde_json::from_value(value)
+        .context("device returned an unsupported wifi.profiles.list payload")?;
+    Ok(response.profiles)
+}
+
 fn parse_config_state(value: &Value) -> Result<DeviceConfigState> {
     let export: ExportResponse = serde_json::from_value(value.clone())
         .context("device returned an unsupported config.export shape")?;
     let mut state = DeviceConfigState {
-        wifi_ssid: String::new(),
-        wifi_password_has_value: false,
         timezone_name: None,
         timezone_tz: String::new(),
         weather_city_label: String::new(),
@@ -245,10 +275,6 @@ fn parse_config_state(value: &Value) -> Result<DeviceConfigState> {
 
     for item in export.items {
         match item.key.as_str() {
-            "wifi.ssid" => {
-                state.wifi_ssid = item.value.and_then(value_to_string).unwrap_or_default()
-            }
-            "wifi.password" => state.wifi_password_has_value = item.has_value.unwrap_or(false),
             "time.timezone_name" => state.timezone_name = item.value.and_then(value_to_string),
             "time.timezone_tz" => {
                 state.timezone_tz = item.value.and_then(value_to_string).unwrap_or_default()
@@ -275,26 +301,14 @@ fn parse_config_state(value: &Value) -> Result<DeviceConfigState> {
 
 fn build_menu_choices(
     current: &DeviceConfigState,
+    wifi_profiles: &[WiFiProfileEntry],
     pending: &PendingChanges,
 ) -> Vec<ConfigMenuChoice> {
-    let wifi_ssid = pending.wifi_ssid.as_deref().unwrap_or_else(|| {
-        if current.wifi_ssid.is_empty() {
-            "<not set>"
-        } else {
-            &current.wifi_ssid
-        }
-    });
-    let wifi_password = match &pending.wifi_password {
-        PasswordChange::Unchanged => {
-            if current.wifi_password_has_value {
-                "<stored>"
-            } else {
-                "<empty>"
-            }
-        }
-        PasswordChange::Set(value) if value.is_empty() => "<cleared>",
-        PasswordChange::Set(_) => "<updated>",
-    };
+    let active_profile = wifi_profiles
+        .iter()
+        .find(|profile| profile.active)
+        .map(|profile| profile.ssid.as_str())
+        .unwrap_or("<none>");
     let timezone_name = pending
         .timezone
         .as_ref()
@@ -315,7 +329,11 @@ fn build_menu_choices(
     let pending_count = pending.pending_count();
 
     vec![
-        ConfigMenuChoice::Wifi(format!("Wi-Fi: {} / password {}", wifi_ssid, wifi_password)),
+        ConfigMenuChoice::Wifi(format!(
+            "Wi-Fi Profiles: {} stored / active {}",
+            wifi_profiles.len(),
+            active_profile
+        )),
         ConfigMenuChoice::Time(format!(
             "Time zone: {} ({})",
             timezone_name, current.timezone_tz
@@ -329,66 +347,57 @@ fn build_menu_choices(
     ]
 }
 
-async fn edit_wifi(
-    current: &DeviceConfigState,
-    pending: &PendingChanges,
-    port: Option<&str>,
-) -> Result<Option<(String, PasswordChange)>> {
+async fn edit_wifi_profiles(profiles: &[WiFiProfileEntry], port: Option<&str>) -> Result<bool> {
     #[derive(Debug, Clone)]
     enum WiFiAction {
-        Scan,
-        Hidden,
-        Clear,
+        AddVisible,
+        AddHidden,
+        Remove,
         Back,
     }
 
     impl fmt::Display for WiFiAction {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
-                Self::Scan => f.write_str("Scan visible networks"),
-                Self::Hidden => f.write_str("Join hidden network"),
-                Self::Clear => f.write_str("Clear stored Wi-Fi credentials"),
+                Self::AddVisible => f.write_str("Add visible network"),
+                Self::AddHidden => f.write_str("Add hidden network"),
+                Self::Remove => f.write_str("Remove stored profile"),
                 Self::Back => f.write_str("Back"),
             }
         }
     }
 
+    println!("Stored Wi-Fi profiles:");
+    if profiles.is_empty() {
+        println!("  <none>");
+    } else {
+        for (index, profile) in profiles.iter().enumerate() {
+            println!("  {}. {}", index + 1, profile);
+        }
+    }
+
     let Some(action) = prompt_select(
-        "Choose how to update Wi-Fi",
+        "Choose how to manage Wi-Fi profiles",
         vec![
-            WiFiAction::Scan,
-            WiFiAction::Hidden,
-            WiFiAction::Clear,
+            WiFiAction::AddVisible,
+            WiFiAction::AddHidden,
+            WiFiAction::Remove,
             WiFiAction::Back,
         ],
     )?
     else {
-        return Ok(None);
+        return Ok(false);
     };
 
     match action {
-        WiFiAction::Scan => select_visible_network(current, pending, port).await,
-        WiFiAction::Hidden => join_hidden_network(),
-        WiFiAction::Clear => {
-            let Some(confirm) = prompt_confirm("Clear the stored Wi-Fi SSID and password?", false)?
-            else {
-                return Ok(None);
-            };
-            if confirm {
-                Ok(Some((String::new(), PasswordChange::Set(String::new()))))
-            } else {
-                Ok(None)
-            }
-        }
-        WiFiAction::Back => Ok(None),
+        WiFiAction::AddVisible => select_visible_network(profiles, port).await,
+        WiFiAction::AddHidden => join_hidden_network(profiles, port).await,
+        WiFiAction::Remove => remove_wifi_profile(profiles, port).await,
+        WiFiAction::Back => Ok(false),
     }
 }
 
-async fn select_visible_network(
-    current: &DeviceConfigState,
-    pending: &PendingChanges,
-    port: Option<&str>,
-) -> Result<Option<(String, PasswordChange)>> {
+async fn select_visible_network(profiles: &[WiFiProfileEntry], port: Option<&str>) -> Result<bool> {
     let value = run_request(
         port,
         RpcRequest {
@@ -402,7 +411,7 @@ async fn select_visible_network(
 
     if response.aps.is_empty() {
         println!("No visible Wi-Fi networks were found.");
-        return Ok(None);
+        return Ok(false);
     }
 
     let mut aps = response.aps;
@@ -415,14 +424,15 @@ async fn select_visible_network(
     aps.dedup_by(|left, right| left.ssid == right.ssid);
 
     let Some(ap) = prompt_select("Select a visible Wi-Fi network", aps)? else {
-        return Ok(None);
+        return Ok(false);
     };
 
     if !ap.auth_required {
-        return Ok(Some((ap.ssid, PasswordChange::Set(String::new()))));
+        send_wifi_profile_add(port, &ap.ssid, Some(""), false).await?;
+        return Ok(true);
     }
 
-    if effective_has_password(current, pending) && effective_ssid(current, pending) == ap.ssid {
+    if let Some(_existing) = find_profile(profiles, &ap.ssid) {
         #[derive(Debug, Clone)]
         enum PasswordAction {
             Keep,
@@ -449,45 +459,154 @@ async fn select_visible_network(
             ],
         )?
         else {
-            return Ok(None);
+            return Ok(false);
         };
 
         return match action {
             PasswordAction::Keep => {
-                println!("Keeping the stored password for `{}`.", ap.ssid);
-                Ok(None)
+                send_wifi_profile_add(port, &ap.ssid, None, false).await?;
+                Ok(true)
             }
-            PasswordAction::EnterNew => prompt_password_update(ap.ssid),
-            PasswordAction::Clear => Ok(Some((ap.ssid, PasswordChange::Set(String::new())))),
+            PasswordAction::EnterNew => prompt_password_update(&ap.ssid, false, port).await,
+            PasswordAction::Clear => {
+                send_wifi_profile_add(port, &ap.ssid, Some(""), false).await?;
+                Ok(true)
+            }
         };
     }
 
-    prompt_password_update(ap.ssid)
+    prompt_password_update(&ap.ssid, false, port).await
 }
 
-fn join_hidden_network() -> Result<Option<(String, PasswordChange)>> {
+async fn join_hidden_network(profiles: &[WiFiProfileEntry], port: Option<&str>) -> Result<bool> {
     let Some(ssid) = prompt_text("Enter the hidden SSID", None)? else {
-        return Ok(None);
+        return Ok(false);
     };
     let ssid = ssid.trim().to_string();
     if ssid.is_empty() {
         println!("Hidden SSID cannot be empty.");
-        return Ok(None);
+        return Ok(false);
     }
 
-    let Some(password) =
-        prompt_password("Enter the Wi-Fi password (leave empty for open network)")?
-    else {
-        return Ok(None);
-    };
-    Ok(Some((ssid, PasswordChange::Set(password))))
+    if let Some(existing) = find_profile(profiles, &ssid) {
+        #[derive(Debug, Clone)]
+        enum HiddenAction {
+            Keep,
+            EnterNew,
+            Clear,
+        }
+
+        impl fmt::Display for HiddenAction {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    Self::Keep => f.write_str("Keep stored password"),
+                    Self::EnterNew => f.write_str("Enter new password"),
+                    Self::Clear => f.write_str("Use empty password"),
+                }
+            }
+        }
+
+        if existing.has_password {
+            let Some(action) = prompt_select(
+                &format!("How should hidden profile `{}` use its password?", ssid),
+                vec![
+                    HiddenAction::Keep,
+                    HiddenAction::EnterNew,
+                    HiddenAction::Clear,
+                ],
+            )?
+            else {
+                return Ok(false);
+            };
+
+            return match action {
+                HiddenAction::Keep => {
+                    send_wifi_profile_add(port, &ssid, None, true).await?;
+                    Ok(true)
+                }
+                HiddenAction::EnterNew => prompt_password_update(&ssid, true, port).await,
+                HiddenAction::Clear => {
+                    send_wifi_profile_add(port, &ssid, Some(""), true).await?;
+                    Ok(true)
+                }
+            };
+        }
+    }
+
+    prompt_password_update(&ssid, true, port).await
 }
 
-fn prompt_password_update(ssid: String) -> Result<Option<(String, PasswordChange)>> {
+async fn prompt_password_update(ssid: &str, hidden: bool, port: Option<&str>) -> Result<bool> {
     let Some(password) = prompt_password(&format!("Enter the password for `{ssid}`"))? else {
-        return Ok(None);
+        return Ok(false);
     };
-    Ok(Some((ssid, PasswordChange::Set(password))))
+    send_wifi_profile_add(port, ssid, Some(&password), hidden).await?;
+    Ok(true)
+}
+
+async fn remove_wifi_profile(profiles: &[WiFiProfileEntry], port: Option<&str>) -> Result<bool> {
+    if profiles.is_empty() {
+        println!("No stored Wi-Fi profiles to remove.");
+        return Ok(false);
+    }
+
+    let Some(profile) =
+        prompt_select("Select a stored Wi-Fi profile to remove", profiles.to_vec())?
+    else {
+        return Ok(false);
+    };
+    let Some(confirm) = prompt_confirm(
+        &format!("Remove `{}` from stored Wi-Fi profiles?", profile.ssid),
+        false,
+    )?
+    else {
+        return Ok(false);
+    };
+    if !confirm {
+        return Ok(false);
+    }
+
+    run_request(
+        port,
+        RpcRequest {
+            method: "wifi.profile.remove".into(),
+            params: json!({
+                "ssid": profile.ssid,
+            }),
+        },
+    )
+    .await?;
+    Ok(true)
+}
+
+async fn send_wifi_profile_add(
+    port: Option<&str>,
+    ssid: &str,
+    password: Option<&str>,
+    hidden: bool,
+) -> Result<()> {
+    let mut params = json!({
+        "ssid": ssid,
+        "hidden": hidden,
+    });
+
+    if let Some(password) = password {
+        params["password"] = json!(password);
+    }
+
+    run_request(
+        port,
+        RpcRequest {
+            method: "wifi.profile.add".into(),
+            params,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn find_profile<'a>(profiles: &'a [WiFiProfileEntry], ssid: &str) -> Option<&'a WiFiProfileEntry> {
+    profiles.iter().find(|profile| profile.ssid == ssid)
 }
 
 fn edit_timezone(
@@ -573,37 +692,6 @@ async fn search_weather_locations(query: &str) -> Result<Vec<WeatherChoice>> {
 
 fn print_pending_summary(current: &DeviceConfigState, pending: &PendingChanges) {
     println!("Pending configuration changes:");
-
-    if let Some(ssid) = pending.wifi_ssid.as_deref() {
-        println!(
-            "  wifi.ssid: {} -> {}",
-            display_text(&current.wifi_ssid),
-            display_text(ssid)
-        );
-    }
-    match &pending.wifi_password {
-        PasswordChange::Unchanged => {}
-        PasswordChange::Set(value) if value.is_empty() => {
-            println!(
-                "  wifi.password: {} -> <cleared>",
-                if current.wifi_password_has_value {
-                    "<stored>"
-                } else {
-                    "<empty>"
-                }
-            );
-        }
-        PasswordChange::Set(_) => {
-            println!(
-                "  wifi.password: {} -> <updated>",
-                if current.wifi_password_has_value {
-                    "<stored>"
-                } else {
-                    "<empty>"
-                }
-            );
-        }
-    }
     if let Some(zone) = pending.timezone.as_ref() {
         println!(
             "  time.timezone_name: {} -> {}",
@@ -631,20 +719,6 @@ fn print_pending_summary(current: &DeviceConfigState, pending: &PendingChanges) 
             display_text(&current.weather_longitude),
             weather.longitude
         );
-    }
-}
-
-fn effective_ssid(current: &DeviceConfigState, pending: &PendingChanges) -> String {
-    pending
-        .wifi_ssid
-        .clone()
-        .unwrap_or_else(|| current.wifi_ssid.clone())
-}
-
-fn effective_has_password(current: &DeviceConfigState, pending: &PendingChanges) -> bool {
-    match &pending.wifi_password {
-        PasswordChange::Unchanged => current.wifi_password_has_value,
-        PasswordChange::Set(value) => !value.is_empty(),
     }
 }
 
@@ -750,12 +824,6 @@ impl PendingChanges {
 
     fn pending_count(&self) -> usize {
         let mut count = 0;
-        if self.wifi_ssid.is_some() {
-            count += 1;
-        }
-        if !matches!(self.wifi_password, PasswordChange::Unchanged) {
-            count += 1;
-        }
         if self.timezone.is_some() {
             count += 2;
         }
@@ -768,12 +836,6 @@ impl PendingChanges {
     fn to_set_many_payload(&self) -> Value {
         let mut items = Vec::new();
 
-        if let Some(ssid) = self.wifi_ssid.as_ref() {
-            items.push(json!({ "key": "wifi.ssid", "value": ssid }));
-        }
-        if let PasswordChange::Set(password) = &self.wifi_password {
-            items.push(json!({ "key": "wifi.password", "value": password }));
-        }
         if let Some(zone) = self.timezone.as_ref() {
             items.push(json!({ "key": "time.timezone_name", "value": zone.name }));
             items.push(json!({ "key": "time.timezone_tz", "value": zone.posix_tz }));
@@ -928,15 +990,13 @@ const TIMEZONES: &[TimeZoneChoice] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{find_timezones, parse_config_state};
+    use super::{WiFiProfilesResponse, find_timezones, parse_config_state};
     use serde_json::json;
 
     #[test]
     fn parse_config_state_reads_expected_keys() {
         let state = parse_config_state(&json!({
             "items": [
-                {"key": "wifi.ssid", "value": "MyWiFi"},
-                {"key": "wifi.password", "value": null, "has_value": true},
                 {"key": "time.timezone_name", "value": "Asia/Shanghai"},
                 {"key": "time.timezone_tz", "value": "CST-8"},
                 {"key": "weather.city_label", "value": "Shanghai"},
@@ -946,10 +1006,23 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(state.wifi_ssid, "MyWiFi");
-        assert!(state.wifi_password_has_value);
         assert_eq!(state.timezone_name.as_deref(), Some("Asia/Shanghai"));
         assert_eq!(state.weather_city_label, "Shanghai");
+    }
+
+    #[test]
+    fn parse_wifi_profiles_response_reads_active_profile() {
+        let response: WiFiProfilesResponse = serde_json::from_value(json!({
+            "profiles": [
+                {"ssid": "Home-5G", "hidden": false, "has_password": true, "active": true},
+                {"ssid": "Office", "hidden": true, "has_password": true, "active": false}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(response.profiles.len(), 2);
+        assert!(response.profiles[0].active);
+        assert!(response.profiles[1].hidden);
     }
 
     #[test]

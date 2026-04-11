@@ -1,6 +1,11 @@
 idf_component_register(
     SRCS
         "src/app_home.c"
+        "src/home_approval.c"
+        "src/home_presenter.c"
+        "src/home_runtime.c"
+        "src/home_screensaver.c"
+        "src/home_view.c"
         "src/screensaver_balatro.c"
         "src/screensaver_direct.c"
         "src/generated/app_home_status_font.c"

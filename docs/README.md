@@ -3,7 +3,6 @@
 `docs/` 现按内容和职责整理为以下结构。当前仍在推进的专项方案统一放在 `docs/plan/`，旧的 `docs/plans/` 目录不再继续使用。
 
 - [design/dashboard-design.md](./design/dashboard-design.md): 项目主设计文档，总览架构、阶段目标和页面模型
-- [design/apps/claude-app.md](./design/apps/claude-app.md): Claude bridge 与 Notify 页面子设计
 - [design/apps/home.md](./design/apps/home.md): Home 页面子设计
 - [design/apps/trading.md](./design/apps/trading.md): Trading 页面子设计
 - [design/apps/satoshi-slot.md](./design/apps/satoshi-slot.md): Satoshi Slot 页面子设计

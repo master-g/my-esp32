@@ -52,6 +52,7 @@ static app_slot_t *find_slot_mut(app_id_t app_id);
 static const app_slot_t *find_slot(app_id_t app_id);
 static void dispatch_to_app(const app_slot_t *slot, const app_event_t *event);
 static TickType_t timeout_to_ticks(uint32_t timeout_ms);
+static esp_err_t post_ui_control(const ui_control_request_t *request);
 static esp_err_t request_ui_control(const ui_control_request_t *request, uint32_t timeout_ms);
 static esp_err_t execute_ui_control(const ui_control_request_t *request);
 static uint16_t next_ui_control_request_id(void);
@@ -148,6 +149,27 @@ static uint16_t unpack_ui_control_request_id(uint32_t notification_value)
 static esp_err_t unpack_ui_control_result(uint32_t notification_value)
 {
     return (esp_err_t)(notification_value & 0xFFFFU);
+}
+
+static esp_err_t post_ui_control(const ui_control_request_t *request)
+{
+    ui_control_request_t queued_request;
+
+    ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "app manager not initialized");
+    ESP_RETURN_ON_FALSE(s_ui_control_queue != NULL, ESP_ERR_INVALID_STATE, TAG,
+                        "ui control queue missing");
+    ESP_RETURN_ON_FALSE(request != NULL, ESP_ERR_INVALID_ARG, TAG, "request is required");
+
+    queued_request = *request;
+    queued_request.waiter_task = NULL;
+    queued_request.request_id = 0;
+
+    if (xQueueSend(s_ui_control_queue, &queued_request, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "ui control queue full (type=%d)", (int)queued_request.type);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    return ESP_OK;
 }
 
 static esp_err_t request_ui_control(const ui_control_request_t *request, uint32_t timeout_ms)
@@ -314,6 +336,17 @@ esp_err_t app_manager_switch_to(app_id_t app_id)
     esp_err_t err = switch_to_locked(app_id);
     bsp_board_unlock();
     return err;
+}
+
+esp_err_t app_manager_post_switch_to(app_id_t app_id)
+{
+    ui_control_request_t request = {
+        .type = UI_CONTROL_SWITCH_TO,
+        .waiter_task = NULL,
+        .arg.app_id = app_id,
+    };
+
+    return post_ui_control(&request);
 }
 
 esp_err_t app_manager_request_switch_to(app_id_t app_id, uint32_t timeout_ms)

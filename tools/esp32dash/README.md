@@ -4,7 +4,7 @@
 
 `esp32dash config` now drives an interactive setup flow:
 
-- scan visible Wi-Fi SSIDs or enter a hidden SSID manually
+- manage multiple Wi-Fi profiles, including visible and hidden SSIDs
 - choose a friendly timezone name, which maps to the device's POSIX `TZ` string
 - search weather cities through Open-Meteo geocoding, then store `city_label + latitude + longitude`
 
@@ -105,7 +105,7 @@ Protocol frames share the same serial line as normal ESP-IDF logs. Only lines st
 Device hello:
 
 ```json
-@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved"]}
+@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved"]}
 ```
 
 Host request:
@@ -120,10 +120,22 @@ Device response:
 @esp32dash {"type":"response","id":"rpc-1","ok":true,"result":{"aps":[{"ssid":"my-network","rssi":-49,"auth_mode":"wpa2_psk","auth_required":true}]}}
 ```
 
+Host Wi-Fi profile list:
+
+```json
+@esp32dash {"type":"request","id":"rpc-2","method":"wifi.profiles.list","params":{}}
+```
+
+Host Wi-Fi profile add/update:
+
+```json
+@esp32dash {"type":"request","id":"rpc-3","method":"wifi.profile.add","params":{"ssid":"my-network","password":"secret","hidden":false}}
+```
+
 Host config commit:
 
 ```json
-@esp32dash {"type":"request","id":"rpc-2","method":"config.set_many","params":{"items":[{"key":"wifi.ssid","value":"my-network"},{"key":"wifi.password","value":"secret"},{"key":"time.timezone_name","value":"Asia/Shanghai"},{"key":"time.timezone_tz","value":"CST-8"},{"key":"weather.city_label","value":"Shanghai"},{"key":"weather.latitude","value":"31.2304"},{"key":"weather.longitude","value":"121.4737"}]}}
+@esp32dash {"type":"request","id":"rpc-4","method":"config.set_many","params":{"items":[{"key":"time.timezone_name","value":"Asia/Shanghai"},{"key":"time.timezone_tz","value":"CST-8"},{"key":"weather.city_label","value":"Shanghai"},{"key":"weather.latitude","value":"31.2304"},{"key":"weather.longitude","value":"121.4737"}]}}
 ```
 
 Host Claude update:

@@ -15,12 +15,11 @@
 
 ### 2.1 核心目标
 
-基于 Waveshare ESP32-S3-Touch-LCD-3.49 开发一个四页式横屏仪表板，其中包含三个核心页和一个 BTC 应用页：
+基于 Waveshare ESP32-S3-Touch-LCD-3.49 开发一个三页式横屏仪表板，其中包含两个核心页和一个 BTC 应用页：
 
-1. `Home`：时间、日期、联网状态、天气摘要
-2. `Notify`：Claude Code 最新状态和未读提示
-3. `Trading`：BTC/USDT、ETH/USDT、BTC/ETH 的价格与简化行情
-4. `Satoshi Slot`：随机生成 BTC 私钥并与目标地址指纹集合进行匹配的趣味页
+1. `Home`：时间、日期、联网状态、天气摘要，以及 Claude Code 状态与未读提示
+2. `Trading`：BTC/USDT、ETH/USDT、BTC/ETH 的价格与简化行情
+3. `Satoshi Slot`：随机生成 BTC 私钥并与目标地址指纹集合进行匹配的趣味页
 
 ### 2.2 非目标
 
@@ -79,7 +78,7 @@ P0 的目标是把板卡从开发板状态变成“可运行产品底座”：
 - 触摸输入可上报坐标和手势方向
 - Wi-Fi 连接和重连机制可用
 - NTP 同步后写入 RTC，重启后可从 RTC 恢复时间
-- LVGL 页面壳子可切换四个应用槽位
+- LVGL 页面壳子可切换三个应用槽位
 - 串口日志、异常恢复和基本监控可用
 
 ### 4.2 P1: 可演示 MVP
@@ -87,7 +86,7 @@ P0 的目标是把板卡从开发板状态变成“可运行产品底座”：
 P1 只交付“可用但简化”的用户路径：
 
 - `Home` 显示时间、日期、Wi-Fi 状态、天气占位或缓存值
-- `Notify` 显示 Claude 最新状态、来源工作区、时间戳
+- `Home` 同时显示 Claude 最新状态、未读提示和审批入口
 - `Trading` 显示当前交易对最新价、24h 涨跌幅
 - 全局翻页、亮灭屏、唤醒、基础功耗策略可用
 - Claude 桥接可获取最新状态快照
@@ -205,16 +204,15 @@ P1 不包含：
 
 | 条件 | Claude | Market | Weather |
 |------|--------|--------|---------|
-| USB + Notify 前台 | `REALTIME` | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` |
 | USB + Trading 前台 | `BACKGROUND_CACHE` | `REALTIME` | `BACKGROUND_CACHE` |
-| USB + Home 前台 | `BACKGROUND_CACHE` | `BACKGROUND_CACHE` | 30 分钟更新 |
-| 电池 + Notify 前台 | 快照拉取 + 增量订阅 | 暂停 | 缓存 |
+| USB + Home 前台 | `REALTIME` | `BACKGROUND_CACHE` | 30 分钟更新 |
 | 电池 + Trading 前台 | 快照或低频轮询 | `INTERACTIVE_POLL` | 缓存 |
+| 电池 + Home 前台 | 快照拉取 + 增量订阅 | 暂停 | 缓存 |
 | 电池 + 其他状态 | 快照缓存 | 暂停 | 缓存 |
 
 关键约束：
 
-- `Notify` 页不能依赖“前台时才开始采集”来保证状态完整性
+- Home 内的 Claude 区域不能依赖“前台时才开始采集”来保证状态完整性
 - `Trading` 页在电池模式下降级为低频刷新，不维持高频市场流
 - 天气始终属于缓存型数据，不进入高频更新路径
 
@@ -289,7 +287,7 @@ Claude app 的详细子设计见 [claude-app.md](./apps/claude-app.md)。
 
 这意味着：
 
-- 即使设备平时不在 `Notify` 页，也不会丢失“最后状态”
+- 即使设备平时不在 `Home` 页，也不会丢失“最后状态”
 - 未读提示和最近更新时间可以从快照恢复
 - 页面展示与数据采集完全解耦
 
@@ -354,10 +352,9 @@ P2 再做蜡烛图：
 
 ### 9.1 页面模型
 
-四页结构固定：
+三页结构固定：
 
 - `Home`
-- `Notify`
 - `Trading`
 - `Satoshi Slot`
 
@@ -387,28 +384,20 @@ P2 再做蜡烛图：
 - 日期和星期
 - Wi-Fi 状态
 - 天气摘要
-- Claude 未读点或状态角标
+- Claude 未读点、状态角标和审批弹层入口
 
 行为：
 
 - 点击天气区域可触发手动刷新
 - 不承载复杂手势
 
-### 9.4 Notify 页面
+### 9.4 Claude 状态入口
 
-显示内容：
+Claude 状态不再单列为独立页面，而是并入 `Home`：
 
-- 当前 Claude 状态图标
-- 标题
-- 工作区名
-- 详细短文本
-- 更新时间
-
-行为：
-
-- 页面进入时先拉取快照
-- 若收到新状态，短暂高亮但不强制切页
-- 保留“无数据 / 网络断开 / 桥接不可达”三种显式状态
+- Claude 未读点、运行状态和短文本提示直接显示在首页
+- 审批请求在 `Home` 上以全屏 overlay 呈现
+- 页面切换不再承担“进入 Claude 专页才开始看状态”的职责
 
 ### 9.5 Trading 页面
 
@@ -518,7 +507,6 @@ project/
 │   │   └── power_runtime/
 │   └── apps/
 │       ├── app_home/
-│       ├── app_notify/
 │       ├── app_trading/
 │       └── app_satoshi_slot/
 │
@@ -560,8 +548,8 @@ project/
 
 - 开机后 3 秒内进入首页
 - Wi-Fi 已配置时，30 秒内完成联网和校时
-- 四个应用槽位可稳定切换，无明显误触冲突
-- `Notify` 页可在断线重连后恢复最近一次 Claude 状态
+- 三个应用槽位可稳定切换，无明显误触冲突
+- `Home` 页可在断线重连后恢复最近一次 Claude 状态
 - `Trading` 页可显示至少一个交易对的当前价格和更新时间
 - 电池模式下设备能够进入 `DIM` 和 `SLEEP`
 
