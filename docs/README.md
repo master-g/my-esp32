@@ -1,6 +1,6 @@
 # 文档索引
 
-`docs/` 现按内容和职责整理为以下结构：
+`docs/` 现按内容和职责整理为以下结构。当前仍在推进的专项方案统一放在 `docs/plan/`，旧的 `docs/plans/` 目录不再继续使用。
 
 - [design/dashboard-design.md](./design/dashboard-design.md): 项目主设计文档，总览架构、阶段目标和页面模型
 - [design/apps/claude-app.md](./design/apps/claude-app.md): Claude bridge 与 Notify 页面子设计
@@ -15,6 +15,5 @@
 - [hardware/waveshare-board-baseline.md](./hardware/waveshare-board-baseline.md): Waveshare 板级基线与硬件冲突说明
 - [reports/2026-04-09-project-audit.md](./reports/2026-04-09-project-audit.md): 固件与 Host 工程审计报告（历史记录）
 - [guides/dev-setup-guide.md](./guides/dev-setup-guide.md): 开发环境配置指南
-- [plans/project-progress-plan.md](./plans/project-progress-plan.md): 项目进度评估与实施计划
-- [plans/weather-system-plan.md](./plans/weather-system-plan.md): 天气系统实施计划
-- [plans/unified-action-plan.md](./plans/unified-action-plan.md): 统一行动计划（当前主线路图，第一阶段已完成）
+- [plan/balatro-screensaver-cpu-plan.md](./plan/balatro-screensaver-cpu-plan.md): Home screensaver 当前优化方案与下一步路线
+- [plan/balatro-original.glsl](./plan/balatro-original.glsl): Balatro 原始 shader 参考

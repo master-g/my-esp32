@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "src/app_home.c"
         "src/screensaver_balatro.c"
+        "src/screensaver_direct.c"
         "src/generated/app_home_status_font.c"
         "src/generated/departure_mono_55.c"
         "src/generated/sprite_idle.c"

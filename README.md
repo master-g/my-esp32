@@ -66,6 +66,30 @@ The initial firmware scaffold follows the official Waveshare ESP-IDF examples fo
 
 The rationale and the source discrepancy notes are documented in [docs/hardware/waveshare-board-baseline.md](./docs/hardware/waveshare-board-baseline.md).
 
+## Firmware Commands
+
+The repository ships a small `Makefile` wrapper around `idf.py`.
+
+Common commands:
+
+```bash
+make build
+make ports
+make port
+make flash
+make monitor
+make flash-monitor
+```
+
+By default `PORT=auto`, which means `make flash` and `make monitor` will try to auto-detect the active serial device. If multiple candidates exist, pass the port explicitly:
+
+```bash
+make flash PORT=/dev/cu.usbmodem101
+make monitor PORT=/dev/cu.usbmodem101
+```
+
+The flash wrapper also does a small preflight check and will fail early if the selected serial device is already busy. If you intentionally want to skip that check, set `PORT_BUSY_OK=1`.
+
 ## Current State
 
 The firmware side currently provides:

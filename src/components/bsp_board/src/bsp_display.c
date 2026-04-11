@@ -30,10 +30,14 @@ static const char *TAG = "bsp_display";
 #define BSP_LVGL_TICK_MS 5
 #define BSP_LVGL_TASK_MAX_DELAY_MS 500
 #define BSP_LVGL_TASK_MIN_DELAY_MS 10
+#define BSP_LVGL_DIRECT_TASK_MIN_DELAY_MS 1
 #define BSP_LVGL_TASK_STACK_SIZE (8 * 1024)
 #define BSP_LVGL_TASK_PRIORITY 2
 #define BSP_LVGL_DMA_LINES 16
-#define BSP_LVGL_DMA_BUF_LEN (BSP_LCD_PANEL_H_RES * BSP_LVGL_DMA_LINES * 2)
+#define BSP_DIRECT_DMA_LINES 64
+#define BSP_DMA_BUF_LINES                                                                          \
+    ((BSP_DIRECT_DMA_LINES > BSP_LVGL_DMA_LINES) ? BSP_DIRECT_DMA_LINES : BSP_LVGL_DMA_LINES)
+#define BSP_LVGL_DMA_BUF_LEN (BSP_LCD_PANEL_H_RES * BSP_DMA_BUF_LINES * 2)
 #define BSP_LVGL_FRAME_BUF_SIZE (BSP_LCD_PANEL_H_RES * BSP_LCD_PANEL_V_RES * 2)
 
 static SemaphoreHandle_t s_lvgl_mutex;
@@ -48,6 +52,14 @@ static uint8_t *s_psram_buf_2;
 static uint8_t *s_rot_buf;
 static bool s_initialized;
 static bsp_display_ui_cb_t s_ui_callback;
+static bool s_direct_mode;
+static bsp_display_perf_snapshot_t s_perf_snapshot;
+static uint16_t s_perf_frames;
+static uint64_t s_perf_flush_total_us;
+static uint64_t s_perf_rotate_total_us;
+static uint64_t s_perf_wait_total_us;
+static uint64_t s_perf_push_total_us;
+static int64_t s_perf_window_start_us;
 
 static const axs15231b_lcd_init_cmd_t s_lcd_init_cmds[] = {
     {0x11, (uint8_t[]){0x00}, 0, 100},
@@ -76,51 +88,152 @@ static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
     return false;
 }
 
-static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *color_p)
+static uint16_t avg_us_to_ms_x10(uint64_t total_us, uint16_t frames)
 {
-    const lv_display_rotation_t rotation = lv_display_get_rotation(display);
-    const lv_color_format_t color_format = lv_display_get_color_format(display);
-    const int32_t src_w = lv_display_get_horizontal_resolution(display);
-    const int32_t src_h = lv_display_get_vertical_resolution(display);
-    const uint32_t src_stride = lv_draw_buf_width_to_stride(src_w, color_format);
-    const uint32_t dest_stride = lv_draw_buf_width_to_stride(BSP_LCD_PANEL_H_RES, color_format);
-    const size_t dma_chunk_rows = (BSP_LVGL_DMA_BUF_LEN / (BSP_LCD_PANEL_H_RES * sizeof(uint16_t)));
-    size_t remaining_rows = BSP_LCD_PANEL_V_RES;
-    size_t row_offset = 0;
-    uint16_t *map = NULL;
+    if (frames == 0) {
+        return 0;
+    }
 
-    (void)area;
-    lv_draw_sw_rgb565_swap(color_p, src_w * src_h);
+    return (uint16_t)((total_us * 10ULL + ((uint64_t)frames * 500ULL)) /
+                      ((uint64_t)frames * 1000ULL));
+}
 
-    if (rotation != LV_DISPLAY_ROTATION_0) {
-        lv_draw_sw_rotate(color_p, s_rot_buf, src_w, src_h, src_stride, dest_stride, rotation,
-                          color_format);
-        map = (uint16_t *)s_rot_buf;
-    } else {
-        map = (uint16_t *)color_p;
+static void note_flush_perf(int64_t flush_start_us, int64_t flush_end_us, uint32_t rotate_us,
+                            uint32_t wait_us, uint32_t push_us)
+{
+    if (s_perf_window_start_us == 0) {
+        s_perf_window_start_us = flush_start_us;
+    }
+
+    s_perf_frames++;
+    s_perf_flush_total_us += (uint64_t)(flush_end_us - flush_start_us);
+    s_perf_rotate_total_us += rotate_us;
+    s_perf_wait_total_us += wait_us;
+    s_perf_push_total_us += push_us;
+
+    if ((flush_end_us - s_perf_window_start_us) >= 500000) {
+        s_perf_snapshot.flush_ms_x10 = avg_us_to_ms_x10(s_perf_flush_total_us, s_perf_frames);
+        s_perf_snapshot.rotate_ms_x10 = avg_us_to_ms_x10(s_perf_rotate_total_us, s_perf_frames);
+        s_perf_snapshot.wait_ms_x10 = avg_us_to_ms_x10(s_perf_wait_total_us, s_perf_frames);
+        s_perf_snapshot.push_ms_x10 = avg_us_to_ms_x10(s_perf_push_total_us, s_perf_frames);
+
+        s_perf_frames = 0;
+        s_perf_flush_total_us = 0;
+        s_perf_rotate_total_us = 0;
+        s_perf_wait_total_us = 0;
+        s_perf_push_total_us = 0;
+        s_perf_window_start_us = flush_end_us;
+    }
+}
+
+static esp_err_t panel_push_rows_blocking(const uint16_t *map, uint16_t y_offset,
+                                          uint16_t total_rows, size_t dma_chunk_rows,
+                                          uint32_t *wait_us_out, uint32_t *push_us_out)
+{
+    uint32_t wait_us = 0;
+    uint32_t push_us = 0;
+    size_t remaining_rows = total_rows;
+    size_t row_offset = y_offset;
+
+    if (dma_chunk_rows == 0 || dma_chunk_rows > BSP_DMA_BUF_LINES) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (total_rows == 0) {
+        if (wait_us_out != NULL) {
+            *wait_us_out = 0;
+        }
+        if (push_us_out != NULL) {
+            *push_us_out = 0;
+        }
+        return ESP_OK;
     }
 
     xSemaphoreGive(s_flush_done_semaphore);
     while (remaining_rows > 0) {
         const size_t rows = (remaining_rows > dma_chunk_rows) ? dma_chunk_rows : remaining_rows;
         const size_t byte_count = (rows * BSP_LCD_PANEL_H_RES * sizeof(uint16_t));
+        int64_t wait_start_us = esp_timer_get_time();
 
         if (xSemaphoreTake(s_flush_done_semaphore, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            ESP_LOGE(TAG, "DMA flush timeout");
-            lv_display_flush_ready(display);
-            return;
+            return ESP_ERR_TIMEOUT;
         }
-        memcpy(s_dma_buf, map, byte_count);
-        esp_lcd_panel_draw_bitmap((esp_lcd_panel_handle_t)lv_display_get_user_data(display), 0,
-                                  row_offset, BSP_LCD_PANEL_H_RES, row_offset + rows, s_dma_buf);
+        wait_us += (uint32_t)(esp_timer_get_time() - wait_start_us);
+
+        {
+            int64_t push_start_us = esp_timer_get_time();
+            memcpy(s_dma_buf, map, byte_count);
+            esp_lcd_panel_draw_bitmap(s_panel, 0, row_offset, BSP_LCD_PANEL_H_RES,
+                                      row_offset + rows, s_dma_buf);
+            push_us += (uint32_t)(esp_timer_get_time() - push_start_us);
+        }
+
         row_offset += rows;
         remaining_rows -= rows;
         map += BSP_LCD_PANEL_H_RES * rows;
     }
 
-    if (xSemaphoreTake(s_flush_done_semaphore, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGE(TAG, "DMA final flush timeout");
+    {
+        int64_t wait_start_us = esp_timer_get_time();
+        if (xSemaphoreTake(s_flush_done_semaphore, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            return ESP_ERR_TIMEOUT;
+        }
+        wait_us += (uint32_t)(esp_timer_get_time() - wait_start_us);
     }
+
+    if (wait_us_out != NULL) {
+        *wait_us_out = wait_us;
+    }
+    if (push_us_out != NULL) {
+        *push_us_out = push_us;
+    }
+
+    return ESP_OK;
+}
+
+static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *color_p)
+{
+    int64_t flush_start_us = esp_timer_get_time();
+    const lv_display_rotation_t rotation = lv_display_get_rotation(display);
+    const lv_color_format_t color_format = lv_display_get_color_format(display);
+    const int32_t src_w = lv_display_get_horizontal_resolution(display);
+    const int32_t src_h = lv_display_get_vertical_resolution(display);
+    const uint32_t src_stride = lv_draw_buf_width_to_stride(src_w, color_format);
+    const uint32_t dest_stride = lv_draw_buf_width_to_stride(BSP_LCD_PANEL_H_RES, color_format);
+    uint32_t rotate_us = 0;
+    uint32_t wait_us = 0;
+    uint32_t push_us = 0;
+    uint16_t *map = NULL;
+
+    (void)area;
+    if (s_direct_mode) {
+        lv_display_flush_ready(display);
+        return;
+    }
+
+    lv_draw_sw_rgb565_swap(color_p, src_w * src_h);
+
+    if (rotation != LV_DISPLAY_ROTATION_0) {
+        int64_t rotate_start_us = esp_timer_get_time();
+        lv_draw_sw_rotate(color_p, s_rot_buf, src_w, src_h, src_stride, dest_stride, rotation,
+                          color_format);
+        rotate_us = (uint32_t)(esp_timer_get_time() - rotate_start_us);
+        map = (uint16_t *)s_rot_buf;
+    } else {
+        map = (uint16_t *)color_p;
+    }
+
+    {
+        esp_err_t err = panel_push_rows_blocking(map, 0, BSP_LCD_PANEL_V_RES, BSP_LVGL_DMA_LINES,
+                                                 &wait_us, &push_us);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "DMA flush timeout");
+            lv_display_flush_ready(display);
+            return;
+        }
+    }
+
+    note_flush_perf(flush_start_us, esp_timer_get_time(), rotate_us, wait_us, push_us);
     lv_display_flush_ready(display);
 }
 
@@ -152,6 +265,9 @@ static void lvgl_port_task(void *arg)
     (void)arg;
 
     for (;;) {
+        const uint32_t min_delay_ms =
+            s_direct_mode ? BSP_LVGL_DIRECT_TASK_MIN_DELAY_MS : BSP_LVGL_TASK_MIN_DELAY_MS;
+
         if (bsp_display_lock(100)) {
             if (s_ui_callback != NULL) {
                 s_ui_callback();
@@ -162,8 +278,8 @@ static void lvgl_port_task(void *arg)
 
         if (delay_ms > BSP_LVGL_TASK_MAX_DELAY_MS) {
             delay_ms = BSP_LVGL_TASK_MAX_DELAY_MS;
-        } else if (delay_ms < BSP_LVGL_TASK_MIN_DELAY_MS) {
-            delay_ms = BSP_LVGL_TASK_MIN_DELAY_MS;
+        } else if (delay_ms < min_delay_ms) {
+            delay_ms = min_delay_ms;
         }
 
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
@@ -279,9 +395,9 @@ static esp_err_t init_lvgl(void)
                         "tick timer start failed");
 
     {
-        BaseType_t ret = xTaskCreatePinnedToCore(lvgl_port_task, "bsp_lvgl",
-                                                  BSP_LVGL_TASK_STACK_SIZE, NULL,
-                                                  BSP_LVGL_TASK_PRIORITY, NULL, 0);
+        BaseType_t ret =
+            xTaskCreatePinnedToCore(lvgl_port_task, "bsp_lvgl", BSP_LVGL_TASK_STACK_SIZE, NULL,
+                                    BSP_LVGL_TASK_PRIORITY, NULL, 0);
         ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "lvgl task create failed");
     }
 
@@ -327,3 +443,46 @@ lv_obj_t *bsp_display_get_app_root(void) { return s_app_root; }
 void bsp_display_set_backlight_percent(uint8_t percent) { bsp_backlight_set_percent(percent); }
 
 void bsp_display_set_ui_callback(bsp_display_ui_cb_t cb) { s_ui_callback = cb; }
+
+void bsp_display_get_perf_snapshot(bsp_display_perf_snapshot_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    *out = s_perf_snapshot;
+}
+
+bool bsp_display_begin_direct_mode(void)
+{
+    if (!s_initialized || s_panel == NULL || s_flush_done_semaphore == NULL) {
+        return false;
+    }
+
+    s_direct_mode = true;
+    return true;
+}
+
+void bsp_display_end_direct_mode(void) { s_direct_mode = false; }
+
+esp_err_t bsp_display_push_native_rgb565(const uint16_t *pixels, uint16_t rows, uint16_t y_offset,
+                                         bsp_display_push_stats_t *stats)
+{
+    esp_err_t err;
+
+    if (!s_direct_mode) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (pixels == NULL || rows == 0 || ((uint32_t)y_offset + rows) > BSP_LCD_PANEL_V_RES) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    err = panel_push_rows_blocking(pixels, y_offset, rows, BSP_DIRECT_DMA_LINES,
+                                   (stats != NULL) ? &stats->wait_us : NULL,
+                                   (stats != NULL) ? &stats->push_us : NULL);
+    if (err != ESP_OK && stats != NULL) {
+        stats->wait_us = 0;
+        stats->push_us = 0;
+    }
+    return err;
+}

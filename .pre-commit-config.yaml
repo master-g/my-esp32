@@ -1,3 +1,13 @@
+exclude: |
+  (?x)^(
+    build/|
+    build-esp32s3/|
+    managed_components/|
+    third_party/|
+    src/apps/.*/src/generated/|
+    tools/lv_font_pipeline/.*_tmp\.c$
+  )
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

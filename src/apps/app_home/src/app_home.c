@@ -5,6 +5,7 @@
 
 #include "bsp_board.h"
 #include "bsp_board_config.h"
+#include "bsp_display.h"
 #include "device_link.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -13,8 +14,12 @@
 #include "generated/departure_mono_55.h"
 #include "generated/sprite_frames.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "screensaver_balatro.h"
+#include "screensaver_direct.h"
 #include "service_claude.h"
 #include "service_home.h"
 #include "service_time.h"
@@ -58,11 +63,14 @@
 #define HOME_SCREENSAVER_FX_H 43
 #define HOME_SCREENSAVER_FX_SCALE 1024U
 #define HOME_SCREENSAVER_FX_PERIOD_MS 33
-#define HOME_SCREENSAVER_FX_PHASE_STEP 2
+#define HOME_SCREENSAVER_DIRECT_PERIOD_MS 1
 #define HOME_SCREENSAVER_DEBUG_X 20
 #define HOME_SCREENSAVER_DEBUG_Y 20
 #define HOME_SCREENSAVER_DEBUG_COLOR 0xa7b6c2
 #define HOME_TIME_REFRESH_MS 200
+#define HOME_SCREENSAVER_TASK_STACK_SIZE (6 * 1024)
+#define HOME_SCREENSAVER_TASK_PRIORITY 2
+#define HOME_SCREENSAVER_TASK_CORE 1
 
 #define HOME_LEFT_HALF_W 280
 #define HOME_SPRITE_SCALE 512 /* 256 = 1x, 512 = 2x */
@@ -137,13 +145,25 @@ typedef struct {
     lv_obj_t *image;
     lv_timer_t *timer;
     uint8_t *buf;
-    uint16_t phase_deg;
+    bool direct_active;
+    uint32_t time_ms;
     uint8_t frame_count;
     uint16_t fps_x10;
+    uint16_t interval_ms_x10;
     uint16_t render_ms_x10;
     uint16_t perf_frames;
+    uint16_t perf_interval_samples;
     uint32_t perf_render_total_us;
+    uint64_t perf_interval_total_us;
     int64_t perf_window_start_us;
+    int64_t prev_frame_start_us;
+    int64_t time_origin_us;
+    int64_t last_time_refresh_us;
+    bool direct_push_warned;
+    volatile bool direct_stop_requested;
+    TaskHandle_t direct_task;
+    SemaphoreHandle_t direct_task_done;
+    char time_text[6];
 } screensaver_fx_t;
 
 typedef enum {
@@ -167,6 +187,41 @@ static void refresh_view(void);
 static int64_t home_now_us(void);
 static void update_screensaver_time_label(const home_snapshot_t *snapshot);
 static void update_screensaver_perf_label(void);
+static void screensaver_tick(void);
+
+static bool start_direct_screensaver_task(void);
+static void stop_direct_screensaver_task(void);
+
+static uint16_t home_avg_us_to_ms_x10(uint64_t total_us, uint32_t samples)
+{
+    if (samples == 0) {
+        return 0;
+    }
+
+    return (uint16_t)((total_us * 10ULL + ((uint64_t)samples * 500ULL)) /
+                      ((uint64_t)samples * 1000ULL));
+}
+
+static void set_screensaver_overlay_children_hidden(bool hidden)
+{
+    lv_obj_t *objs[] = {
+        s_screensaver_fx.image,
+        s_view.screensaver_time_label,
+        s_view.screensaver_fps_label,
+    };
+
+    for (size_t i = 0; i < sizeof(objs) / sizeof(objs[0]); i++) {
+        if (objs[i] == NULL) {
+            continue;
+        }
+
+        if (hidden) {
+            lv_obj_add_flag(objs[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(objs[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
 
 static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
 {
@@ -219,20 +274,35 @@ static void reset_screensaver_idle_deadline(void) { s_last_claude_activity_us = 
 
 static void update_screensaver_perf_label(void)
 {
-    char text[32];
+    char text[112];
+    bsp_display_perf_snapshot_t display_perf = {0};
+
+    if (s_screensaver_fx.direct_active) {
+        return;
+    }
 
     if (s_view.screensaver_fps_label == NULL) {
         return;
     }
 
+    bsp_display_get_perf_snapshot(&display_perf);
+
     if (s_screensaver_fx.fps_x10 == 0) {
-        lv_label_set_text_static(s_view.screensaver_fps_label, "--.- fps\n-. -ms cpu");
+        lv_label_set_text_static(
+            s_view.screensaver_fps_label,
+            "--.- fps\n-. - int\n-. - cpu\n-. - fl\n-. - rot\n-. - wait\n-. - push");
         return;
     }
 
-    snprintf(text, sizeof(text), "%u.%u fps\n%u.%ums cpu", s_screensaver_fx.fps_x10 / 10,
-             s_screensaver_fx.fps_x10 % 10, s_screensaver_fx.render_ms_x10 / 10,
-             s_screensaver_fx.render_ms_x10 % 10);
+    snprintf(text, sizeof(text),
+             "%u.%u fps\n%u.%u int\n%u.%u cpu\n%u.%u fl\n%u.%u rot\n%u.%u wait\n%u.%u push",
+             s_screensaver_fx.fps_x10 / 10, s_screensaver_fx.fps_x10 % 10,
+             s_screensaver_fx.interval_ms_x10 / 10, s_screensaver_fx.interval_ms_x10 % 10,
+             s_screensaver_fx.render_ms_x10 / 10, s_screensaver_fx.render_ms_x10 % 10,
+             display_perf.flush_ms_x10 / 10, display_perf.flush_ms_x10 % 10,
+             display_perf.rotate_ms_x10 / 10, display_perf.rotate_ms_x10 % 10,
+             display_perf.wait_ms_x10 / 10, display_perf.wait_ms_x10 % 10,
+             display_perf.push_ms_x10 / 10, display_perf.push_ms_x10 % 10);
     lv_label_set_text(s_view.screensaver_fps_label, text);
 }
 
@@ -241,6 +311,23 @@ static void render_screensaver_background(void)
     lv_draw_buf_t *draw_buf;
     lv_color32_t *pixels;
     uint32_t stride_px;
+
+    if (s_screensaver_fx.direct_active) {
+        screensaver_direct_metrics_t metrics = {
+            .fps_x10 = s_screensaver_fx.fps_x10,
+            .interval_ms_x10 = s_screensaver_fx.interval_ms_x10,
+            .frame_ms_x10 = s_screensaver_fx.render_ms_x10,
+        };
+        esp_err_t err = screensaver_direct_render_and_push(s_screensaver_fx.time_ms,
+                                                           s_screensaver_fx.time_text, &metrics);
+        if (err != ESP_OK && !s_screensaver_fx.direct_push_warned) {
+            ESP_LOGW(TAG, "screensaver direct push failed: %s", esp_err_to_name(err));
+            s_screensaver_fx.direct_push_warned = true;
+        } else if (err == ESP_OK) {
+            s_screensaver_fx.direct_push_warned = false;
+        }
+        return;
+    }
 
     if (s_screensaver_fx.canvas == NULL || s_screensaver_fx.buf == NULL) {
         return;
@@ -254,28 +341,36 @@ static void render_screensaver_background(void)
     pixels = (lv_color32_t *)draw_buf->data;
     stride_px = draw_buf->header.stride / sizeof(lv_color32_t);
 
-    balatro_render(pixels, stride_px, s_screensaver_fx.phase_deg);
+    balatro_render(pixels, stride_px, s_screensaver_fx.time_ms);
 
     if (s_screensaver_fx.image != NULL) {
         lv_obj_invalidate(s_screensaver_fx.image);
     }
 }
 
-static void screensaver_fx_timer_cb(lv_timer_t *t)
+static void screensaver_tick(void)
 {
     int64_t frame_start_us;
     int64_t frame_end_us;
+    uint32_t interval_us = 0;
     uint32_t render_us;
     int64_t window_elapsed_us;
 
-    (void)t;
     if (s_display_mode != HOME_DISPLAY_SCREENSAVER) {
         return;
     }
 
     frame_start_us = home_now_us();
-    s_screensaver_fx.phase_deg =
-        (uint16_t)((s_screensaver_fx.phase_deg + HOME_SCREENSAVER_FX_PHASE_STEP) % 360U);
+    if (s_screensaver_fx.prev_frame_start_us != 0 &&
+        frame_start_us > s_screensaver_fx.prev_frame_start_us) {
+        interval_us = (uint32_t)(frame_start_us - s_screensaver_fx.prev_frame_start_us);
+    }
+    s_screensaver_fx.prev_frame_start_us = frame_start_us;
+    if (s_screensaver_fx.time_origin_us == 0) {
+        s_screensaver_fx.time_origin_us = frame_start_us;
+    }
+    s_screensaver_fx.time_ms =
+        (uint32_t)((frame_start_us - s_screensaver_fx.time_origin_us) / 1000LL);
     render_screensaver_background();
     frame_end_us = home_now_us();
     render_us = (uint32_t)(frame_end_us - frame_start_us);
@@ -286,30 +381,142 @@ static void screensaver_fx_timer_cb(lv_timer_t *t)
 
     s_screensaver_fx.perf_frames++;
     s_screensaver_fx.perf_render_total_us += render_us;
+    if (interval_us != 0) {
+        s_screensaver_fx.perf_interval_total_us += interval_us;
+        s_screensaver_fx.perf_interval_samples++;
+    }
 
     window_elapsed_us = frame_end_us - s_screensaver_fx.perf_window_start_us;
     if (window_elapsed_us >= 500000) {
+        screensaver_direct_perf_snapshot_t direct_perf = {0};
+
         s_screensaver_fx.fps_x10 =
             (uint16_t)((s_screensaver_fx.perf_frames * 10000000LL + window_elapsed_us / 2) /
                        window_elapsed_us);
-        s_screensaver_fx.render_ms_x10 =
-            (uint16_t)((s_screensaver_fx.perf_render_total_us * 10ULL +
-                        (s_screensaver_fx.perf_frames * 500ULL)) /
-                       ((uint64_t)s_screensaver_fx.perf_frames * 1000ULL));
+        s_screensaver_fx.interval_ms_x10 = home_avg_us_to_ms_x10(
+            s_screensaver_fx.perf_interval_total_us, s_screensaver_fx.perf_interval_samples);
+        s_screensaver_fx.render_ms_x10 = home_avg_us_to_ms_x10(
+            s_screensaver_fx.perf_render_total_us, s_screensaver_fx.perf_frames);
         update_screensaver_perf_label();
+        if (s_screensaver_fx.direct_active) {
+            screensaver_direct_get_perf_snapshot(&direct_perf);
+            ESP_LOGI(TAG,
+                     "screensaver_perf fps=%u.%u int=%u.%u frm=%u.%u cmp=%u.%u txt=%u.%u "
+                     "wait=%u.%u push=%u.%u",
+                     s_screensaver_fx.fps_x10 / 10, s_screensaver_fx.fps_x10 % 10,
+                     s_screensaver_fx.interval_ms_x10 / 10, s_screensaver_fx.interval_ms_x10 % 10,
+                     s_screensaver_fx.render_ms_x10 / 10, s_screensaver_fx.render_ms_x10 % 10,
+                     direct_perf.compose_ms_x10 / 10, direct_perf.compose_ms_x10 % 10,
+                     direct_perf.text_ms_x10 / 10, direct_perf.text_ms_x10 % 10,
+                     direct_perf.wait_ms_x10 / 10, direct_perf.wait_ms_x10 % 10,
+                     direct_perf.push_ms_x10 / 10, direct_perf.push_ms_x10 % 10);
+        }
         s_screensaver_fx.perf_frames = 0;
+        s_screensaver_fx.perf_interval_samples = 0;
         s_screensaver_fx.perf_render_total_us = 0;
+        s_screensaver_fx.perf_interval_total_us = 0;
         s_screensaver_fx.perf_window_start_us = frame_end_us;
     }
 
-    /* Refresh screensaver time label roughly once per second (~30 frames at 33ms) */
-    if (++s_screensaver_fx.frame_count >= 30) {
-        s_screensaver_fx.frame_count = 0;
+    if (s_screensaver_fx.last_time_refresh_us == 0 ||
+        (frame_end_us - s_screensaver_fx.last_time_refresh_us) >= 1000000) {
+        s_screensaver_fx.last_time_refresh_us = frame_end_us;
         time_service_refresh_now();
         home_service_refresh_snapshot();
         home_snapshot_t snap;
         home_service_get_snapshot(&snap);
         update_screensaver_time_label(&snap);
+    }
+}
+
+static void screensaver_fx_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (s_screensaver_fx.direct_active) {
+        return;
+    }
+
+    screensaver_tick();
+}
+
+static void screensaver_direct_task(void *arg)
+{
+    TickType_t last_wake = xTaskGetTickCount();
+
+    (void)arg;
+    for (;;) {
+        if (s_screensaver_fx.direct_stop_requested) {
+            break;
+        }
+
+        screensaver_tick();
+        if (s_screensaver_fx.direct_stop_requested) {
+            break;
+        }
+
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(HOME_SCREENSAVER_DIRECT_PERIOD_MS));
+    }
+
+    s_screensaver_fx.direct_task = NULL;
+    if (s_screensaver_fx.direct_task_done != NULL) {
+        xSemaphoreGive(s_screensaver_fx.direct_task_done);
+    }
+
+    vTaskDelete(NULL);
+}
+
+static bool start_direct_screensaver_task(void)
+{
+    BaseType_t ret;
+
+    if (!s_screensaver_fx.direct_active) {
+        return false;
+    }
+    if (s_screensaver_fx.direct_task != NULL) {
+        return true;
+    }
+
+    if (s_screensaver_fx.direct_task_done == NULL) {
+        s_screensaver_fx.direct_task_done = xSemaphoreCreateBinary();
+        if (s_screensaver_fx.direct_task_done == NULL) {
+            ESP_LOGW(TAG, "screensaver direct task semaphore alloc failed");
+            return false;
+        }
+    }
+
+    while (xSemaphoreTake(s_screensaver_fx.direct_task_done, 0) == pdTRUE) {
+    }
+
+    s_screensaver_fx.direct_stop_requested = false;
+    ret = xTaskCreatePinnedToCore(
+        screensaver_direct_task, "home_ss_direct", HOME_SCREENSAVER_TASK_STACK_SIZE, NULL,
+        HOME_SCREENSAVER_TASK_PRIORITY, &s_screensaver_fx.direct_task, HOME_SCREENSAVER_TASK_CORE);
+    if (ret != pdPASS) {
+        s_screensaver_fx.direct_task = NULL;
+        ESP_LOGW(TAG, "screensaver direct task create failed; using LVGL timer");
+        return false;
+    }
+
+    return true;
+}
+
+static void stop_direct_screensaver_task(void)
+{
+    if (s_screensaver_fx.direct_task == NULL) {
+        return;
+    }
+
+    s_screensaver_fx.direct_stop_requested = true;
+    if (s_screensaver_fx.direct_task_done == NULL) {
+        return;
+    }
+
+    if (xSemaphoreTake(s_screensaver_fx.direct_task_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "screensaver direct task stop timeout");
+        return;
+    }
+
+    while (xSemaphoreTake(s_screensaver_fx.direct_task_done, 0) == pdTRUE) {
     }
 }
 
@@ -321,19 +528,61 @@ static void start_screensaver_fx(void)
 
     s_screensaver_fx.frame_count = 0;
     s_screensaver_fx.fps_x10 = 0;
+    s_screensaver_fx.interval_ms_x10 = 0;
     s_screensaver_fx.render_ms_x10 = 0;
     s_screensaver_fx.perf_frames = 0;
+    s_screensaver_fx.perf_interval_samples = 0;
     s_screensaver_fx.perf_render_total_us = 0;
+    s_screensaver_fx.perf_interval_total_us = 0;
     s_screensaver_fx.perf_window_start_us = 0;
+    s_screensaver_fx.prev_frame_start_us = 0;
+    s_screensaver_fx.time_origin_us = 0;
+    s_screensaver_fx.time_ms = 0;
+    s_screensaver_fx.last_time_refresh_us = 0;
+    s_screensaver_fx.direct_push_warned = false;
+    s_screensaver_fx.direct_stop_requested = false;
+    s_screensaver_fx.direct_active =
+        screensaver_direct_is_ready() && bsp_display_begin_direct_mode();
+    if (screensaver_direct_is_ready() && !s_screensaver_fx.direct_active) {
+        ESP_LOGW(TAG, "screensaver direct mode unavailable; falling back to LVGL path");
+    }
+    if (s_screensaver_fx.direct_active) {
+        screensaver_direct_reset();
+    }
+    set_screensaver_overlay_children_hidden(s_screensaver_fx.direct_active);
     update_screensaver_perf_label();
-    render_screensaver_background();
-    lv_timer_resume(s_screensaver_fx.timer);
+    if (s_screensaver_fx.direct_active) {
+        if (!start_direct_screensaver_task()) {
+            bsp_display_end_direct_mode();
+            screensaver_direct_restore_background();
+            s_screensaver_fx.direct_active = false;
+            set_screensaver_overlay_children_hidden(false);
+            render_screensaver_background();
+            lv_timer_resume(s_screensaver_fx.timer);
+        }
+    } else {
+        render_screensaver_background();
+        lv_timer_resume(s_screensaver_fx.timer);
+    }
 }
 
 static void stop_screensaver_fx(void)
 {
     if (s_screensaver_fx.timer != NULL) {
         lv_timer_pause(s_screensaver_fx.timer);
+    }
+
+    if (s_screensaver_fx.direct_active) {
+        stop_direct_screensaver_task();
+        if (!screensaver_direct_wait_idle(1000)) {
+            ESP_LOGW(TAG, "screensaver direct pipeline idle wait timeout");
+        }
+        bsp_display_end_direct_mode();
+        screensaver_direct_restore_background();
+        s_screensaver_fx.direct_active = false;
+        s_screensaver_fx.direct_stop_requested = false;
+        set_screensaver_overlay_children_hidden(false);
+        lv_obj_invalidate(lv_screen_active());
     }
 }
 
@@ -346,7 +595,9 @@ static void update_screensaver_time_label(const home_snapshot_t *snapshot)
         time_text[5] = '\0';
     }
 
-    if (s_view.screensaver_time_label != NULL) {
+    memcpy(s_screensaver_fx.time_text, time_text, sizeof(time_text));
+
+    if (!s_screensaver_fx.direct_active && s_view.screensaver_time_label != NULL) {
         lv_label_set_text(s_view.screensaver_time_label, time_text);
     }
 }
@@ -482,8 +733,13 @@ static void create_screensaver_overlay(lv_obj_t *root)
         lv_obj_center(s_screensaver_fx.image);
 
         balatro_init(HOME_SCREENSAVER_FX_W, HOME_SCREENSAVER_FX_H);
+        if (!screensaver_direct_init()) {
+            ESP_LOGW(TAG, "screensaver direct buffer alloc failed; using LVGL fallback");
+        }
 
-        s_screensaver_fx.phase_deg = 0;
+        s_screensaver_fx.time_ms = 0;
+        s_screensaver_fx.time_origin_us = 0;
+        memcpy(s_screensaver_fx.time_text, "--:--", sizeof(s_screensaver_fx.time_text));
         render_screensaver_background();
 
         s_screensaver_fx.timer =
@@ -509,7 +765,9 @@ static void create_screensaver_overlay(lv_obj_t *root)
     lv_obj_set_style_text_align(s_view.screensaver_fps_label, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_align(s_view.screensaver_fps_label, LV_ALIGN_TOP_LEFT, HOME_SCREENSAVER_DEBUG_X,
                  HOME_SCREENSAVER_DEBUG_Y);
-    lv_label_set_text_static(s_view.screensaver_fps_label, "--.- fps\n-. -ms cpu");
+    lv_label_set_text_static(
+        s_view.screensaver_fps_label,
+        "--.- fps\n-. - int\n-. - cpu\n-. - fl\n-. - rot\n-. - wait\n-. - push");
 }
 
 static void display_city_name(char *dst, size_t dst_size, const char *src)

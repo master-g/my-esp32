@@ -30,7 +30,7 @@ cargo run -- chibi approve-dismiss --delay-ms 1500
 
 ```bash
 export ESP32DASH_ADMIN_ADDR="127.0.0.1:37125"   # optional
-export ESP32DASH_SERIAL_PORT="/dev/cu.usbmodem11401" # optional
+export ESP32DASH_SERIAL_PORT="/dev/cu.usbmodemXXXX" # optional; leave unset to auto-detect
 export ESP32DASH_SERIAL_BAUD="115200"           # optional
 export ESP32DASH_STATE_DIR="/tmp/esp32dash"     # optional
 export RUST_LOG="info"                          # optional
@@ -93,7 +93,7 @@ Install once:
 
 ```bash
 cd tools/esp32dash
-ESP32DASH_SERIAL_PORT=/dev/cu.usbmodem11401 cargo run -- install-launchd
+ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX cargo run -- install-launchd
 ```
 
 The command writes `~/Library/LaunchAgents/com.local.esp32dash.plist` and starts the new agent.

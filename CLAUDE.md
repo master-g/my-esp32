@@ -97,7 +97,7 @@ printf '%s\n' '{"hook_event_name":"SessionStart","cwd":"/tmp/project"}' | cargo 
 cargo run -- agent status
 
 # Install as launchd service (macOS)
-ESP32DASH_SERIAL_PORT=/dev/cu.usbmodem11401 cargo run -- install-launchd
+ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX cargo run -- install-launchd
 ```
 
 ## Project Structure

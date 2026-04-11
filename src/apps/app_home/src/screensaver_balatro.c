@@ -22,7 +22,7 @@
 #include "lvgl.h"
 
 #define TAG "balatro"
-#define BALATRO_MOCK_RENDERER 1
+#define BALATRO_MOCK_RENDERER 0
 
 /* ---- Balatro palette (original shader, 0-255) ---- */
 #define C1_R 222
@@ -44,6 +44,10 @@
 #define SPIN_SPEED 7.0f
 #define SPIN_ROTATION (-2.0f)
 #define SPIN_EASE 1.0f
+#define BALATRO_FLOW_ITERS 2
+#define BALATRO_TIME1_MDEG_PER_S 52589U
+#define BALATRO_TIME2_MDEG_PER_S 45321U
+#define BALATRO_TIME_SCALE_DEN 1000000U
 
 /* Q8.8 fixed-point helpers */
 #define Q8 256
@@ -94,6 +98,28 @@ static inline uint8_t clamp_u8(int32_t v)
     return (uint8_t)v;
 }
 
+static uint32_t isqrt32(uint32_t value)
+{
+    uint32_t root = 0;
+    uint32_t bit = 1UL << 30;
+
+    while (bit > value) {
+        bit >>= 2;
+    }
+
+    while (bit != 0) {
+        if (value >= root + bit) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+
+    return root;
+}
+
 /* ---- Init / deinit ---- */
 
 bool balatro_init(uint16_t width, uint16_t height)
@@ -101,6 +127,9 @@ bool balatro_init(uint16_t width, uint16_t height)
     if (s_initialized) {
         balatro_deinit();
     }
+
+    s_width = width;
+    s_height = height;
 
     size_t table_size = (size_t)width * height * sizeof(pixel_polar_t);
     s_polar_table = heap_caps_malloc(table_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -112,9 +141,6 @@ bool balatro_init(uint16_t width, uint16_t height)
         ESP_LOGE(TAG, "polar table alloc failed");
         return false;
     }
-
-    s_width = width;
-    s_height = height;
 
     /* Screen diagonal for normalization (matches shader's length(screenSize)) */
     float diag = sqrtf((float)(width * width + height * height));
@@ -174,23 +200,20 @@ void balatro_deinit(void)
     s_initialized = false;
 }
 
-/* ---- Frame rendering ---- */
-
-void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg)
+static void render_mock_background(lv_color32_t *pixels, uint32_t stride_px, uint32_t time_ms)
 {
-    if (!s_initialized || s_polar_table == NULL || pixels == NULL) {
+    if (pixels == NULL) {
         return;
     }
 
-#if BALATRO_MOCK_RENDERER
-    /* Perf isolation path: keep the same canvas/timer/display pipeline, but replace the
-     * Balatro math with a very cheap animated pattern so we can measure display-side cost. */
+    int32_t anim_phase = (int32_t)(time_ms / 16U);
+
     for (uint16_t y = 0; y < s_height; y++) {
-        int32_t row_phase = (int32_t)y * 6 + (int32_t)phase_deg * 9;
+        int32_t row_phase = (int32_t)y * 6 + anim_phase * 9;
 
         for (uint16_t x = 0; x < s_width; x++) {
             int32_t diag = ((int32_t)x * 7 + row_phase) & 0xFF;
-            int32_t cross = (((int32_t)x * 5 - (int32_t)y * 3) + (int32_t)phase_deg * 11) & 0x3F;
+            int32_t cross = (((int32_t)x * 5 - (int32_t)y * 3) + anim_phase * 11) & 0x3F;
             uint8_t r = (uint8_t)(18 + (diag >> 2) + (cross >> 3));
             uint8_t g = (uint8_t)(14 + (cross >> 1));
             uint8_t b = (uint8_t)(32 + (diag >> 1));
@@ -198,18 +221,33 @@ void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg
             pixels[y * stride_px + x] = lv_color32_make(r, g, b, 0xFF);
         }
     }
+}
+
+/* ---- Frame rendering ---- */
+
+void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint32_t time_ms)
+{
+    if (pixels == NULL) {
+        return;
+    }
+
+#if BALATRO_MOCK_RENDERER
+    render_mock_background(pixels, stride_px, time_ms);
     return;
 #endif
 
-    /* Time-based speed for the flow loop, mapped to degrees for our LUT.
-     * Original: speed = iTime * SPIN_SPEED (radians, continuously increasing).
-     * phase_deg advances 2° per frame at 30fps = 60°/s, wrapping at 360.
-     *
-     * Original per-frame trig shift: iTime*7*0.131 rad/frame ≈ 1.74°/frame,
-     * compounded over 5 iterations. With 3 iterations we need a larger multiplier
-     * to compensate: 16 gives ~4.25°/frame × 3 iters ≈ 12.75° effective, close to
-     * the original's ~8.7° × visual compounding factor. */
-    int32_t speed_deg = (int32_t)phase_deg * 16;
+    if (!s_initialized || s_polar_table == NULL) {
+        render_mock_background(pixels, stride_px, time_ms);
+        return;
+    }
+
+    /* Drive the flow with monotonic real time so the pattern does not collapse
+     * into a short exact loop. These two terms come directly from the original
+     * shader's iTime-based offsets, converted to degrees per second. */
+    int32_t speed_term1_base =
+        (int32_t)(((uint64_t)time_ms * BALATRO_TIME1_MDEG_PER_S) / BALATRO_TIME_SCALE_DEN);
+    int32_t speed_term2_base =
+        (int32_t)(((uint64_t)time_ms * BALATRO_TIME2_MDEG_PER_S) / BALATRO_TIME_SCALE_DEN);
 
     /* Contrast modifier (constant from shader) */
     /* contrast_mod = 0.25 * 3.5 + 0.5 * 0.25 + 1.2 = 0.875 + 0.125 + 1.2 = 2.2 */
@@ -242,7 +280,7 @@ void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg
             int32_t uv2_x = ux + uy;
             int32_t uv2_y = ux + uy;
 
-            /* Flow distortion loop — 3 iterations (original does 5).
+            /* Flow distortion loop — reduced iterations for the ESP32 direct path.
              * Uses LUT sin/cos. We work in Q8.8 throughout.
              *
              * Original per iteration:
@@ -251,7 +289,7 @@ void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg
              *                      sin(uv2.x - 0.113*speed))
              *   uv  -= cos(uv.x + uv.y) - sin(uv.x*0.711 - uv.y)
              */
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < BALATRO_FLOW_ITERS; i++) {
                 /* sin(max(ux,uy)) — convert Q8.8 to degrees for LUT.
                  * Conversion: value_q8 * (180/π) / 256 = value_q8 * 57 / 256 */
                 int32_t max_uv = (ux > uy) ? ux : uy;
@@ -264,12 +302,12 @@ void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg
                 /* Convert uv2 components and speed to degree arguments for trig.
                  * 5.1123314 rad ≈ 293°
                  * 0.353 * uv2.y → uv2_y_deg * 0.353, approximated as * 90 / 256
-                 * 0.131121 * speed → speed_deg * 34 / 256
-                 * 0.113 * speed → speed_deg * 29 / 256 */
+                 * The original shader uses elapsed iTime here. We pre-convert that
+                 * to degree offsets once per frame and feed the LUT with wrapped ints. */
                 int32_t uv2_y_deg = (uv2_y * 57) >> 8;
                 int32_t uv2_x_deg = (uv2_x * 57) >> 8;
-                int32_t speed_term1 = 293 + (uv2_y_deg * 90) / Q8 + (speed_deg * 34) / Q8;
-                int32_t speed_term2 = uv2_x_deg - (speed_deg * 29) / Q8;
+                int32_t speed_term1 = 293 + (uv2_y_deg * 90) / Q8 + speed_term1_base;
+                int32_t speed_term2 = uv2_x_deg - speed_term2_base;
 
                 ux += cos_q8(speed_term1) / 2;
                 uy += sin_q8(speed_term2) / 2;
@@ -286,13 +324,13 @@ void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg
             /* Palette mapping.
              * paint_res = clamp(length(uv) * 0.035 * contrast_mod, 0, 2)
              *
-             * length(uv) in Q8.8: sqrt(ux² + uy²) is expensive.
-             * Approximate: use manhattan distance * 0.7 as cheap proxy.
-             * (Manhattan * 0.7 ≈ Euclidean for typical angle distribution) */
+             * Use an integer sqrt here; the cheaper manhattan proxy drifts the
+             * palette too far toward green/yellow in the outer field. */
             int32_t abs_ux = (ux < 0) ? -ux : ux;
             int32_t abs_uy = (uy < 0) ? -uy : uy;
-            /* Manhattan in Q8.8, then scale by 0.7: * 179 / 256 */
-            int32_t len_q8 = (abs_ux + abs_uy) * 179 / Q8;
+            uint32_t len_sq = (uint32_t)((uint32_t)abs_ux * (uint32_t)abs_ux +
+                                         (uint32_t)abs_uy * (uint32_t)abs_uy);
+            int32_t len_q8 = (int32_t)isqrt32(len_sq);
 
             /* paint_res in Q8.8 = len_q8 * 0.035 * contrast_mod
              * 0.035 * 256 ≈ 9 → paint_res_q8 = len_q8 * 9 * contrast_mod_q8 / Q8² */
@@ -354,5 +392,15 @@ void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg
             pixels[y * stride_px + x] =
                 lv_color32_make(clamp_u8(r), clamp_u8(g), clamp_u8(b), 0xFF);
         }
+    }
+}
+
+void balatro_get_dimensions(uint16_t *width, uint16_t *height)
+{
+    if (width != NULL) {
+        *width = s_width;
+    }
+    if (height != NULL) {
+        *height = s_height;
     }
 }

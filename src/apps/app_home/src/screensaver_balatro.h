@@ -25,9 +25,12 @@ bool balatro_init(uint16_t width, uint16_t height);
 /* Render one frame into the canvas pixel buffer.
  *   pixels     - ARGB8888 row-major buffer
  *   stride_px  - row stride in pixels (may differ from width due to alignment)
- *   phase_deg  - primary animation phase, 0-359 (controls flow speed)
+ *   time_ms    - elapsed animation time in milliseconds
  */
-void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint16_t phase_deg);
+void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint32_t time_ms);
+
+/* Query the currently configured renderer dimensions. */
+void balatro_get_dimensions(uint16_t *width, uint16_t *height);
 
 /* Free the precomputed polar table. */
 void balatro_deinit(void);
