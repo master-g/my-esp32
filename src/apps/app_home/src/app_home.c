@@ -64,9 +64,6 @@
 #define HOME_SCREENSAVER_FX_SCALE 1024U
 #define HOME_SCREENSAVER_FX_PERIOD_MS 33
 #define HOME_SCREENSAVER_DIRECT_PERIOD_MS 1
-#define HOME_SCREENSAVER_DEBUG_X 20
-#define HOME_SCREENSAVER_DEBUG_Y 20
-#define HOME_SCREENSAVER_DEBUG_COLOR 0xa7b6c2
 #define HOME_TIME_REFRESH_MS 200
 #define HOME_SCREENSAVER_TASK_STACK_SIZE (6 * 1024)
 #define HOME_SCREENSAVER_TASK_PRIORITY 2
@@ -108,7 +105,6 @@ typedef struct {
     lv_obj_t *root;
     lv_obj_t *screensaver_overlay;
     lv_obj_t *screensaver_time_label;
-    lv_obj_t *screensaver_fps_label;
     lv_obj_t *status_bar;
     lv_obj_t *time_label;
     lv_obj_t *date_label;
@@ -207,7 +203,6 @@ static void set_screensaver_overlay_children_hidden(bool hidden)
     lv_obj_t *objs[] = {
         s_screensaver_fx.image,
         s_view.screensaver_time_label,
-        s_view.screensaver_fps_label,
     };
 
     for (size_t i = 0; i < sizeof(objs) / sizeof(objs[0]); i++) {
@@ -274,36 +269,7 @@ static void reset_screensaver_idle_deadline(void) { s_last_claude_activity_us = 
 
 static void update_screensaver_perf_label(void)
 {
-    char text[112];
-    bsp_display_perf_snapshot_t display_perf = {0};
-
-    if (s_screensaver_fx.direct_active) {
-        return;
-    }
-
-    if (s_view.screensaver_fps_label == NULL) {
-        return;
-    }
-
-    bsp_display_get_perf_snapshot(&display_perf);
-
-    if (s_screensaver_fx.fps_x10 == 0) {
-        lv_label_set_text_static(
-            s_view.screensaver_fps_label,
-            "--.- fps\n-. - int\n-. - cpu\n-. - fl\n-. - rot\n-. - wait\n-. - push");
-        return;
-    }
-
-    snprintf(text, sizeof(text),
-             "%u.%u fps\n%u.%u int\n%u.%u cpu\n%u.%u fl\n%u.%u rot\n%u.%u wait\n%u.%u push",
-             s_screensaver_fx.fps_x10 / 10, s_screensaver_fx.fps_x10 % 10,
-             s_screensaver_fx.interval_ms_x10 / 10, s_screensaver_fx.interval_ms_x10 % 10,
-             s_screensaver_fx.render_ms_x10 / 10, s_screensaver_fx.render_ms_x10 % 10,
-             display_perf.flush_ms_x10 / 10, display_perf.flush_ms_x10 % 10,
-             display_perf.rotate_ms_x10 / 10, display_perf.rotate_ms_x10 % 10,
-             display_perf.wait_ms_x10 / 10, display_perf.wait_ms_x10 % 10,
-             display_perf.push_ms_x10 / 10, display_perf.push_ms_x10 % 10);
-    lv_label_set_text(s_view.screensaver_fps_label, text);
+    /* Perf remains available through serial logs; the on-screen debug overlay is removed. */
 }
 
 static void render_screensaver_background(void)
@@ -313,13 +279,8 @@ static void render_screensaver_background(void)
     uint32_t stride_px;
 
     if (s_screensaver_fx.direct_active) {
-        screensaver_direct_metrics_t metrics = {
-            .fps_x10 = s_screensaver_fx.fps_x10,
-            .interval_ms_x10 = s_screensaver_fx.interval_ms_x10,
-            .frame_ms_x10 = s_screensaver_fx.render_ms_x10,
-        };
         esp_err_t err = screensaver_direct_render_and_push(s_screensaver_fx.time_ms,
-                                                           s_screensaver_fx.time_text, &metrics);
+                                                           s_screensaver_fx.time_text);
         if (err != ESP_OK && !s_screensaver_fx.direct_push_warned) {
             ESP_LOGW(TAG, "screensaver direct push failed: %s", esp_err_to_name(err));
             s_screensaver_fx.direct_push_warned = true;
@@ -757,17 +718,6 @@ static void create_screensaver_overlay(lv_obj_t *root)
                                        HOME_SCREENSAVER_TIME_LETTER_SPACE, 0);
     lv_obj_center(s_view.screensaver_time_label);
     lv_label_set_text_static(s_view.screensaver_time_label, "--:--");
-
-    s_view.screensaver_fps_label = lv_label_create(overlay);
-    lv_obj_set_style_text_font(s_view.screensaver_fps_label, ui_font_text_11(), 0);
-    lv_obj_set_style_text_color(s_view.screensaver_fps_label,
-                                lv_color_hex(HOME_SCREENSAVER_DEBUG_COLOR), 0);
-    lv_obj_set_style_text_align(s_view.screensaver_fps_label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_align(s_view.screensaver_fps_label, LV_ALIGN_TOP_LEFT, HOME_SCREENSAVER_DEBUG_X,
-                 HOME_SCREENSAVER_DEBUG_Y);
-    lv_label_set_text_static(
-        s_view.screensaver_fps_label,
-        "--.- fps\n-. - int\n-. - cpu\n-. - fl\n-. - rot\n-. - wait\n-. - push");
 }
 
 static void display_city_name(char *dst, size_t dst_size, const char *src)

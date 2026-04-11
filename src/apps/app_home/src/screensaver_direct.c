@@ -21,12 +21,12 @@
 #define DIRECT_BG_H 36
 #define DIRECT_BG_VIEW_W_PCT 84U
 #define DIRECT_BG_VIEW_H_PCT 90U
+#define DIRECT_TIME_SCALE 7
+#define DIRECT_TIME_CHAR_W 5
+#define DIRECT_TIME_CHAR_H 7
+#define DIRECT_TIME_CHAR_COUNT 5
 #define DIRECT_FRAMEBUF_COUNT 2
 #define DIRECT_PERF_WINDOW_US 500000
-#define DIRECT_DEBUG_SCALE 2
-#define DIRECT_DEBUG_X 20
-#define DIRECT_DEBUG_Y 16
-#define DIRECT_DEBUG_LINE_STEP 14
 #define DIRECT_PUSH_TASK_STACK_SIZE (4 * 1024)
 #define DIRECT_PUSH_TASK_PRIORITY 2
 #define DIRECT_PUSH_TASK_CORE 0
@@ -257,37 +257,6 @@ static void upscale_background_to_native(void)
             lv_color32_t bg = s_bg_buf[s_bg_row_offset_from_native_x[native_x] + bg_x];
             dst[native_x] = rgb565(bg.red, bg.green, bg.blue);
         }
-    }
-}
-
-static void format_metric_line(char *dst, size_t dst_size, uint16_t value_x10, const char *label)
-{
-    if (value_x10 == 0) {
-        snprintf(dst, dst_size, "--.- %s", label);
-        return;
-    }
-
-    snprintf(dst, dst_size, "%u.%u %s", value_x10 / 10, value_x10 % 10, label);
-}
-
-static void draw_debug_lines(const screensaver_direct_metrics_t *metrics)
-{
-    char lines[7][16];
-    uint16_t debug_color = rgb565(167, 182, 194);
-
-    format_metric_line(lines[0], sizeof(lines[0]), (metrics != NULL) ? metrics->fps_x10 : 0, "FPS");
-    format_metric_line(lines[1], sizeof(lines[1]), (metrics != NULL) ? metrics->interval_ms_x10 : 0,
-                       "INT");
-    format_metric_line(lines[2], sizeof(lines[2]), (metrics != NULL) ? metrics->frame_ms_x10 : 0,
-                       "FRM");
-    format_metric_line(lines[3], sizeof(lines[3]), s_perf_snapshot.compose_ms_x10, "CMP");
-    format_metric_line(lines[4], sizeof(lines[4]), s_perf_snapshot.text_ms_x10, "TXT");
-    format_metric_line(lines[5], sizeof(lines[5]), s_perf_snapshot.wait_ms_x10, "WAIT");
-    format_metric_line(lines[6], sizeof(lines[6]), s_perf_snapshot.push_ms_x10, "PUSH");
-
-    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
-        draw_text(DIRECT_DEBUG_X, DIRECT_DEBUG_Y + (int32_t)i * DIRECT_DEBUG_LINE_STEP,
-                  DIRECT_DEBUG_SCALE, lines[i], debug_color);
     }
 }
 
@@ -532,8 +501,7 @@ void screensaver_direct_deinit(void)
     s_ready = false;
 }
 
-esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_text,
-                                             const screensaver_direct_metrics_t *metrics)
+esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_text)
 {
     uint8_t frame_idx = 0;
     int64_t frame_start_us;
@@ -541,8 +509,11 @@ esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_
     int64_t text_start_us;
     uint32_t compose_us;
     uint32_t text_us;
-    int32_t time_scale = 5;
-    int32_t time_width = 5 * 5 * time_scale + 4 * time_scale;
+    int32_t time_scale = DIRECT_TIME_SCALE;
+    int32_t time_width =
+        (DIRECT_TIME_CHAR_COUNT * DIRECT_TIME_CHAR_W + (DIRECT_TIME_CHAR_COUNT - 1)) * time_scale;
+    int32_t time_height = DIRECT_TIME_CHAR_H * time_scale;
+    int32_t time_y = (DIRECT_LOGICAL_H - time_height) / 2;
     uint16_t time_color = rgb565(243, 248, 255);
 
     if (!screensaver_direct_is_ready()) {
@@ -562,9 +533,8 @@ esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_
     compose_us = (uint32_t)(esp_timer_get_time() - compose_start_us);
 
     text_start_us = esp_timer_get_time();
-    draw_text((DIRECT_LOGICAL_W - time_width) / 2, 68, time_scale,
+    draw_text((DIRECT_LOGICAL_W - time_width) / 2, time_y, time_scale,
               (time_text != NULL) ? time_text : "--:--", time_color);
-    draw_debug_lines(metrics);
     text_us = (uint32_t)(esp_timer_get_time() - text_start_us);
 
     s_frame_perf[frame_idx].frame_start_us = frame_start_us;

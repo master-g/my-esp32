@@ -45,9 +45,14 @@
 #define SPIN_ROTATION (-2.0f)
 #define SPIN_EASE 1.0f
 #define BALATRO_FLOW_ITERS 2
+#define BALATRO_CENTER_ZOOM_MIN 0.76f
+#define BALATRO_CENTER_ZOOM_INNER_RADIUS 0.06f
+#define BALATRO_CENTER_ZOOM_OUTER_RADIUS 0.44f
 #define BALATRO_TIME1_MDEG_PER_S 52589U
 #define BALATRO_TIME2_MDEG_PER_S 45321U
 #define BALATRO_TIME_SCALE_DEN 1000000U
+#define BALATRO_INVERT_COLORS 0
+#define BALATRO_SATURATION_Q8 128
 
 /* Q8.8 fixed-point helpers */
 #define Q8 256
@@ -96,6 +101,36 @@ static inline uint8_t clamp_u8(int32_t v)
     if (v > 255)
         return 255;
     return (uint8_t)v;
+}
+
+static inline uint8_t apply_saturation_u8(uint8_t channel, uint8_t gray)
+{
+    return clamp_u8(
+        ((int32_t)gray * (Q8 - BALATRO_SATURATION_Q8) + (int32_t)channel * BALATRO_SATURATION_Q8) /
+        Q8);
+}
+
+static float clampf_01(float value)
+{
+    if (value < 0.0f) {
+        return 0.0f;
+    }
+    if (value > 1.0f) {
+        return 1.0f;
+    }
+    return value;
+}
+
+static float smoothstepf(float edge0, float edge1, float x)
+{
+    float t;
+
+    if (edge1 <= edge0) {
+        return (x >= edge1) ? 1.0f : 0.0f;
+    }
+
+    t = clampf_01((x - edge0) / (edge1 - edge0));
+    return t * t * (3.0f - 2.0f * t);
 }
 
 static uint32_t isqrt32(uint32_t value)
@@ -158,8 +193,19 @@ bool balatro_init(uint16_t width, uint16_t height)
             /* Shader UV normalization (pixelation step is implicit via low-res canvas) */
             float ux = ((float)x - 0.5f * (float)width) / diag;
             float uy = ((float)y - 0.5f * (float)height) / diag;
-            float r = sqrtf(ux * ux + uy * uy);
-            float angle_rad = atan2f(uy, ux);
+            float base_r = sqrtf(ux * ux + uy * uy);
+            float zoom_t = smoothstepf(BALATRO_CENTER_ZOOM_INNER_RADIUS,
+                                       BALATRO_CENTER_ZOOM_OUTER_RADIUS, base_r);
+            float zoom = BALATRO_CENTER_ZOOM_MIN + (1.0f - BALATRO_CENTER_ZOOM_MIN) * zoom_t;
+            float r;
+            float angle_rad;
+
+            /* Apply a lens in UV space so the center occupies more of the screen
+             * while the outer field stays close to the original shader. */
+            ux *= zoom;
+            uy *= zoom;
+            r = sqrtf(ux * ux + uy * uy);
+            angle_rad = atan2f(uy, ux);
 
             /* Polar spin warp from shader */
             float new_angle = angle_rad + base_speed -
@@ -389,8 +435,24 @@ void balatro_render(lv_color32_t *pixels, uint32_t stride_px, uint32_t time_ms)
                         (pal_scale_q8 * (C1_B * c1p_q8 + C2_B * c2p_q8 + C3_B * c3p_q8) / Q8) / Q8 +
                         (light_q8 * 255) / Q8;
 
-            pixels[y * stride_px + x] =
-                lv_color32_make(clamp_u8(r), clamp_u8(g), clamp_u8(b), 0xFF);
+            uint8_t out_r = clamp_u8(r);
+            uint8_t out_g = clamp_u8(g);
+            uint8_t out_b = clamp_u8(b);
+
+#if BALATRO_INVERT_COLORS
+            out_r = (uint8_t)(255U - out_r);
+            out_g = (uint8_t)(255U - out_g);
+            out_b = (uint8_t)(255U - out_b);
+#endif
+
+            uint8_t gray = (uint8_t)(((uint32_t)out_r * 77U + (uint32_t)out_g * 150U +
+                                      (uint32_t)out_b * 29U) >>
+                                     8);
+            out_r = apply_saturation_u8(out_r, gray);
+            out_g = apply_saturation_u8(out_g, gray);
+            out_b = apply_saturation_u8(out_b, gray);
+
+            pixels[y * stride_px + x] = lv_color32_make(out_r, out_g, out_b, 0xFF);
         }
     }
 }
