@@ -527,6 +527,7 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
         tool_use_id: Some(tool_use_id.clone()),
         permission_mode: "default".into(),
         recv_ts: now_epoch(),
+        claude_pid: None,
     };
     let clear_event = LocalHookEvent {
         session_id,
@@ -538,6 +539,7 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
         tool_use_id: Some(tool_use_id),
         permission_mode: "default".into(),
         recv_ts: now_epoch(),
+        claude_pid: None,
     };
 
     ApproveDismissScenario {
@@ -833,7 +835,15 @@ fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
         tool_use_id: raw.tool_use_id,
         permission_mode,
         recv_ts: now_epoch(),
+        claude_pid: hook_claude_pid(),
     }
+}
+
+fn hook_claude_pid() -> Option<u32> {
+    env::var("ESP32DASH_CLAUDE_PID")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
 }
 
 fn now_epoch() -> u64 {

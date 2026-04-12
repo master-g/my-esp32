@@ -82,21 +82,31 @@ The hook config added by `install-hooks` covers:
 - `UserPromptSubmit`
 - `PreToolUse`
 - `PostToolUse`
+- `PostToolUseFailure`
+- `PermissionDenied`
+- `Elicitation`
+- `ElicitationResult`
 - `Stop`
+- `StopFailure`
+- `SubagentStart`
 - `SubagentStop`
 - `PreCompact`
+- `PostCompact`
 - `PermissionRequest`
 
 ## launchd
 
-Install once:
+Install once from a stable executable path:
 
 ```bash
 cd tools/esp32dash
-ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX cargo run -- install-launchd
+cargo install --path .
+ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launchd
 ```
 
 The command writes `~/Library/LaunchAgents/com.local.esp32dash.plist` and starts the new agent.
+
+For quick local testing you can still use `cargo run -- install-launchd`, but the plist will point at the current build artifact under `target/`, so `cargo clean` or moving the repo will break the service.
 
 ## Serial Protocol
 

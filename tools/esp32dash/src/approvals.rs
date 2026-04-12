@@ -279,6 +279,7 @@ mod tests {
                 tool_use_id: Some("tool-1".into()),
                 permission_mode: "default".into(),
                 recv_ts: 1,
+                claude_pid: None,
             })
             .await;
 

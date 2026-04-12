@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs,
     net::SocketAddr,
     path::PathBuf,
@@ -30,8 +30,8 @@ use crate::{
     compat,
     device::{DeviceConfig, DeviceEvent, DeviceManager, SessionFactory, UnixSerialFactory},
     model::{
-        AdminErrorResponse, AdminRpcResponse, AgentStatusResponse, LocalHookEvent, PersistedState,
-        RpcRequest, Snapshot,
+        AdminErrorResponse, AdminRpcResponse, AgentStatusResponse, LocalHookEvent,
+        PersistedSessionState, PersistedState, RpcRequest, RunStatus, Snapshot,
     },
     normalizer::{apply_notification_status, materially_equal, normalize},
     text_sanitize::{
@@ -42,8 +42,12 @@ use crate::{
 
 const RING_BUFFER_CAPACITY: usize = 64;
 const PRE_TOOL_COALESCE_MS: u64 = 300;
-const INACTIVITY_TIMEOUT_SECS: u64 = 300;
-const INACTIVITY_CHECK_INTERVAL_SECS: u64 = 60;
+const SESSION_RECONCILE_INTERVAL_SECS: u64 = 5;
+const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+const PIDLESS_ACTIVE_SESSION_TIMEOUT_SECS: u64 = 900;
+const IDLE_SESSION_RETENTION_SECS: u64 = 1800;
+const ENDED_SESSION_RETENTION_SECS: u64 = 300;
+const MAX_TRACKED_SESSIONS: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -93,18 +97,20 @@ struct AgentState {
     snapshot: Snapshot,
     history: VecDeque<Snapshot>,
     pending_tool: Option<PendingToolEvent>,
-    last_event_ts: std::time::Instant,
+    sessions: BTreeMap<String, PersistedSessionState>,
+    last_heartbeat_ts: u64,
 }
 
 impl AgentState {
-    fn new(initial: Snapshot) -> Self {
+    fn new(initial: Snapshot, sessions: BTreeMap<String, PersistedSessionState>) -> Self {
         let seq = initial.seq;
         Self {
             seq,
             snapshot: initial,
             history: VecDeque::with_capacity(RING_BUFFER_CAPACITY),
             pending_tool: None,
-            last_event_ts: std::time::Instant::now(),
+            sessions,
+            last_heartbeat_ts: 0,
         }
     }
 }
@@ -121,37 +127,14 @@ pub struct AppState {
 pub async fn run(config: Config) -> Result<()> {
     let app_state = build_app_state(config.clone(), Arc::new(UnixSerialFactory));
 
-    // Spawn inactivity timer
-    let inactivity_state = Arc::new(app_state.clone());
+    let reconcile_state = Arc::new(app_state.clone());
     tokio::spawn(async move {
         let mut interval =
-            tokio::time::interval(Duration::from_secs(INACTIVITY_CHECK_INTERVAL_SECS));
+            tokio::time::interval(Duration::from_secs(SESSION_RECONCILE_INTERVAL_SECS));
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
-            let guard = inactivity_state.state.lock().await;
-            let elapsed = guard.last_event_ts.elapsed();
-            let is_active = !matches!(guard.snapshot.status.as_str(), "ended" | "unknown");
-            drop(guard);
-
-            if is_active && elapsed >= Duration::from_secs(INACTIVITY_TIMEOUT_SECS) {
-                info!(
-                    "inactivity timeout ({}s), transitioning to sleep",
-                    elapsed.as_secs()
-                );
-                let sleep_event = LocalHookEvent {
-                    session_id: String::new(),
-                    cwd: String::new(),
-                    hook_event_name: "Stop".into(),
-                    message: Some("Inactivity timeout".into()),
-                    prompt_preview: None,
-                    tool_name: None,
-                    tool_use_id: None,
-                    permission_mode: "default".into(),
-                    recv_ts: now_epoch(),
-                };
-                inactivity_state.ingest(sleep_event).await;
-            }
+            reconcile_state.reconcile_sessions().await;
         }
     });
 
@@ -183,7 +166,7 @@ impl AppState {
         self.maybe_dismiss_approvals_for_event(&event).await;
         match event.hook_event_name.as_str() {
             "PreToolUse" => self.handle_pre_tool(event).await,
-            "PostToolUse" => self.handle_post_tool(event).await,
+            "PostToolUse" | "PostToolUseFailure" => self.handle_post_tool(event).await,
             _ => {
                 self.flush_pending_tool().await;
                 self.process_event(event).await;
@@ -290,43 +273,64 @@ impl AppState {
     }
 
     async fn process_event(self: &Arc<Self>, event: LocalHookEvent) {
-        let persist = {
+        let (persist, snapshot_to_send) = {
             let mut guard = self.state.lock().await;
-            guard.last_event_ts = std::time::Instant::now();
-            let current = guard.snapshot.clone();
-            let mut next = normalize(&event, &current);
-            if event.hook_event_name == "Notification" {
-                next = apply_notification_status(next, &current, &event);
-            }
-
-            if materially_equal(&next, &current) {
-                guard.snapshot.ts = next.ts;
-                debug!(
-                    "coalesced duplicate state for event {}",
-                    event.hook_event_name
-                );
-                return;
-            }
-
-            guard.seq += 1;
-            next.seq = guard.seq;
-            guard.snapshot = next.clone();
-            guard.history.push_back(next.clone());
-            while guard.history.len() > RING_BUFFER_CAPACITY {
-                guard.history.pop_front();
-            }
-
-            PersistedState {
-                seq: guard.seq,
-                snapshot: next,
-            }
+            apply_event_to_sessions(&mut guard.sessions, &event);
+            finalize_guard_state(&mut guard, event.recv_ts, true)
         };
 
-        if let Err(err) = persist_state(&self.config.state_path, &persist) {
-            warn!("failed to persist state: {err:#}");
+        if let Some(persist) = persist {
+            if let Err(err) = persist_state(&self.config.state_path, &persist) {
+                warn!("failed to persist state: {err:#}");
+            }
         }
 
-        self.device_manager.send_snapshot(persist.snapshot);
+        if let Some(snapshot) = snapshot_to_send {
+            self.device_manager.send_snapshot(snapshot);
+        }
+    }
+
+    async fn reconcile_sessions(self: &Arc<Self>) {
+        let now = now_epoch();
+        let (persist, snapshot_to_send, heartbeat_snapshot) = {
+            let mut guard = self.state.lock().await;
+            let sessions_changed = reconcile_session_map(&mut guard.sessions, now);
+            let (persist, snapshot_to_send) =
+                finalize_guard_state(&mut guard, now, sessions_changed);
+            let heartbeat_snapshot = if !guard.sessions.is_empty()
+                && now.saturating_sub(guard.last_heartbeat_ts) >= HEARTBEAT_INTERVAL_SECS
+            {
+                guard.last_heartbeat_ts = now;
+                Some(guard.snapshot.clone())
+            } else {
+                None
+            };
+            (persist, snapshot_to_send, heartbeat_snapshot)
+        };
+
+        if let Some(persist) = persist {
+            if let Err(err) = persist_state(&self.config.state_path, &persist) {
+                warn!("failed to persist state: {err:#}");
+            }
+        }
+
+        if let Some(snapshot) = snapshot_to_send {
+            self.device_manager.send_snapshot(snapshot);
+        }
+
+        if let Some(snapshot) = heartbeat_snapshot {
+            if let Err(err) = self.device_manager.send_protocol_event(
+                "claude.heartbeat",
+                serde_json::json!({
+                    "ts": now,
+                    "seq": snapshot.seq,
+                    "session_id": snapshot.session_id,
+                    "status": snapshot.status,
+                }),
+            ) {
+                warn!(error = %err, "failed to send claude heartbeat to device");
+            }
+        }
     }
 
     async fn snapshot(&self) -> Snapshot {
@@ -336,6 +340,205 @@ impl AppState {
     fn serial_status(&self) -> crate::model::SerialConnectionStatus {
         self.device_manager.status()
     }
+}
+
+fn finalize_guard_state(
+    guard: &mut AgentState,
+    fallback_ts: u64,
+    sessions_changed: bool,
+) -> (Option<PersistedState>, Option<Snapshot>) {
+    let next_snapshot = select_display_snapshot(&guard.sessions, fallback_ts);
+    let mut snapshot_to_send = None;
+    let snapshot_changed = !materially_equal(&next_snapshot, &guard.snapshot);
+
+    if snapshot_changed {
+        guard.seq += 1;
+        let mut published = next_snapshot;
+        published.seq = guard.seq;
+        guard.snapshot = published.clone();
+        guard.history.push_back(published.clone());
+        while guard.history.len() > RING_BUFFER_CAPACITY {
+            guard.history.pop_front();
+        }
+        snapshot_to_send = Some(published);
+    } else {
+        guard.snapshot.ts = next_snapshot.ts;
+        debug!("coalesced duplicate visible claude snapshot");
+    }
+
+    let persist = if sessions_changed || snapshot_changed {
+        Some(PersistedState {
+            seq: guard.seq,
+            snapshot: guard.snapshot.clone(),
+            sessions: guard.sessions.values().cloned().collect(),
+        })
+    } else {
+        None
+    };
+
+    (persist, snapshot_to_send)
+}
+
+fn apply_event_to_sessions(
+    sessions: &mut BTreeMap<String, PersistedSessionState>,
+    event: &LocalHookEvent,
+) {
+    let key = session_key_for(event);
+    let entry = sessions
+        .entry(key.clone())
+        .or_insert_with(|| PersistedSessionState {
+            key: key.clone(),
+            snapshot: Snapshot::empty(event.recv_ts),
+            cwd: event.cwd.clone(),
+            last_activity_ts: event.recv_ts,
+            claude_pid: event.claude_pid,
+        });
+
+    let current = entry.snapshot.clone();
+    let mut next = normalize(event, &current);
+    if event.hook_event_name == "Notification" {
+        next = apply_notification_status(next, &current, event);
+    }
+    if next.session_id.is_empty() {
+        next.session_id = key.clone();
+    }
+
+    entry.snapshot = next;
+    entry.cwd = if event.cwd.trim().is_empty() {
+        entry.cwd.clone()
+    } else {
+        event.cwd.clone()
+    };
+    entry.last_activity_ts = event.recv_ts;
+    if let Some(pid) = event.claude_pid {
+        entry.claude_pid = Some(pid);
+    }
+    if event.hook_event_name == "SessionEnd" {
+        entry.claude_pid = None;
+    }
+}
+
+fn reconcile_session_map(sessions: &mut BTreeMap<String, PersistedSessionState>, now: u64) -> bool {
+    let mut changed = false;
+
+    for session in sessions.values_mut() {
+        if session_liveness_lost(session, now) {
+            mark_session_idle(session, now);
+            changed = true;
+        }
+    }
+
+    let before = sessions.len();
+    sessions.retain(|_, session| !should_prune_session(session, now));
+    changed |= sessions.len() != before;
+
+    changed | prune_excess_sessions(sessions)
+}
+
+fn prune_excess_sessions(sessions: &mut BTreeMap<String, PersistedSessionState>) -> bool {
+    if sessions.len() <= MAX_TRACKED_SESSIONS {
+        return false;
+    }
+
+    let mut candidates: Vec<(String, u8, u64)> = sessions
+        .values()
+        .map(|session| {
+            (
+                session.key.clone(),
+                RunStatus::from_str(&session.snapshot.status).display_priority(),
+                session.last_activity_ts,
+            )
+        })
+        .collect();
+    candidates.sort_by_key(|(_, priority, last_activity_ts)| (*priority, *last_activity_ts));
+
+    let remove_count = sessions.len().saturating_sub(MAX_TRACKED_SESSIONS);
+    for (key, _, _) in candidates.into_iter().take(remove_count) {
+        sessions.remove(&key);
+    }
+    true
+}
+
+fn select_display_snapshot(
+    sessions: &BTreeMap<String, PersistedSessionState>,
+    fallback_ts: u64,
+) -> Snapshot {
+    sessions
+        .values()
+        .max_by_key(|session| {
+            (
+                RunStatus::from_str(&session.snapshot.status).display_priority(),
+                u8::from(session.snapshot.unread),
+                session.last_activity_ts,
+            )
+        })
+        .map(|session| session.snapshot.clone())
+        .unwrap_or_else(|| Snapshot::empty(fallback_ts))
+}
+
+fn session_key_for(event: &LocalHookEvent) -> String {
+    let session_id = event.session_id.trim();
+    if !session_id.is_empty() {
+        return session_id.to_string();
+    }
+    let cwd = event.cwd.trim();
+    if !cwd.is_empty() {
+        return format!("cwd:{cwd}");
+    }
+    if let Some(pid) = event.claude_pid {
+        return format!("pid:{pid}");
+    }
+    "__global__".into()
+}
+
+fn session_liveness_lost(session: &PersistedSessionState, now: u64) -> bool {
+    let status = RunStatus::from_str(&session.snapshot.status);
+    if !status.is_active() {
+        return false;
+    }
+
+    if let Some(pid) = session.claude_pid {
+        return !process_exists(pid);
+    }
+
+    now.saturating_sub(session.last_activity_ts) >= PIDLESS_ACTIVE_SESSION_TIMEOUT_SECS
+}
+
+fn should_prune_session(session: &PersistedSessionState, now: u64) -> bool {
+    let age = now.saturating_sub(session.last_activity_ts);
+    match RunStatus::from_str(&session.snapshot.status) {
+        RunStatus::Ended => age >= ENDED_SESSION_RETENTION_SECS,
+        RunStatus::Unknown => age >= IDLE_SESSION_RETENTION_SECS,
+        _ => false,
+    }
+}
+
+fn mark_session_idle(session: &mut PersistedSessionState, now: u64) {
+    session.last_activity_ts = now;
+    session.snapshot.event = "SessionLivenessLost".into();
+    session.snapshot.status = RunStatus::Unknown.as_str().into();
+    session.snapshot.title = "Idle".into();
+    session.snapshot.detail = if session.claude_pid.is_some() {
+        "Claude session exited before sending a terminal hook".into()
+    } else {
+        "Claude activity timed out without a terminal hook".into()
+    };
+    session.snapshot.attention = crate::model::Attention::Medium;
+    session.snapshot.unread = false;
+    session.snapshot.ts = now;
+    session.claude_pid = None;
+}
+
+fn process_exists(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    if rc == 0 {
+        return true;
+    }
+
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    )
 }
 
 fn event_clears_pending_approval(event: &LocalHookEvent) -> bool {
@@ -518,9 +721,12 @@ fn persist_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
 }
 
 fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState {
-    let initial_snapshot = load_state(&config.state_path)
-        .map(|persisted| persisted.snapshot)
+    let persisted = load_state(&config.state_path);
+    let initial_snapshot = persisted
+        .as_ref()
+        .map(|state| state.snapshot.clone())
         .unwrap_or_else(|| Snapshot::empty(now_epoch()));
+    let initial_sessions = restored_sessions(persisted.as_ref(), &initial_snapshot);
     let approvals = ApprovalStore::new();
     let (device_event_tx, mut device_event_rx) = mpsc::unbounded_channel();
     let device_manager = DeviceManager::start(
@@ -551,11 +757,50 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
 
     AppState {
         config,
-        state: Arc::new(Mutex::new(AgentState::new(initial_snapshot))),
+        state: Arc::new(Mutex::new(AgentState::new(
+            initial_snapshot,
+            initial_sessions,
+        ))),
         pending_generation: Arc::new(AtomicU64::new(0)),
         device_manager,
         approvals,
     }
+}
+
+fn restored_sessions(
+    persisted: Option<&PersistedState>,
+    initial_snapshot: &Snapshot,
+) -> BTreeMap<String, PersistedSessionState> {
+    let mut sessions = persisted
+        .map(|state| {
+            state
+                .sessions
+                .iter()
+                .cloned()
+                .map(|session| (session.key.clone(), session))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    if sessions.is_empty() && initial_snapshot.seq > 0 {
+        let key = if initial_snapshot.session_id.trim().is_empty() {
+            "__restored__".to_string()
+        } else {
+            initial_snapshot.session_id.clone()
+        };
+        sessions.insert(
+            key.clone(),
+            PersistedSessionState {
+                key,
+                snapshot: initial_snapshot.clone(),
+                cwd: String::new(),
+                last_activity_ts: initial_snapshot.ts,
+                claude_pid: None,
+            },
+        );
+    }
+
+    sessions
 }
 
 fn build_router(app_state: AppState) -> Router {
@@ -581,6 +826,8 @@ fn now_epoch() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
+        process,
         sync::{Arc, Mutex},
         time::SystemTime,
     };
@@ -591,7 +838,7 @@ mod tests {
     use super::*;
     use crate::{
         device::DeviceSession,
-        model::{Attention, WireFrame},
+        model::{Attention, PersistedSessionState, WireFrame},
     };
 
     #[derive(Clone)]
@@ -728,6 +975,7 @@ mod tests {
                 tool_use_id: None,
                 permission_mode: "default".into(),
                 recv_ts: 123,
+                claude_pid: None,
             })
             .send()
             .await?
@@ -812,6 +1060,7 @@ mod tests {
                 tool_use_id: Some("tool-1".into()),
                 permission_mode: "default".into(),
                 recv_ts: 124,
+                claude_pid: None,
             })
             .send()
             .await?
@@ -839,5 +1088,98 @@ mod tests {
 
         server.abort();
         Ok(())
+    }
+
+    #[test]
+    fn display_snapshot_prefers_waiting_session_over_newer_idle() {
+        let mut sessions = BTreeMap::new();
+        let mut idle = Snapshot::empty(10);
+        idle.session_id = "idle".into();
+        idle.title = "Idle".into();
+        idle.detail = "done".into();
+
+        let mut waiting = Snapshot::empty(9);
+        waiting.session_id = "waiting".into();
+        waiting.status = "waiting_for_input".into();
+        waiting.title = "Awaiting approval".into();
+        waiting.detail = "Need approval".into();
+        waiting.unread = true;
+        waiting.attention = Attention::High;
+
+        sessions.insert(
+            "idle".into(),
+            PersistedSessionState {
+                key: "idle".into(),
+                snapshot: idle,
+                cwd: "/tmp/idle".into(),
+                last_activity_ts: 10,
+                claude_pid: None,
+            },
+        );
+        sessions.insert(
+            "waiting".into(),
+            PersistedSessionState {
+                key: "waiting".into(),
+                snapshot: waiting,
+                cwd: "/tmp/waiting".into(),
+                last_activity_ts: 9,
+                claude_pid: None,
+            },
+        );
+
+        let selected = select_display_snapshot(&sessions, 11);
+        assert_eq!(selected.session_id, "waiting");
+        assert_eq!(selected.status, "waiting_for_input");
+    }
+
+    #[test]
+    fn reconcile_marks_pidless_active_session_idle_after_timeout() {
+        let mut sessions = BTreeMap::new();
+        let mut active = Snapshot::empty(1);
+        active.session_id = "sess-1".into();
+        active.status = "running_tool".into();
+        active.title = "Running tool".into();
+        active.detail = "Bash".into();
+
+        sessions.insert(
+            "sess-1".into(),
+            PersistedSessionState {
+                key: "sess-1".into(),
+                snapshot: active,
+                cwd: "/tmp/project".into(),
+                last_activity_ts: 1,
+                claude_pid: None,
+            },
+        );
+
+        assert!(reconcile_session_map(
+            &mut sessions,
+            PIDLESS_ACTIVE_SESSION_TIMEOUT_SECS + 2
+        ));
+        let session = sessions
+            .get("sess-1")
+            .expect("session should remain tracked");
+        assert_eq!(session.snapshot.status, "unknown");
+        assert_eq!(session.snapshot.event, "SessionLivenessLost");
+    }
+
+    #[test]
+    fn restored_sessions_backfill_legacy_snapshot() {
+        let mut snapshot = Snapshot::empty(42);
+        snapshot.seq = 7;
+        snapshot.session_id = "sess-legacy".into();
+        snapshot.status = "processing".into();
+
+        let sessions = restored_sessions(None, &snapshot);
+        let session = sessions
+            .get("sess-legacy")
+            .expect("legacy snapshot should seed one session");
+        assert_eq!(session.snapshot.status, "processing");
+        assert_eq!(session.last_activity_ts, 42);
+    }
+
+    #[test]
+    fn process_exists_reports_current_process_alive() {
+        assert!(process_exists(process::id()));
     }
 }

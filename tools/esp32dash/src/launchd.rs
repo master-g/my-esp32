@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -98,16 +98,19 @@ pub fn install_launchd(executable: &Path) -> Result<PathBuf> {
     let uid = current_uid()?;
     bootout_path_if_present(&uid, &plist_path);
 
-    let status = Command::new("launchctl")
+    let output = Command::new("launchctl")
         .args([
             "bootstrap",
             &format!("gui/{uid}"),
             plist_path.to_string_lossy().as_ref(),
         ])
-        .status()
+        .output()
         .context("failed to run launchctl bootstrap")?;
-    if !status.success() {
-        return Err(anyhow!("launchctl bootstrap failed"));
+    if !output.status.success() {
+        return Err(anyhow!(
+            "launchctl bootstrap failed: {}",
+            command_failure_detail(&output)
+        ));
     }
 
     let _ = Command::new("launchctl")
@@ -160,6 +163,23 @@ fn current_uid() -> Result<String> {
         return Err(anyhow!("id -u returned non-zero status"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn command_failure_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    match output.status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => "terminated by signal".into(),
+    }
 }
 
 fn xml_escape(path: impl AsRef<Path>) -> String {

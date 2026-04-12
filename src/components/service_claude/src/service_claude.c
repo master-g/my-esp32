@@ -9,11 +9,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#define CLAUDE_STALENESS_TIMEOUT_US (30 * 1000000ULL)
+#define CLAUDE_STALENESS_TIMEOUT_US (120 * 1000000ULL)
 
 static claude_snapshot_t s_snapshot;
 static SemaphoreHandle_t s_mutex;
-static int64_t s_last_update_us;
+static int64_t s_last_transport_us;
 
 static void publish_claude_event(void)
 {
@@ -66,9 +66,20 @@ void claude_service_apply_remote_snapshot(const claude_snapshot_t *snapshot)
     memcpy(&s_snapshot, snapshot, sizeof(s_snapshot));
     s_snapshot.conn_state = CLAUDE_CONN_CONNECTED;
     s_snapshot.stale = false;
-    s_last_update_us = esp_timer_get_time();
+    s_last_transport_us = esp_timer_get_time();
     xSemaphoreGive(s_mutex);
     publish_claude_event();
+}
+
+void claude_service_note_transport_alive(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_snapshot.updated_at_epoch_s != 0) {
+        s_snapshot.conn_state = CLAUDE_CONN_CONNECTED;
+    }
+    s_snapshot.stale = false;
+    s_last_transport_us = esp_timer_get_time();
+    xSemaphoreGive(s_mutex);
 }
 
 void claude_service_get_snapshot(claude_snapshot_t *out)
@@ -117,8 +128,8 @@ bool claude_service_check_staleness(void)
     bool became_stale = false;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_snapshot.conn_state == CLAUDE_CONN_CONNECTED && s_last_update_us > 0) {
-        int64_t elapsed = esp_timer_get_time() - s_last_update_us;
+    if (s_snapshot.conn_state == CLAUDE_CONN_CONNECTED && s_last_transport_us > 0) {
+        int64_t elapsed = esp_timer_get_time() - s_last_transport_us;
         if (elapsed > (int64_t)CLAUDE_STALENESS_TIMEOUT_US) {
             s_snapshot.conn_state = CLAUDE_CONN_DISCONNECTED;
             s_snapshot.stale = true;

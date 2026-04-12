@@ -46,7 +46,31 @@ const HOOK_SPECS: &[HookSpec] = &[
         matcher: Some("*"),
     },
     HookSpec {
+        event: "PostToolUseFailure",
+        matcher: Some("*"),
+    },
+    HookSpec {
+        event: "PermissionDenied",
+        matcher: Some("*"),
+    },
+    HookSpec {
+        event: "Elicitation",
+        matcher: Some("*"),
+    },
+    HookSpec {
+        event: "ElicitationResult",
+        matcher: Some("*"),
+    },
+    HookSpec {
         event: "Stop",
+        matcher: None,
+    },
+    HookSpec {
+        event: "StopFailure",
+        matcher: None,
+    },
+    HookSpec {
+        event: "SubagentStart",
         matcher: None,
     },
     HookSpec {
@@ -59,6 +83,14 @@ const HOOK_SPECS: &[HookSpec] = &[
     },
     HookSpec {
         event: "PreCompact",
+        matcher: Some("manual"),
+    },
+    HookSpec {
+        event: "PostCompact",
+        matcher: Some("auto"),
+    },
+    HookSpec {
+        event: "PostCompact",
         matcher: Some("manual"),
     },
     HookSpec {
@@ -219,6 +251,7 @@ fn render_hook_script(executable: &Path) -> String {
 
 DEFAULT_BIN={escaped_executable}
 BIN="${{ESP32DASH_BIN:-$DEFAULT_BIN}}"
+export ESP32DASH_CLAUDE_PID="${{PPID:-}}"
 
 if [ ! -x "$BIN" ]; then
   if command -v esp32dash >/dev/null 2>&1; then
@@ -530,126 +563,16 @@ mod tests {
         let expected_script = render_hook_script(&executable);
         let hook_script_path = hooks_dir.join(HOOK_SCRIPT_NAME);
         fs::write(&hook_script_path, &expected_script).unwrap();
+        let mut settings = Value::Object(Map::new());
+        ensure_settings_hooks(
+            &mut settings,
+            HOOK_COMMAND_PATH,
+            &[HOOK_COMMAND_PATH.to_string()],
+        )
+        .unwrap();
         fs::write(
             claude_dir.join(SETTINGS_NAME),
-            serde_json::to_string_pretty(&json!({
-                "hooks": {
-                    "SessionStart": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "SessionEnd": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "Notification": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "UserPromptSubmit": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "PreToolUse": [
-                        {
-                            "matcher": "*",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "PostToolUse": [
-                        {
-                            "matcher": "*",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "Stop": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "SubagentStop": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "PreCompact": [
-                        {
-                            "matcher": "auto",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        },
-                        {
-                            "matcher": "manual",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ],
-                    "PermissionRequest": [
-                        {
-                            "matcher": "*",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": HOOK_COMMAND_PATH
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }))
-            .unwrap(),
+            serde_json::to_string_pretty(&settings).unwrap(),
         )
         .unwrap();
 

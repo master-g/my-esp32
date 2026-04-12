@@ -34,6 +34,8 @@ pub struct LocalHookEvent {
     pub tool_use_id: Option<String>,
     pub permission_mode: String,
     pub recv_ts: u64,
+    #[serde(default)]
+    pub claude_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +58,35 @@ impl RunStatus {
             Self::Compacting => "compacting",
             Self::Ended => "ended",
             Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "waiting_for_input" => Self::WaitingForInput,
+            "processing" => Self::Processing,
+            "running_tool" => Self::RunningTool,
+            "compacting" => Self::Compacting,
+            "ended" => Self::Ended,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::WaitingForInput | Self::Processing | Self::RunningTool | Self::Compacting
+        )
+    }
+
+    pub fn display_priority(self) -> u8 {
+        match self {
+            Self::WaitingForInput => 5,
+            Self::RunningTool => 4,
+            Self::Processing => 3,
+            Self::Compacting => 2,
+            Self::Unknown => 1,
+            Self::Ended => 0,
         }
     }
 }
@@ -107,6 +138,20 @@ impl Snapshot {
 pub struct PersistedState {
     pub seq: u64,
     pub snapshot: Snapshot,
+    #[serde(default)]
+    pub sessions: Vec<PersistedSessionState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedSessionState {
+    pub key: String,
+    pub snapshot: Snapshot,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub last_activity_ts: u64,
+    #[serde(default)]
+    pub claude_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -43,6 +43,14 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
                 .unwrap_or("Tool execution completed")
                 .to_string(),
         ),
+        "PostToolUseFailure" => (
+            "Tool failed".to_string(),
+            event
+                .message
+                .clone()
+                .or_else(|| event.tool_name.clone())
+                .unwrap_or_else(|| "Tool execution failed".to_string()),
+        ),
         "PermissionRequest" => {
             unread = true;
             attention = Attention::High;
@@ -55,9 +63,51 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
                 ),
             )
         }
+        "PermissionDenied" => {
+            unread = true;
+            attention = Attention::Medium;
+            (
+                "Permission denied".to_string(),
+                event
+                    .message
+                    .clone()
+                    .or_else(|| event.tool_name.clone())
+                    .unwrap_or_else(|| "Tool execution was denied".to_string()),
+            )
+        }
         "PreCompact" => (
             "Compacting context".to_string(),
             "Preparing context window".to_string(),
+        ),
+        "PostCompact" => (
+            "Compaction finished".to_string(),
+            "Continuing work".to_string(),
+        ),
+        "Elicitation" => {
+            unread = true;
+            attention = Attention::High;
+            (
+                "Awaiting input".to_string(),
+                event
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "MCP server requested input".to_string()),
+            )
+        }
+        "ElicitationResult" => (
+            "Input received".to_string(),
+            event
+                .message
+                .clone()
+                .unwrap_or_else(|| "Continuing after user input".to_string()),
+        ),
+        "SubagentStart" => (
+            "Subagent running".to_string(),
+            event
+                .message
+                .as_deref()
+                .unwrap_or("Delegated task in progress")
+                .to_string(),
         ),
         "Stop" => {
             unread = true;
@@ -71,20 +121,35 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
                     .to_string(),
             )
         }
-        "SubagentStop" => (
-            "Subagent finished".to_string(),
-            event
-                .message
-                .as_deref()
-                .unwrap_or("Latest subagent task completed")
-                .to_string(),
-        ),
+        "SubagentStop" => {
+            status = preserve_activity_status(current, RunStatus::Processing);
+            (
+                "Subagent finished".to_string(),
+                event
+                    .message
+                    .as_deref()
+                    .unwrap_or("Latest subagent task completed")
+                    .to_string(),
+            )
+        }
         "SessionEnd" => {
             unread = true;
             attention = Attention::Medium;
             (
                 "Session ended".to_string(),
                 "Workspace session ended".to_string(),
+            )
+        }
+        "StopFailure" => {
+            unread = true;
+            attention = Attention::High;
+            (
+                "Response failed".to_string(),
+                event
+                    .message
+                    .as_deref()
+                    .unwrap_or("Claude stopped due to an API or runtime error")
+                    .to_string(),
             )
         }
         "Notification" => normalize_notification(event, current, &workspace),
@@ -107,6 +172,15 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
         ts: event.recv_ts,
         unread,
         attention,
+    }
+}
+
+fn preserve_activity_status(current: &Snapshot, fallback: RunStatus) -> RunStatus {
+    let current = RunStatus::from_str(&current.status);
+    if current.is_active() {
+        current
+    } else {
+        fallback
     }
 }
 
@@ -143,13 +217,20 @@ fn map_status(event: &str) -> RunStatus {
     match event {
         "UserPromptSubmit" => RunStatus::Processing,
         "PreCompact" => RunStatus::Compacting,
+        "PostCompact" => RunStatus::Processing,
         "SessionStart" => RunStatus::Unknown,
         "SessionEnd" => RunStatus::Ended,
         "PreToolUse" => RunStatus::RunningTool,
         "PostToolUse" => RunStatus::Processing,
+        "PostToolUseFailure" => RunStatus::Processing,
         "PermissionRequest" => RunStatus::WaitingForInput,
+        "PermissionDenied" => RunStatus::WaitingForInput,
+        "Elicitation" => RunStatus::WaitingForInput,
+        "ElicitationResult" => RunStatus::Processing,
+        "SubagentStart" => RunStatus::Processing,
         "Stop" => RunStatus::Unknown,
-        "SubagentStop" => RunStatus::Unknown,
+        "StopFailure" => RunStatus::WaitingForInput,
+        "SubagentStop" => RunStatus::Processing,
         "Notification" => RunStatus::Unknown,
         _ => RunStatus::Unknown,
     }
@@ -190,6 +271,9 @@ pub fn materially_equal(a: &Snapshot, b: &Snapshot) -> bool {
         && a.detail == b.detail
         && a.workspace == b.workspace
         && a.session_id == b.session_id
+        && a.unread == b.unread
+        && a.attention == b.attention
+        && a.permission_mode == b.permission_mode
 }
 
 #[cfg(test)]
@@ -226,6 +310,7 @@ mod tests {
             tool_use_id: Some("tool-1".into()),
             permission_mode: "default".into(),
             recv_ts: 10,
+            claude_pid: None,
         };
 
         let snapshot = normalize(&event, &current);
@@ -247,6 +332,7 @@ mod tests {
             tool_use_id: None,
             permission_mode: "default".into(),
             recv_ts: 10,
+            claude_pid: None,
         };
 
         let snapshot = apply_notification_status(normalize(&event, &current), &current, &event);
@@ -272,6 +358,7 @@ mod tests {
             tool_use_id: None,
             permission_mode: "default".into(),
             recv_ts: 10,
+            claude_pid: None,
         }
     }
 
@@ -286,7 +373,7 @@ mod tests {
     fn subagent_stop_maps_to_unknown_idle() {
         let current = Snapshot::empty(1);
         let snapshot = normalize(&make_event("SubagentStop"), &current);
-        assert_eq!(snapshot.status, "unknown");
+        assert_eq!(snapshot.status, "processing");
     }
 
     #[test]
@@ -312,5 +399,23 @@ mod tests {
         event.tool_name = Some("Write".into());
         let snapshot = normalize(&event, &current);
         assert_eq!(snapshot.status, "running_tool");
+    }
+
+    #[test]
+    fn stop_failure_maps_to_waiting() {
+        let current = Snapshot::empty(1);
+        let snapshot = normalize(&make_event("StopFailure"), &current);
+        assert_eq!(snapshot.status, "waiting_for_input");
+    }
+
+    #[test]
+    fn materially_equal_detects_unread_change() {
+        let mut a = Snapshot::empty(1);
+        let mut b = Snapshot::empty(1);
+        b.unread = true;
+        assert!(!materially_equal(&a, &b));
+
+        a.unread = true;
+        assert!(materially_equal(&a, &b));
     }
 }

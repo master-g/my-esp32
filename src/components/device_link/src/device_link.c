@@ -68,6 +68,7 @@ static const char *capabilities[] = {
     "wifi.profile.add",
     "wifi.profile.remove",
     "claude.update",
+    "claude.heartbeat",
     "claude.approve",
     "claude.approval.request",
     "claude.approval.dismiss",
@@ -730,6 +731,11 @@ static void handle_event_frame(const cJSON *root)
         } else {
             ESP_LOGW(TAG, "claude.update: parse failed (0x%x)", (unsigned)err);
         }
+        return;
+    }
+
+    if (strcmp(method->valuestring, "claude.heartbeat") == 0) {
+        claude_service_note_transport_alive();
         return;
     }
 
