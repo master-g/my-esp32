@@ -101,6 +101,15 @@ enum Command {
         #[command(subcommand)]
         command: ChibiCommand,
     },
+    #[command(
+        about = "Satoshi Slot key management",
+        subcommand_required = true,
+        arg_required_else_help = true
+    )]
+    Slot {
+        #[command(subcommand)]
+        command: SlotCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -249,6 +258,18 @@ enum ChibiCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SlotCommand {
+    #[command(about = "Export the saved hit record (WIF private key) from the device")]
+    Export {
+        #[arg(
+            long,
+            help = "Use a specific serial port instead of autodiscovery or the running agent"
+        )]
+        port: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -286,6 +307,7 @@ async fn main() -> Result<()> {
         Command::UninstallLaunchd => uninstall_launchd(),
         Command::InstallHooks(args) => install_hooks(args),
         Command::Chibi { command } => run_chibi_command(command).await,
+        Command::Slot { command } => run_slot_command(command).await,
     }
 }
 
@@ -316,6 +338,50 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
             )
             .await?;
             print_json(&result)
+        }
+    }
+}
+
+async fn run_slot_command(command: SlotCommand) -> Result<()> {
+    match command {
+        SlotCommand::Export { port } => {
+            let result = run_request(
+                port.as_deref(),
+                RpcRequest {
+                    method: "slot.export_hit".into(),
+                    params: json!({}),
+                },
+            )
+            .await?;
+
+            if let Some(wif) = result.get("wif").and_then(|v| v.as_str()) {
+                let label = result
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let hash160 = result
+                    .get("hash160")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let is_self_test = result
+                    .get("is_self_test")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                eprintln!("=== Satoshi Slot Hit Record ===");
+                eprintln!("Label:     {label}");
+                eprintln!("Hash160:   {hash160}");
+                eprintln!("Self-test: {is_self_test}");
+                eprintln!();
+                println!("{wif}");
+                eprintln!();
+                eprintln!("SECURITY: This is a Bitcoin private key in WIF format.");
+                eprintln!("          Import it into a wallet immediately and");
+                eprintln!("          transfer any funds to an address you control.");
+            } else {
+                print_json(&result)?;
+            }
+            Ok(())
         }
     }
 }

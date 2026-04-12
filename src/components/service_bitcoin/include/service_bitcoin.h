@@ -40,6 +40,18 @@ typedef struct {
     bool is_self_test_hit;
 } slot_snapshot_t;
 
+#define SLOT_WIF_MAX_LEN 53
+
+typedef struct {
+    bool valid;
+    bool is_self_test;
+    uint32_t created_at_epoch_s;
+    uint16_t label_id;
+    uint8_t kind;
+    uint8_t hash160[20];
+    char wif[SLOT_WIF_MAX_LEN];
+} slot_hit_export_t;
+
 esp_err_t bitcoin_service_init(void);
 void bitcoin_service_get_slot_snapshot(slot_snapshot_t *out);
 esp_err_t bitcoin_service_start_slot(slot_mode_t mode);
@@ -48,5 +60,6 @@ void bitcoin_service_reset_slot_counters(void);
 void bitcoin_service_acknowledge_hit(void);
 bool bitcoin_service_slot_has_real_hit(void);
 const char *bitcoin_service_label_for_id(uint16_t label_id);
+esp_err_t bitcoin_service_read_hit_record(slot_hit_export_t *out);
 
 #endif

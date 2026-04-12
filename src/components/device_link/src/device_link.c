@@ -24,6 +24,9 @@
 #include "service_claude.h"
 #include "service_time.h"
 #include "service_weather.h"
+#include "service_bitcoin.h"
+
+#include "mbedtls/platform_util.h"
 
 #include "event_bus.h"
 
@@ -74,6 +77,7 @@ static const char *capabilities[] = {
     "claude.approval.dismiss",
     "claude.approval.resolved",
     "home.screensaver",
+    "slot.export_hit",
 };
 
 static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
@@ -936,6 +940,37 @@ static void handle_request_frame(const cJSON *root)
             return;
         }
         send_response_ok(id->valuestring, cJSON_CreateObject());
+        return;
+    }
+
+    if (strcmp(method->valuestring, "slot.export_hit") == 0) {
+        slot_hit_export_t hit = {0};
+        esp_err_t err = bitcoin_service_read_hit_record(&hit);
+
+        if (err != ESP_OK) {
+            send_response_error(id->valuestring, "no_hit_record",
+                                err == ESP_ERR_NVS_NOT_FOUND ? "no hit record found"
+                                                             : esp_err_to_name(err));
+            return;
+        }
+
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddStringToObject(result, "wif", hit.wif);
+        cJSON_AddStringToObject(result, "label", bitcoin_service_label_for_id(hit.label_id));
+        cJSON_AddBoolToObject(result, "is_self_test", hit.is_self_test);
+        cJSON_AddNumberToObject(result, "created_at", (double)hit.created_at_epoch_s);
+
+        {
+            char hash160_hex[41] = {0};
+            size_t k;
+            for (k = 0; k < sizeof(hit.hash160); k++) {
+                snprintf(hash160_hex + k * 2, 3, "%02x", hit.hash160[k]);
+            }
+            cJSON_AddStringToObject(result, "hash160", hash160_hex);
+        }
+
+        mbedtls_platform_zeroize(&hit, sizeof(hit));
+        send_response_ok(id->valuestring, result);
         return;
     }
 

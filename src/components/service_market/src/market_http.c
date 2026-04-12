@@ -95,3 +95,25 @@ esp_err_t market_http_get_json(const char *url, size_t capacity, char **out_body
     *out_body = payload.buffer;
     return ESP_OK;
 }
+
+int32_t market_scale_double(double value, uint32_t factor)
+{
+    double scaled = value * (double)factor;
+
+    if (scaled >= 0.0) {
+        return (int32_t)(scaled + 0.5);
+    }
+
+    return (int32_t)(scaled - 0.5);
+}
+
+uint32_t market_scale_positive_double(double value, uint32_t factor)
+{
+    double scaled = value * (double)factor;
+
+    if (scaled <= 0.0) {
+        return 0;
+    }
+
+    return (uint32_t)(scaled + 0.5);
+}

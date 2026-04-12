@@ -12,28 +12,6 @@
 #define MARKET_BINANCE_SUMMARY_CAPACITY 4096
 #define MARKET_BINANCE_CANDLES_CAPACITY 16384
 
-static int32_t scale_double(double value, uint32_t factor)
-{
-    double scaled = value * (double)factor;
-
-    if (scaled >= 0.0) {
-        return (int32_t)(scaled + 0.5);
-    }
-
-    return (int32_t)(scaled - 0.5);
-}
-
-static uint32_t scale_positive_double(double value, uint32_t factor)
-{
-    double scaled = value * (double)factor;
-
-    if (scaled <= 0.0) {
-        return 0;
-    }
-
-    return (uint32_t)(scaled + 0.5);
-}
-
 static const char *market_pair_symbol(market_pair_id_t pair)
 {
     switch (pair) {
@@ -87,8 +65,8 @@ static esp_err_t parse_summary_body(const char *body, market_feed_summary_t *out
                             "summary fields missing");
     }
 
-    out->last_price_scaled = scale_double(strtod(last_price_str, NULL), 10000U);
-    out->change_bp = scale_double(strtod(change_percent_str, NULL), 100U);
+    out->last_price_scaled = market_scale_double(strtod(last_price_str, NULL), 10000U);
+    out->change_bp = market_scale_double(strtod(change_percent_str, NULL), 100U);
 
     cJSON_Delete(root);
     return ESP_OK;
@@ -108,8 +86,11 @@ static esp_err_t parse_candles_body(const char *body, market_candle_window_t *ou
     root = cJSON_Parse(body);
     ESP_RETURN_ON_FALSE(root != NULL, ESP_ERR_INVALID_RESPONSE, "market_feed_binance",
                         "candle JSON parse failed");
-    ESP_RETURN_ON_FALSE(cJSON_IsArray(root), ESP_ERR_INVALID_RESPONSE, "market_feed_binance",
-                        "candle root is not an array");
+    if (!cJSON_IsArray(root)) {
+        cJSON_Delete(root);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_INVALID_RESPONSE, "market_feed_binance",
+                            "candle root is not an array");
+    }
 
     memset(out, 0, sizeof(*out));
     count = cJSON_GetArraySize(root);
@@ -146,11 +127,12 @@ static esp_err_t parse_candles_body(const char *body, market_candle_window_t *ou
         }
 
         out->candles[i].open_time_epoch_s = (uint32_t)(cJSON_GetNumberValue(open_time) / 1000.0);
-        out->candles[i].open_scaled = scale_double(strtod(open_str, NULL), 10000U);
-        out->candles[i].high_scaled = scale_double(strtod(high_str, NULL), 10000U);
-        out->candles[i].low_scaled = scale_double(strtod(low_str, NULL), 10000U);
-        out->candles[i].close_scaled = scale_double(strtod(close_str, NULL), 10000U);
-        out->candles[i].volume_scaled = scale_positive_double(strtod(volume_str, NULL), 100U);
+        out->candles[i].open_scaled = market_scale_double(strtod(open_str, NULL), 10000U);
+        out->candles[i].high_scaled = market_scale_double(strtod(high_str, NULL), 10000U);
+        out->candles[i].low_scaled = market_scale_double(strtod(low_str, NULL), 10000U);
+        out->candles[i].close_scaled = market_scale_double(strtod(close_str, NULL), 10000U);
+        out->candles[i].volume_scaled =
+            market_scale_positive_double(strtod(volume_str, NULL), 100U);
     }
 
     out->count = (uint16_t)count;

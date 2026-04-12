@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "mbedtls/bignum.h"
 #include "mbedtls/ecp.h"
+#include "mbedtls/platform_util.h"
 #include "mbedtls/private/sha256.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -212,6 +213,8 @@ static esp_err_t slot_compute_hash160(const uint8_t *privkey, bool compressed, u
     }
 
 cleanup:
+    mbedtls_platform_zeroize(sha256, sizeof(sha256));
+    mbedtls_platform_zeroize(pubkey, sizeof(pubkey));
     mbedtls_ecp_point_free(&pub);
     mbedtls_mpi_free(&priv);
     return err;
@@ -246,6 +249,110 @@ static esp_err_t slot_write_hit_record(const char *key, const slot_hit_record_t 
     return err;
 }
 
+static esp_err_t slot_read_hit_record(const char *key, slot_hit_record_t *record)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err;
+    size_t len = sizeof(*record);
+
+    ESP_RETURN_ON_FALSE(key != NULL, ESP_ERR_INVALID_ARG, TAG, "nvs key required");
+    ESP_RETURN_ON_FALSE(record != NULL, ESP_ERR_INVALID_ARG, TAG, "record required");
+
+    err = nvs_open("slot", NVS_READONLY, &handle);
+    ESP_RETURN_ON_ERROR(err, TAG, "slot nvs open failed");
+    err = nvs_get_blob(handle, key, record, &len);
+    nvs_close(handle);
+
+    if (err == ESP_OK && len != sizeof(*record)) {
+        memset(record, 0, sizeof(*record));
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return err;
+}
+
+static int slot_base58_encode(const uint8_t *input, size_t input_len, char *output,
+                              size_t output_len)
+{
+    static const char alphabet[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    uint8_t temp[56] = {0};
+    size_t leading_zeros = 0;
+    size_t encoded_len = 0;
+    size_t total;
+    size_t i;
+    size_t j;
+
+    while (leading_zeros < input_len && input[leading_zeros] == 0) {
+        leading_zeros++;
+    }
+
+    for (i = leading_zeros; i < input_len; i++) {
+        int carry = input[i];
+        for (j = 0; j < encoded_len; j++) {
+            carry += 256 * temp[j];
+            temp[j] = carry % 58;
+            carry /= 58;
+        }
+        while (carry > 0) {
+            if (encoded_len >= sizeof(temp)) {
+                return -1;
+            }
+            temp[encoded_len++] = carry % 58;
+            carry /= 58;
+        }
+    }
+
+    total = leading_zeros + encoded_len;
+    if (total + 1 > output_len) {
+        return -1;
+    }
+
+    for (i = 0; i < leading_zeros; i++) {
+        output[i] = '1';
+    }
+    for (i = 0; i < encoded_len; i++) {
+        output[leading_zeros + i] = alphabet[temp[encoded_len - 1 - i]];
+    }
+    output[total] = '\0';
+    return (int)total;
+}
+
+static esp_err_t slot_encode_wif(const uint8_t privkey[32], slot_fingerprint_kind_t kind,
+                                 char *wif_out, size_t wif_len)
+{
+    uint8_t payload[34];
+    uint8_t hash1[32];
+    uint8_t hash2[32];
+    uint8_t full[38];
+    size_t payload_len;
+    int ret;
+
+    payload[0] = 0x80;
+    memcpy(payload + 1, privkey, 32);
+
+    if (kind == SLOT_FP_P2PKH_COMPRESSED) {
+        payload[33] = 0x01;
+        payload_len = 34;
+    } else {
+        payload_len = 33;
+    }
+
+    mbedtls_sha256(payload, payload_len, hash1, 0);
+    mbedtls_sha256(hash1, 32, hash2, 0);
+
+    memcpy(full, payload, payload_len);
+    memcpy(full + payload_len, hash2, 4);
+
+    ret = slot_base58_encode(full, payload_len + 4, wif_out, wif_len);
+
+    mbedtls_platform_zeroize(payload, sizeof(payload));
+    mbedtls_platform_zeroize(hash1, sizeof(hash1));
+    mbedtls_platform_zeroize(hash2, sizeof(hash2));
+    mbedtls_platform_zeroize(full, sizeof(full));
+
+    return (ret > 0) ? ESP_OK : ESP_FAIL;
+}
+
 static void slot_apply_hit_locked(slot_mode_t mode, const uint8_t *privkey,
                                   const slot_target_entry_t *target, const uint8_t *hash160,
                                   slot_fingerprint_kind_t kind)
@@ -274,32 +381,38 @@ static void slot_apply_hit_locked(slot_mode_t mode, const uint8_t *privkey,
     if (persist_err == ESP_OK && mode == SLOT_MODE_NORMAL) {
         s_has_real_hit = true;
     }
+    mbedtls_platform_zeroize(&record, sizeof(record));
 }
 
-static bool slot_process_candidate_locked(slot_mode_t mode, const uint8_t *privkey)
-{
+typedef struct {
+    bool hit;
+    slot_fingerprint_kind_t kind;
     uint8_t hash160[20];
     const slot_target_entry_t *target;
+} slot_candidate_result_t;
 
-    if (slot_compute_hash160(privkey, false, hash160) == ESP_OK) {
-        target = slot_find_target(mode, hash160, SLOT_FP_P2PKH_UNCOMPRESSED);
-        slot_write_prefix(&s_snapshot, hash160, SLOT_FP_P2PKH_UNCOMPRESSED);
-        if (target != NULL) {
-            slot_apply_hit_locked(mode, privkey, target, hash160, SLOT_FP_P2PKH_UNCOMPRESSED);
-            return true;
+static void slot_evaluate_candidate(slot_mode_t mode, const uint8_t *privkey,
+                                    slot_candidate_result_t *result)
+{
+    memset(result, 0, sizeof(*result));
+
+    if (slot_compute_hash160(privkey, false, result->hash160) == ESP_OK) {
+        result->kind = SLOT_FP_P2PKH_UNCOMPRESSED;
+        result->target = slot_find_target(mode, result->hash160, SLOT_FP_P2PKH_UNCOMPRESSED);
+        if (result->target != NULL) {
+            result->hit = true;
+            return;
         }
     }
 
-    if (slot_compute_hash160(privkey, true, hash160) == ESP_OK) {
-        target = slot_find_target(mode, hash160, SLOT_FP_P2PKH_COMPRESSED);
-        slot_write_prefix(&s_snapshot, hash160, SLOT_FP_P2PKH_COMPRESSED);
-        if (target != NULL) {
-            slot_apply_hit_locked(mode, privkey, target, hash160, SLOT_FP_P2PKH_COMPRESSED);
-            return true;
+    if (slot_compute_hash160(privkey, true, result->hash160) == ESP_OK) {
+        result->kind = SLOT_FP_P2PKH_COMPRESSED;
+        result->target = slot_find_target(mode, result->hash160, SLOT_FP_P2PKH_COMPRESSED);
+        if (result->target != NULL) {
+            result->hit = true;
+            return;
         }
     }
-
-    return false;
 }
 
 static void slot_update_rate_locked(void)
@@ -415,33 +528,70 @@ static void bitcoin_service_task(void *arg)
             publish_slot_event();
         }
 
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        if (s_worker_should_run && s_snapshot.state == SLOT_STATE_RUNNING) {
-            uint8_t candidate[32];
-            uint32_t i = 0;
-            const slot_mode_t mode = s_snapshot.mode;
+        /* Read state under short lock, then release for expensive ECC work */
+        {
+            bool should_run;
+            slot_mode_t batch_mode;
 
-            for (i = 0; i < SLOT_BATCH_SIZE && s_snapshot.state == SLOT_STATE_RUNNING; ++i) {
-                if (mode == SLOT_MODE_SELFTEST) {
-                    memcpy(candidate, s_selftest_privkey, sizeof(candidate));
-                } else {
-                    esp_fill_random(candidate, sizeof(candidate));
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
+            should_run = s_worker_should_run && s_snapshot.state == SLOT_STATE_RUNNING;
+            batch_mode = s_snapshot.mode;
+            xSemaphoreGive(s_mutex);
+
+            if (should_run) {
+                uint8_t candidate[32] = {0};
+                slot_candidate_result_t result = {0};
+                uint8_t hit_privkey[32] = {0};
+                const slot_target_entry_t *hit_target = NULL;
+                slot_fingerprint_kind_t hit_kind = SLOT_FP_P2PKH_UNCOMPRESSED;
+                uint8_t hit_h160[20] = {0};
+                uint32_t batch_count = 0;
+                uint32_t i;
+
+                for (i = 0; i < SLOT_BATCH_SIZE; ++i) {
+                    if (batch_mode == SLOT_MODE_SELFTEST) {
+                        memcpy(candidate, s_selftest_privkey, sizeof(candidate));
+                    } else {
+                        esp_fill_random(candidate, sizeof(candidate));
+                    }
+
+                    batch_count++;
+                    slot_evaluate_candidate(batch_mode, candidate, &result);
+
+                    if (result.hit) {
+                        hit_target = result.target;
+                        hit_kind = result.kind;
+                        memcpy(hit_h160, result.hash160, sizeof(hit_h160));
+                        memcpy(hit_privkey, candidate, sizeof(hit_privkey));
+                        break;
+                    }
+                    if (batch_mode == SLOT_MODE_SELFTEST) {
+                        break;
+                    }
                 }
 
-                s_snapshot.attempts++;
-                if (slot_process_candidate_locked(mode, candidate)) {
-                    s_worker_should_run = false;
-                    break;
+                mbedtls_platform_zeroize(candidate, sizeof(candidate));
+
+                /* Short lock to apply results */
+                xSemaphoreTake(s_mutex, portMAX_DELAY);
+                if (s_snapshot.state == SLOT_STATE_RUNNING) {
+                    s_snapshot.attempts += batch_count;
+                    slot_write_prefix(&s_snapshot, result.hash160, result.kind);
+                    if (hit_target != NULL) {
+                        slot_apply_hit_locked(batch_mode, hit_privkey, hit_target, hit_h160,
+                                              hit_kind);
+                        s_worker_should_run = false;
+                    }
+                    slot_update_rate_locked();
                 }
-                if (mode == SLOT_MODE_SELFTEST) {
-                    break;
-                }
+                xSemaphoreGive(s_mutex);
+
+                mbedtls_platform_zeroize(hit_privkey, sizeof(hit_privkey));
+                mbedtls_platform_zeroize(hit_h160, sizeof(hit_h160));
+                mbedtls_platform_zeroize(&result, sizeof(result));
+                did_work = true;
             }
-
-            slot_update_rate_locked();
-            did_work = true;
         }
-        xSemaphoreGive(s_mutex);
 
         if (did_work) {
             publish_slot_event();
@@ -593,4 +743,37 @@ const char *bitcoin_service_label_for_id(uint16_t label_id)
     default:
         return "--";
     }
+}
+
+esp_err_t bitcoin_service_read_hit_record(slot_hit_export_t *out)
+{
+    slot_hit_record_t record = {0};
+    esp_err_t err;
+
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "export out required");
+    memset(out, 0, sizeof(*out));
+
+    err = slot_read_hit_record("slot_real_hit_latest", &record);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    out->valid = true;
+    out->is_self_test = record.is_self_test;
+    out->created_at_epoch_s = record.created_at_epoch_s;
+    out->label_id = record.label_id;
+    out->kind = record.kind;
+    memcpy(out->hash160, record.hash160, sizeof(out->hash160));
+
+    err = slot_encode_wif(record.private_key, (slot_fingerprint_kind_t)record.kind, out->wif,
+                          sizeof(out->wif));
+
+    mbedtls_platform_zeroize(&record, sizeof(record));
+
+    if (err != ESP_OK) {
+        memset(out, 0, sizeof(*out));
+        return err;
+    }
+
+    return ESP_OK;
 }

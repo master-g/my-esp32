@@ -13,8 +13,10 @@ idf_component_register(
         esp_driver_usb_serial_jtag
         esp_system
         esp_wifi
+        mbedtls
         net_manager
         nvs_flash
+        service_bitcoin
         service_claude
         service_time
         service_weather

@@ -106,8 +106,12 @@ static void slot_format_detail(const slot_snapshot_t *snapshot, const char *labe
                  "Normal scan needs encrypted storage. Self-test still works.");
         break;
     case SLOT_STATE_HIT:
-        snprintf(out, out_size, "%s %s. Review the record and confirm.",
-                 snapshot->is_self_test_hit ? "Self-test matched" : "Matched", label_name);
+        if (snapshot->is_self_test_hit) {
+            snprintf(out, out_size, "Self-test matched %s. Confirm to reset.", label_name);
+        } else {
+            snprintf(out, out_size, "Matched %s. Key %s. Confirm to acknowledge.", label_name,
+                     snapshot->hit_persisted ? "persisted" : "NOT persisted");
+        }
         break;
     case SLOT_STATE_ERROR:
         snprintf(out, out_size, "%s", "Derive or persist pipeline failed.");
@@ -150,9 +154,13 @@ static void slot_format_panel_text(const slot_snapshot_t *snapshot, const char *
         }
         break;
     case SLOT_STATE_HIT:
-        snprintf(out, out_size, "%s\n%s\nsaved: %s",
-                 snapshot->is_self_test_hit ? "SELF-TEST HIT" : "REAL HIT", label_name,
-                 snapshot->hit_persisted ? "yes" : "no");
+        if (snapshot->is_self_test_hit) {
+            snprintf(out, out_size, "SELF-TEST HIT\n%s\nsaved: %s", label_name,
+                     snapshot->hit_persisted ? "yes" : "no");
+        } else {
+            snprintf(out, out_size, "REAL HIT\n%s\nsaved: %s\n\nesp32dash slot export", label_name,
+                     snapshot->hit_persisted ? "yes" : "no");
+        }
         break;
     case SLOT_STATE_STORAGE_UNAVAILABLE:
         snprintf(out, out_size, "%s", "Normal scan locked.\nEncrypted storage is not ready.");

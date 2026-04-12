@@ -12,28 +12,6 @@
 #define MARKET_OKX_SUMMARY_CAPACITY 4096
 #define MARKET_OKX_CANDLES_CAPACITY 16384
 
-static int32_t scale_double(double value, uint32_t factor)
-{
-    double scaled = value * (double)factor;
-
-    if (scaled >= 0.0) {
-        return (int32_t)(scaled + 0.5);
-    }
-
-    return (int32_t)(scaled - 0.5);
-}
-
-static uint32_t scale_positive_double(double value, uint32_t factor)
-{
-    double scaled = value * (double)factor;
-
-    if (scaled <= 0.0) {
-        return 0;
-    }
-
-    return (uint32_t)(scaled + 0.5);
-}
-
 static const char *market_pair_symbol(market_pair_id_t pair)
 {
     switch (pair) {
@@ -111,8 +89,8 @@ static esp_err_t parse_summary_body(const char *body, market_feed_summary_t *out
         change_percent = ((last_value - open24h_value) / open24h_value) * 100.0;
     }
 
-    out->last_price_scaled = scale_double(last_value, 10000U);
-    out->change_bp = scale_double(change_percent, 100U);
+    out->last_price_scaled = market_scale_double(last_value, 10000U);
+    out->change_bp = market_scale_double(change_percent, 100U);
 
     cJSON_Delete(root);
     return ESP_OK;
@@ -174,11 +152,12 @@ static esp_err_t parse_candles_body(const char *body, market_candle_window_t *ou
 
         out->candles[dst_idx].open_time_epoch_s =
             (uint32_t)(strtod(cJSON_GetStringValue(open_time), NULL) / 1000.0);
-        out->candles[dst_idx].open_scaled = scale_double(strtod(open_str, NULL), 10000U);
-        out->candles[dst_idx].high_scaled = scale_double(strtod(high_str, NULL), 10000U);
-        out->candles[dst_idx].low_scaled = scale_double(strtod(low_str, NULL), 10000U);
-        out->candles[dst_idx].close_scaled = scale_double(strtod(close_str, NULL), 10000U);
-        out->candles[dst_idx].volume_scaled = scale_positive_double(strtod(volume_str, NULL), 100U);
+        out->candles[dst_idx].open_scaled = market_scale_double(strtod(open_str, NULL), 10000U);
+        out->candles[dst_idx].high_scaled = market_scale_double(strtod(high_str, NULL), 10000U);
+        out->candles[dst_idx].low_scaled = market_scale_double(strtod(low_str, NULL), 10000U);
+        out->candles[dst_idx].close_scaled = market_scale_double(strtod(close_str, NULL), 10000U);
+        out->candles[dst_idx].volume_scaled =
+            market_scale_positive_double(strtod(volume_str, NULL), 100U);
     }
 
     out->count = (uint16_t)count;
