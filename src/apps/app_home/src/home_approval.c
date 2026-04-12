@@ -6,6 +6,7 @@
 #include "bsp_board_config.h"
 #include "device_link.h"
 #include "home_internal.h"
+#include "ui_theme.h"
 #include "ui_fonts.h"
 
 static void approval_btn_cb(lv_event_t *e)
@@ -69,14 +70,15 @@ void home_approval_create(home_approval_t *approval, lv_obj_t *root)
 
     approval->tool_label = lv_label_create(approval->overlay);
     lv_obj_set_style_text_font(approval->tool_label, ui_font_text_11(), 0);
-    lv_obj_set_style_text_color(approval->tool_label, lv_color_hex(0xe9e0cf), 0);
+    lv_obj_set_style_text_color(approval->tool_label, ui_theme_color(UI_THEME_COLOR_TEXT_PRIMARY),
+                                0);
     lv_label_set_long_mode(approval->tool_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(approval->tool_label, 132);
     lv_obj_align(approval->tool_label, LV_ALIGN_TOP_LEFT, 0, 8);
 
     approval->desc_label = lv_label_create(approval->overlay);
     lv_obj_set_style_text_font(approval->desc_label, ui_font_text_11(), 0);
-    lv_obj_set_style_text_color(approval->desc_label, lv_color_hex(0x8899a6), 0);
+    lv_obj_set_style_text_color(approval->desc_label, ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
     lv_obj_set_width(approval->desc_label, BSP_LCD_H_RES - 32 - 140);
     lv_label_set_long_mode(approval->desc_label, LV_LABEL_LONG_DOT);
     lv_obj_align(approval->desc_label, LV_ALIGN_TOP_LEFT, 140, 10);

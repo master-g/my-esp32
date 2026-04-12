@@ -8,6 +8,7 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
+        core_event_bus
         core_system_state
         core_types
         esp_driver_gpio
@@ -18,4 +19,5 @@ idf_component_register(
         esp_timer
         espressif__esp_lcd_axs15231b
         lvgl__lvgl
+        ui_theme
 )

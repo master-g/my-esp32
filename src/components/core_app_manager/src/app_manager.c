@@ -18,6 +18,12 @@
 #define UI_CONTROL_NOTIFY_INDEX 0
 
 typedef struct {
+    app_event_type_t type;
+    bool has_touch_payload;
+    app_touch_event_t touch;
+} ui_event_queue_item_t;
+
+typedef struct {
     app_descriptor_t descriptor;
     bool in_use;
     bool root_created;
@@ -59,6 +65,7 @@ static uint16_t next_ui_control_request_id(void);
 static uint32_t pack_ui_control_result(uint16_t request_id, esp_err_t err);
 static uint16_t unpack_ui_control_request_id(uint32_t notification_value);
 static esp_err_t unpack_ui_control_result(uint32_t notification_value);
+static app_id_t swipe_target_for_touch(app_id_t current_app, const app_touch_event_t *touch);
 
 static esp_err_t switch_to_locked(app_id_t app_id)
 {
@@ -149,6 +156,39 @@ static uint16_t unpack_ui_control_request_id(uint32_t notification_value)
 static esp_err_t unpack_ui_control_result(uint32_t notification_value)
 {
     return (esp_err_t)(notification_value & 0xFFFFU);
+}
+
+static app_id_t swipe_target_for_touch(app_id_t current_app, const app_touch_event_t *touch)
+{
+    static const app_id_t app_order[] = {
+        APP_ID_HOME,
+        APP_ID_TRADING,
+        APP_ID_SATOSHI_SLOT,
+    };
+    size_t i = 0;
+
+    if (touch == NULL) {
+        return APP_ID_INVALID;
+    }
+
+    for (i = 0; i < sizeof(app_order) / sizeof(app_order[0]); ++i) {
+        if (app_order[i] != current_app) {
+            continue;
+        }
+
+        if (touch->swipe == APP_TOUCH_SWIPE_LEFT && touch->edge == APP_TOUCH_EDGE_RIGHT &&
+            (i + 1U) < (sizeof(app_order) / sizeof(app_order[0]))) {
+            return app_order[i + 1U];
+        }
+
+        if (touch->swipe == APP_TOUCH_SWIPE_RIGHT && touch->edge == APP_TOUCH_EDGE_LEFT && i > 0U) {
+            return app_order[i - 1U];
+        }
+
+        return APP_ID_INVALID;
+    }
+
+    return APP_ID_INVALID;
 }
 
 static esp_err_t post_ui_control(const ui_control_request_t *request)
@@ -293,7 +333,7 @@ esp_err_t app_manager_init(void)
     }
 
     s_foreground_app = APP_ID_INVALID;
-    s_ui_event_queue = xQueueCreate(UI_EVENT_QUEUE_LEN, sizeof(app_event_type_t));
+    s_ui_event_queue = xQueueCreate(UI_EVENT_QUEUE_LEN, sizeof(ui_event_queue_item_t));
     s_ui_control_queue = xQueueCreate(UI_CONTROL_QUEUE_LEN, sizeof(ui_control_request_t));
     s_ui_control_request_seq = 0;
     ESP_RETURN_ON_FALSE(s_ui_event_queue != NULL, ESP_ERR_NO_MEM, TAG,
@@ -386,7 +426,7 @@ const app_descriptor_t *app_manager_get_descriptor(app_id_t app_id)
 
 void app_manager_on_event(const app_event_t *event, void *context)
 {
-    app_event_type_t event_type;
+    ui_event_queue_item_t queued_event = {0};
 
     (void)context;
     if (!s_initialized || event == NULL) {
@@ -397,15 +437,21 @@ void app_manager_on_event(const app_event_t *event, void *context)
         return;
     }
 
-    event_type = event->type;
-    if (xQueueSend(s_ui_event_queue, &event_type, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "ui event queue full, dropping %s", app_event_type_to_string(event_type));
+    queued_event.type = event->type;
+    if (event->type == APP_EVENT_TOUCH && event->payload != NULL) {
+        queued_event.has_touch_payload = true;
+        queued_event.touch = *(const app_touch_event_t *)event->payload;
+    }
+
+    if (xQueueSend(s_ui_event_queue, &queued_event, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "ui event queue full, dropping %s",
+                 app_event_type_to_string(queued_event.type));
     }
 }
 
 void app_manager_process_ui_events(void)
 {
-    app_event_type_t event_type;
+    ui_event_queue_item_t queued_event;
     const app_slot_t *slot = NULL;
     ui_control_request_t control_request;
 
@@ -422,12 +468,26 @@ void app_manager_process_ui_events(void)
         }
     }
 
-    while (xQueueReceive(s_ui_event_queue, &event_type, 0) == pdTRUE) {
+    while (xQueueReceive(s_ui_event_queue, &queued_event, 0) == pdTRUE) {
         slot = find_slot(s_foreground_app);
         if (slot != NULL) {
+            if (queued_event.type == APP_EVENT_TOUCH && queued_event.has_touch_payload) {
+                const app_id_t target =
+                    swipe_target_for_touch(s_foreground_app, &queued_event.touch);
+
+                if (target != APP_ID_INVALID) {
+                    esp_err_t err = switch_to_locked(target);
+
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "gesture switch failed: %s", esp_err_to_name(err));
+                    }
+                    continue;
+                }
+            }
+
             app_event_t event = {
-                .type = event_type,
-                .payload = NULL,
+                .type = queued_event.type,
+                .payload = queued_event.has_touch_payload ? &queued_event.touch : NULL,
             };
 
             dispatch_to_app(slot, &event);

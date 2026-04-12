@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "src/slot_ripemd160.c"
+        "src/service_bitcoin.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        core_event_bus
+        core_types
+        esp_timer
+        mbedtls
+        nvs_flash
+        power_policy
+)

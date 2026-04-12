@@ -35,7 +35,6 @@ void home_service_get_snapshot(home_snapshot_t *out)
         return;
     }
 
-    time_service_refresh_now();
     time_service_get_snapshot(&time_snap);
     weather_service_get_snapshot(&weather_snap);
     claude_service_get_snapshot(&claude_snap);

@@ -9,6 +9,7 @@
 #include "home_presenter.h"
 #include "service_claude.h"
 #include "service_home.h"
+#include "service_time.h"
 
 static const char *TAG = "home_runtime";
 
@@ -89,6 +90,9 @@ static void enter_screensaver(home_runtime_t *runtime, const home_present_model_
     if (runtime->time_refresh_timer != NULL) {
         lv_timer_pause(runtime->time_refresh_timer);
     }
+    if (runtime->snapshot_refresh_timer != NULL) {
+        lv_timer_pause(runtime->snapshot_refresh_timer);
+    }
     home_view_set_hidden(&runtime->view, true);
     home_screensaver_enter(&runtime->screensaver, model);
 }
@@ -104,6 +108,9 @@ static void exit_screensaver(home_runtime_t *runtime)
     home_view_on_screensaver_exit(&runtime->view);
     if (runtime->time_refresh_timer != NULL) {
         lv_timer_resume(runtime->time_refresh_timer);
+    }
+    if (runtime->snapshot_refresh_timer != NULL) {
+        lv_timer_resume(runtime->snapshot_refresh_timer);
     }
 }
 
@@ -123,16 +130,32 @@ static void screensaver_touch_exit_cb(void *ctx)
 static void time_refresh_cb(lv_timer_t *timer)
 {
     home_runtime_t *runtime = lv_timer_get_user_data(timer);
-    home_snapshot_t snapshot;
-    home_present_model_t model;
+    char time_text[9];
+    uint32_t epoch_s = 0;
 
     if (runtime == NULL || runtime->view.root == NULL ||
         home_screensaver_is_active(&runtime->screensaver)) {
         return;
     }
 
-    build_model(&snapshot, &model);
-    home_view_update_time(&runtime->view, model.time_text);
+    time_service_get_current_text(time_text, sizeof(time_text), &epoch_s);
+    home_view_update_time(&runtime->view, time_text);
+    if (epoch_s != runtime->last_snapshot_epoch_s) {
+        runtime->last_snapshot_epoch_s = epoch_s;
+        apply_current_snapshot(runtime);
+    }
+}
+
+static void snapshot_refresh_cb(lv_timer_t *timer)
+{
+    home_runtime_t *runtime = lv_timer_get_user_data(timer);
+
+    if (runtime == NULL || runtime->view.root == NULL ||
+        home_screensaver_is_active(&runtime->screensaver)) {
+        return;
+    }
+
+    apply_current_snapshot(runtime);
 }
 
 static void settings_btn_cb(lv_event_t *e)
@@ -181,10 +204,13 @@ lv_obj_t *home_runtime_create_root(home_runtime_t *runtime, lv_obj_t *parent)
                             runtime);
     }
     runtime->time_refresh_timer = lv_timer_create(time_refresh_cb, HOME_TIME_REFRESH_MS, runtime);
+    runtime->snapshot_refresh_timer =
+        lv_timer_create(snapshot_refresh_cb, HOME_SNAPSHOT_REFRESH_MS, runtime);
     home_screensaver_poke_activity(&runtime->screensaver);
 
     build_model(&snapshot, &model);
     runtime->was_connected = snapshot.claude_connected;
+    runtime->last_snapshot_epoch_s = 0;
     home_view_apply(&runtime->view, &model);
     return runtime->view.root;
 }
@@ -205,9 +231,13 @@ void home_runtime_resume(home_runtime_t *runtime)
     if (runtime->time_refresh_timer != NULL) {
         lv_timer_resume(runtime->time_refresh_timer);
     }
+    if (runtime->snapshot_refresh_timer != NULL) {
+        lv_timer_resume(runtime->snapshot_refresh_timer);
+    }
 
     build_model(&snapshot, &model);
     runtime->was_connected = snapshot.claude_connected;
+    runtime->last_snapshot_epoch_s = 0;
     home_view_apply(&runtime->view, &model);
 }
 
@@ -219,6 +249,9 @@ void home_runtime_suspend(home_runtime_t *runtime)
 
     if (runtime->time_refresh_timer != NULL) {
         lv_timer_pause(runtime->time_refresh_timer);
+    }
+    if (runtime->snapshot_refresh_timer != NULL) {
+        lv_timer_pause(runtime->snapshot_refresh_timer);
     }
     stop_unread_timer(runtime);
     home_view_suspend(&runtime->view);

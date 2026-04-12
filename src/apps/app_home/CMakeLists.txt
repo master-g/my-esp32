@@ -22,5 +22,6 @@ idf_component_register(
         device_link
         lvgl__lvgl
         service_home
+        ui_theme
         ui_fonts
 )

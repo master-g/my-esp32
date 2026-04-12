@@ -8,5 +8,6 @@ idf_component_register(
         esp_wifi
         lvgl__lvgl
         service_settings
+        ui_theme
         ui_fonts
 )

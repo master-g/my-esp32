@@ -1,8 +1,18 @@
 idf_component_register(
     SRCS
+        "src/market_feed_okx.c"
+        "src/market_http.c"
+        "src/market_feed_rest.c"
         "src/service_market.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
         core_types
+        core_event_bus
+        esp_http_client
+        cjson
+        mbedtls
+        net_manager
+        power_policy
+        esp_timer
 )

@@ -90,6 +90,12 @@ make monitor PORT=/dev/cu.usbmodem101
 
 The flash wrapper also does a small preflight check and will fail early if the selected serial device is already busy. If you intentionally want to skip that check, set `PORT_BUSY_OK=1`.
 
+## Secure Storage Note
+
+`Satoshi Slot` normal mode now relies on encrypted NVS instead of requiring flash encryption.
+
+The default firmware config enables ESP32-S3 HMAC-based NVS encryption with eFuse HMAC key slot `0`. On first boot, ESP-IDF may generate and burn that HMAC key if the slot is empty. This is a one-way per-device change, but it does not require flash encryption to be enabled.
+
 ## Current State
 
 The firmware side currently provides:

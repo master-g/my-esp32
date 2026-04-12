@@ -7,18 +7,19 @@
 #include "bsp_board_config.h"
 #include "lvgl.h"
 #include "service_settings.h"
+#include "ui_theme.h"
 #include "ui_fonts.h"
 
-#define SETTINGS_BG_COLOR 0x0f1418
-#define SETTINGS_RAIL_COLOR 0x141b20
-#define SETTINGS_PANEL_COLOR 0x1b2328
-#define SETTINGS_PANEL_ALT_COLOR 0x27333b
-#define SETTINGS_ACCENT_COLOR 0x315965
-#define SETTINGS_TEXT_COLOR 0xe4eef2
-#define SETTINGS_MUTED_COLOR 0x8fa5ad
-#define SETTINGS_DANGER_COLOR 0x7b3a3a
-#define SETTINGS_OK_COLOR 0x2f6341
-#define SETTINGS_WARNING_COLOR 0x8f6f2d
+#define SETTINGS_BG_COLOR ui_theme_color_hex(UI_THEME_COLOR_CANVAS_BG)
+#define SETTINGS_RAIL_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_PRIMARY)
+#define SETTINGS_PANEL_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_PRIMARY)
+#define SETTINGS_PANEL_ALT_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_SECONDARY)
+#define SETTINGS_ACCENT_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_ACTIVE)
+#define SETTINGS_TEXT_COLOR ui_theme_color_hex(UI_THEME_COLOR_TEXT_PRIMARY)
+#define SETTINGS_MUTED_COLOR ui_theme_color_hex(UI_THEME_COLOR_TEXT_MUTED)
+#define SETTINGS_DANGER_COLOR ui_theme_color_hex(UI_THEME_COLOR_STATUS_ERROR)
+#define SETTINGS_OK_COLOR ui_theme_color_hex(UI_THEME_COLOR_STATUS_SUCCESS)
+#define SETTINGS_WARNING_COLOR ui_theme_color_hex(UI_THEME_COLOR_STATUS_WARNING)
 #define SETTINGS_RAIL_W 128
 #define SETTINGS_STATUS_Y 6
 #define SETTINGS_BODY_Y 22

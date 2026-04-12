@@ -126,6 +126,32 @@ void time_service_refresh_now(void)
     }
 }
 
+void time_service_get_current_text(char *time_text, size_t time_text_size, uint32_t *epoch_s_out)
+{
+    time_t now = time(NULL);
+    struct tm tm_value;
+
+    if (epoch_s_out != NULL) {
+        *epoch_s_out = 0;
+    }
+
+    if (time_text == NULL || time_text_size == 0) {
+        return;
+    }
+
+    if (!time_service_is_valid() || now <= 1700000000) {
+        snprintf(time_text, time_text_size, "%s", "--:--:--");
+        return;
+    }
+
+    memset(&tm_value, 0, sizeof(tm_value));
+    localtime_r(&now, &tm_value);
+    strftime(time_text, time_text_size, "%H:%M:%S", &tm_value);
+    if (epoch_s_out != NULL) {
+        *epoch_s_out = (uint32_t)now;
+    }
+}
+
 static esp_err_t restore_from_rtc(void)
 {
     uint32_t epoch_s = 0;
@@ -269,8 +295,8 @@ esp_err_t time_service_start(void)
     ESP_RETURN_ON_FALSE(s_command_queue != NULL, ESP_ERR_NO_MEM, TAG,
                         "failed to create time queue");
     {
-        BaseType_t ret = xTaskCreatePinnedToCore(time_service_task, "time_service", 4096, NULL, 4,
-                                                  NULL, 1);
+        BaseType_t ret =
+            xTaskCreatePinnedToCore(time_service_task, "time_service", 4096, NULL, 4, NULL, 1);
         ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "time task create failed");
     }
     s_started = true;

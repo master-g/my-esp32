@@ -22,12 +22,18 @@
 #include "power_policy.h"
 #include "power_runtime.h"
 #include "service_claude.h"
+#include "service_bitcoin.h"
 #include "service_home.h"
 #include "service_market.h"
 #include "service_settings.h"
 #include "service_time.h"
 #include "service_weather.h"
 #include "system_state.h"
+
+#if CONFIG_NVS_ENCRYPTION && CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC &&                              \
+    (CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID < 0)
+#error "CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID must be set when HMAC-based NVS encryption is enabled."
+#endif
 
 static const char *TAG = "bootstrap";
 static esp_timer_handle_t s_tick_timer;
@@ -47,11 +53,32 @@ static void tick_1s_cb(void *arg)
 static esp_err_t init_nvs(void)
 {
     esp_err_t err = nvs_flash_init();
+
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
-    return err;
+
+    ESP_RETURN_ON_ERROR(err, TAG, "default nvs init failed");
+
+#if CONFIG_NVS_ENCRYPTION
+    ESP_RETURN_ON_FALSE(nvs_flash_get_default_security_scheme() != NULL, ESP_FAIL, TAG,
+                        "encrypted nvs requested but no security scheme is active");
+#if CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC
+    ESP_LOGI(TAG,
+             "Encrypted NVS enabled via HMAC provider (eFuse key slot %d; first boot may burn it "
+             "if empty)",
+             CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID);
+#elif CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC
+    ESP_LOGI(TAG, "Encrypted NVS enabled via flash encryption");
+#else
+    ESP_LOGI(TAG, "Encrypted NVS enabled via custom provider");
+#endif
+#else
+    ESP_LOGW(TAG, "NVS encryption is disabled; secure storage features stay blocked");
+#endif
+
+    return ESP_OK;
 }
 
 static esp_err_t register_apps(void)
@@ -94,6 +121,7 @@ esp_err_t bootstrap_start(void)
     ESP_RETURN_ON_ERROR(weather_service_init(), TAG, "weather service init failed");
     ESP_RETURN_ON_ERROR(claude_service_init(), TAG, "claude service init failed");
     ESP_RETURN_ON_ERROR(market_service_init(), TAG, "market service init failed");
+    ESP_RETURN_ON_ERROR(bitcoin_service_init(), TAG, "bitcoin service init failed");
     ESP_RETURN_ON_ERROR(home_service_init(), TAG, "home service init failed");
     ESP_RETURN_ON_ERROR(settings_service_init(), TAG, "settings service init failed");
     ESP_RETURN_ON_ERROR(net_manager_start(), TAG, "net manager start failed");

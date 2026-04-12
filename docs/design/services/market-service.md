@@ -5,6 +5,7 @@
 本文档细化 `market_service`，目标是固定：
 
 - 行情数据源抽象
+- 多源自动回退
 - 价格摘要和 K 线缓存生命周期
 - 交易对/周期选择的归属
 - 前后台与供电模式下的刷新降级规则
@@ -53,25 +54,28 @@ typedef struct {
     market_selection_t selection;
     trading_data_state_t state;
     bool wifi_connected;
-    uint32_t updated_at_epoch_s;
+    uint32_t summary_updated_at_epoch_s;
+    uint32_t chart_updated_at_epoch_s;
     char pair_label[16];
     char price_text[24];
     char change_text[16];
     int32_t change_bp;
+    int32_t last_price_scaled;
     bool has_chart_data;
+    uint16_t candle_count;
+    market_transport_hint_t transport_hint;
 } market_snapshot_t;
 ```
 
 ### 3.3 Candle 数据
 
-K 线数据用只读窗口暴露：
+K 线数据用 copy-out 窗口暴露：
 
 ```c
-const market_candle_t *market_service_get_candles(
-    market_pair_id_t pair,
-    market_interval_id_t interval,
-    uint16_t *count
-);
+typedef struct {
+    uint16_t count;
+    market_candle_t candles[MARKET_MAX_CANDLES];
+} market_candle_window_t;
 ```
 
 ## 4. 刷新模式
@@ -85,7 +89,7 @@ const market_candle_t *market_service_get_candles(
 
 行为：
 
-- `REALTIME`：保持实时 feed
+- `REALTIME`：当前实现为高频 REST 轮询；后续可替换为 WebSocket 摘要流
 - `INTERACTIVE_POLL`：低频轮询
 - `BACKGROUND_CACHE`：不主动拉新，只保留缓存
 - `PAUSED`：停止前台相关刷新
@@ -94,10 +98,11 @@ const market_candle_t *market_service_get_candles(
 
 | 子模块 | 职责 |
 |------|------|
-| `market_feed` | 对接上游 feed 或 REST |
+| `market_feed` | 对接上游采集；当前为双 REST provider，后续可替换为 WebSocket |
 | `market_cache` | 保存最近价格摘要与 candle |
 | `market_aggregate` | 计算涨跌幅和新鲜度 |
 | `market_scheduler` | 根据 `power_policy` 调整刷新模式 |
+| `market_provider_manager` | 管理主源/备源、失败计数、回退与回切 |
 
 ## 6. 对外接口
 
@@ -105,9 +110,21 @@ const market_candle_t *market_service_get_candles(
 esp_err_t market_service_init(void);
 void market_service_select_pair(market_pair_id_t pair);
 void market_service_select_interval(market_interval_id_t interval);
-void market_service_on_refresh_mode_changed(refresh_mode_t mode);
-const market_snapshot_t *market_service_get_snapshot(void);
+void market_service_get_snapshot(market_snapshot_t *out);
+bool market_service_has_chart_data(market_pair_id_t pair, market_interval_id_t interval);
+bool market_service_get_candles(
+    market_pair_id_t pair,
+    market_interval_id_t interval,
+    market_candle_window_t *out
+);
 ```
+
+额外约束：
+
+- 页面层不能直接感知 REST / WebSocket 的细节
+- 页面层不能直接感知 `OKX / Binance` 的切换细节
+- WebSocket 若在后续引入，只允许替换 `market_feed` 和部分 `market_scheduler` 逻辑
+- `market_cache`、`market_snapshot_t` 和 `APP_EVENT_DATA_MARKET` 事件契约保持不变
 
 ## 7. 退化策略
 
@@ -126,8 +143,9 @@ const market_snapshot_t *market_service_get_snapshot(void);
 
 - v1 只对接单一市场源
 - 价格格式化由 service 统一完成
+- 当前阶段先实现 `OKX -> Binance` 的 REST 自动回退，暂不接入 WebSocket
 
 ---
 
-*文档版本: 1.0*  
+*文档版本: 1.0*
 *创建日期: 2026-04-07*

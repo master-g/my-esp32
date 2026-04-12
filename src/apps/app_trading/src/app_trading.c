@@ -1,73 +1,23 @@
 #include "app_trading.h"
 
-#include "bsp_board_config.h"
-#include "lvgl.h"
-#include "power_policy.h"
-#include "service_market.h"
-#include "ui_fonts.h"
+#include "trading_runtime.h"
 
-#define APP_TRADING_BODY_Y 44
+static trading_runtime_t s_runtime;
 
-static lv_obj_t *s_root;
-static lv_obj_t *s_status;
-
-static esp_err_t app_trading_init(void) { return ESP_OK; }
+static esp_err_t app_trading_init(void) { return trading_runtime_init(&s_runtime); }
 
 static lv_obj_t *app_trading_create_root(lv_obj_t *parent)
 {
-    lv_obj_t *title = NULL;
-
-    s_root = lv_obj_create(parent);
-    lv_obj_remove_style_all(s_root);
-    lv_obj_set_size(s_root, BSP_LCD_H_RES, BSP_LCD_V_RES);
-    lv_obj_set_style_bg_color(s_root, lv_color_hex(0x131913), 0);
-    lv_obj_set_style_bg_opa(s_root, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(s_root, 16, 0);
-
-    title = lv_label_create(s_root);
-    lv_label_set_text(title, "Trading");
-    lv_obj_set_style_text_font(title, ui_font_text_22(), 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xe7ffd7), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
-
-    s_status = lv_label_create(s_root);
-    lv_obj_set_width(s_status, BSP_LCD_H_RES - 32);
-    lv_label_set_long_mode(s_status, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(s_status, ui_font_text_11(), 0);
-    lv_obj_set_style_text_color(s_status, lv_color_hex(0xcdd9cd), 0);
-    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 0, APP_TRADING_BODY_Y);
-    lv_label_set_text(s_status, "Market service placeholder");
-    return s_root;
+    return trading_runtime_create_root(&s_runtime, parent);
 }
 
-static void app_trading_resume(void)
-{
-    if (power_policy_is_refresh_mode(REFRESH_MODE_REALTIME, APP_ID_TRADING)) {
-        market_service_on_refresh_mode_changed(REFRESH_MODE_REALTIME);
-    }
-}
+static void app_trading_resume(void) { trading_runtime_resume(&s_runtime); }
+
+static void app_trading_suspend(void) { trading_runtime_suspend(&s_runtime); }
 
 static void app_trading_handle_event(const app_event_t *event)
 {
-    power_policy_output_t policy;
-
-    if (event == NULL) {
-        return;
-    }
-
-    if (event->type == APP_EVENT_POWER_CHANGED) {
-        power_policy_get_output(&policy);
-        market_service_on_refresh_mode_changed(policy.market_mode);
-    }
-
-    if ((event->type == APP_EVENT_ENTER || event->type == APP_EVENT_POWER_CHANGED) &&
-        s_status != NULL) {
-        market_snapshot_t snapshot;
-        market_service_get_snapshot(&snapshot);
-        power_policy_get_output(&policy);
-        lv_label_set_text_fmt(s_status, "%s\nprice=%s\nmode=%d", snapshot.pair_label,
-                              snapshot.price_text, policy.market_mode);
-    }
+    trading_runtime_handle_event(&s_runtime, event);
 }
 
 const app_descriptor_t *app_trading_get_descriptor(void)
@@ -78,7 +28,7 @@ const app_descriptor_t *app_trading_get_descriptor(void)
         .init = app_trading_init,
         .create_root = app_trading_create_root,
         .resume = app_trading_resume,
-        .suspend = NULL,
+        .suspend = app_trading_suspend,
         .handle_event = app_trading_handle_event,
     };
 

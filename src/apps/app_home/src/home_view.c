@@ -211,12 +211,12 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
 
     view->time_label = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->time_label, ui_font_display_44(), 0);
-    lv_obj_set_style_text_color(view->time_label, lv_color_hex(0xa6f0ff), 0);
+    lv_obj_set_style_text_color(view->time_label, ui_theme_color(UI_THEME_COLOR_TEXT_EMPHASIS), 0);
     lv_obj_align(view->time_label, LV_ALIGN_TOP_LEFT, 0, HOME_TIME_Y);
 
     view->date_label = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->date_label, ui_font_text_22(), 0);
-    lv_obj_set_style_text_color(view->date_label, lv_color_hex(0xb7c4cc), 0);
+    lv_obj_set_style_text_color(view->date_label, ui_theme_color(UI_THEME_COLOR_TEXT_SECONDARY), 0);
     lv_obj_align(view->date_label, LV_ALIGN_TOP_LEFT, 0, HOME_DATE_Y);
 
     view->weather_row = lv_obj_create(view->root);

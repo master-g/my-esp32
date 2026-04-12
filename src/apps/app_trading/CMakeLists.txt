@@ -1,6 +1,10 @@
 idf_component_register(
     SRCS
         "src/app_trading.c"
+        "src/trading_chart.c"
+        "src/trading_presenter.c"
+        "src/trading_runtime.c"
+        "src/trading_view.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -9,5 +13,6 @@ idf_component_register(
         lvgl__lvgl
         power_policy
         service_market
+        ui_theme
         ui_fonts
 )

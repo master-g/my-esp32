@@ -8,5 +8,7 @@ idf_component_register(
         core_app_manager
         lvgl__lvgl
         power_policy
+        service_bitcoin
+        ui_theme
         ui_fonts
 )

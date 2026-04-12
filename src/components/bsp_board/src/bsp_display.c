@@ -5,6 +5,7 @@
 
 #include "bsp_board_config.h"
 #include "bsp_touch.h"
+#include "event_bus.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
@@ -20,6 +21,7 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "system_state.h"
+#include "ui_theme.h"
 
 extern esp_err_t bsp_backlight_init(void);
 extern void bsp_backlight_set_percent(uint8_t percent);
@@ -39,6 +41,9 @@ static const char *TAG = "bsp_display";
     ((BSP_DIRECT_DMA_LINES > BSP_LVGL_DMA_LINES) ? BSP_DIRECT_DMA_LINES : BSP_LVGL_DMA_LINES)
 #define BSP_LVGL_DMA_BUF_LEN (BSP_LCD_PANEL_H_RES * BSP_DMA_BUF_LINES * 2)
 #define BSP_LVGL_FRAME_BUF_SIZE (BSP_LCD_PANEL_H_RES * BSP_LCD_PANEL_V_RES * 2)
+#define BSP_EDGE_GESTURE_ZONE_PX 20
+#define BSP_EDGE_GESTURE_TRIGGER_PX 72
+#define BSP_EDGE_GESTURE_MAX_OFF_AXIS_PX 48
 
 static SemaphoreHandle_t s_lvgl_mutex;
 static SemaphoreHandle_t s_flush_done_semaphore;
@@ -60,6 +65,14 @@ static uint64_t s_perf_rotate_total_us;
 static uint64_t s_perf_wait_total_us;
 static uint64_t s_perf_push_total_us;
 static int64_t s_perf_window_start_us;
+static struct {
+    bool active;
+    app_touch_edge_t edge;
+    uint16_t start_x;
+    uint16_t start_y;
+    uint16_t last_x;
+    uint16_t last_y;
+} s_touch_gesture;
 
 static const axs15231b_lcd_init_cmd_t s_lcd_init_cmds[] = {
     {0x11, (uint8_t[]){0x00}, 0, 100},
@@ -86,6 +99,92 @@ static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io,
     (void)user_ctx;
     xSemaphoreGiveFromISR(s_flush_done_semaphore, &high_task_awoken);
     return false;
+}
+
+static int16_t abs_i16(int16_t value) { return (value < 0) ? (int16_t)(-value) : value; }
+
+static app_touch_edge_t gesture_edge_for_x(uint16_t x)
+{
+    if (x <= BSP_EDGE_GESTURE_ZONE_PX) {
+        return APP_TOUCH_EDGE_LEFT;
+    }
+
+    if (x >= (BSP_LCD_H_RES - BSP_EDGE_GESTURE_ZONE_PX)) {
+        return APP_TOUCH_EDGE_RIGHT;
+    }
+
+    return APP_TOUCH_EDGE_NONE;
+}
+
+static void transform_touch_to_ui_coords(uint16_t raw_x, uint16_t raw_y, int16_t *ui_x,
+                                         int16_t *ui_y)
+{
+    int32_t x = raw_x;
+    int32_t y = raw_y;
+    const lv_display_rotation_t rotation =
+        (s_display != NULL) ? lv_display_get_rotation(s_display) : LV_DISPLAY_ROTATION_0;
+
+    if (rotation == LV_DISPLAY_ROTATION_180 || rotation == LV_DISPLAY_ROTATION_270) {
+        x = BSP_LCD_PANEL_H_RES - x - 1;
+        y = BSP_LCD_PANEL_V_RES - y - 1;
+    }
+    if (rotation == LV_DISPLAY_ROTATION_90 || rotation == LV_DISPLAY_ROTATION_270) {
+        int32_t tmp = y;
+        y = x;
+        x = BSP_LCD_PANEL_V_RES - tmp - 1;
+    }
+
+    if (ui_x != NULL) {
+        *ui_x = (int16_t)x;
+    }
+    if (ui_y != NULL) {
+        *ui_y = (int16_t)y;
+    }
+}
+
+static void publish_touch_swipe_event(app_touch_edge_t edge, int16_t delta_x, int16_t delta_y,
+                                      uint16_t start_x, uint16_t start_y)
+{
+    app_touch_event_t touch = {
+        .edge = edge,
+        .swipe = (delta_x < 0) ? APP_TOUCH_SWIPE_LEFT : APP_TOUCH_SWIPE_RIGHT,
+        .delta_x = delta_x,
+        .delta_y = delta_y,
+        .start_x = start_x,
+        .start_y = start_y,
+    };
+    app_event_t event = {
+        .type = APP_EVENT_TOUCH,
+        .payload = &touch,
+    };
+
+    (void)event_bus_publish(&event);
+}
+
+static void maybe_publish_edge_swipe(void)
+{
+    int16_t delta_x;
+    int16_t delta_y;
+
+    if (!s_touch_gesture.active || s_touch_gesture.edge == APP_TOUCH_EDGE_NONE) {
+        return;
+    }
+
+    delta_x = (int16_t)s_touch_gesture.last_x - (int16_t)s_touch_gesture.start_x;
+    delta_y = (int16_t)s_touch_gesture.last_y - (int16_t)s_touch_gesture.start_y;
+
+    if (abs_i16(delta_y) > BSP_EDGE_GESTURE_MAX_OFF_AXIS_PX ||
+        abs_i16(delta_x) < BSP_EDGE_GESTURE_TRIGGER_PX || abs_i16(delta_x) <= abs_i16(delta_y)) {
+        return;
+    }
+
+    if (s_touch_gesture.edge == APP_TOUCH_EDGE_LEFT && delta_x > 0) {
+        publish_touch_swipe_event(s_touch_gesture.edge, delta_x, delta_y, s_touch_gesture.start_x,
+                                  s_touch_gesture.start_y);
+    } else if (s_touch_gesture.edge == APP_TOUCH_EDGE_RIGHT && delta_x < 0) {
+        publish_touch_swipe_event(s_touch_gesture.edge, delta_x, delta_y, s_touch_gesture.start_x,
+                                  s_touch_gesture.start_y);
+    }
 }
 
 static uint16_t avg_us_to_ms_x10(uint64_t total_us, uint16_t frames)
@@ -240,13 +339,28 @@ static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t 
 static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     bsp_touch_point_t point = {0};
+    int16_t ui_x = 0;
+    int16_t ui_y = 0;
     (void)indev;
 
     if (bsp_touch_read(&point) != ESP_OK || !point.pressed) {
+        maybe_publish_edge_swipe();
+        memset(&s_touch_gesture, 0, sizeof(s_touch_gesture));
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
 
+    transform_touch_to_ui_coords(point.x, point.y, &ui_x, &ui_y);
+
+    if (!s_touch_gesture.active) {
+        s_touch_gesture.active = true;
+        s_touch_gesture.edge = gesture_edge_for_x((uint16_t)ui_x);
+        s_touch_gesture.start_x = (uint16_t)ui_x;
+        s_touch_gesture.start_y = (uint16_t)ui_y;
+    }
+
+    s_touch_gesture.last_x = (uint16_t)ui_x;
+    s_touch_gesture.last_y = (uint16_t)ui_y;
     system_state_note_user_activity();
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = point.x;
@@ -377,6 +491,7 @@ static esp_err_t init_lvgl(void)
                            LV_DISPLAY_RENDER_MODE_FULL);
     lv_display_set_user_data(s_display, s_panel);
     lv_display_set_rotation(s_display, get_ui_rotation());
+    ui_theme_apply_display(s_display);
 
     s_touch_indev = lv_indev_create();
     ESP_RETURN_ON_FALSE(s_touch_indev != NULL, ESP_ERR_NO_MEM, TAG, "touch indev alloc failed");
@@ -386,7 +501,7 @@ static esp_err_t init_lvgl(void)
     s_app_root = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(s_app_root);
     lv_obj_set_size(s_app_root, BSP_LCD_H_RES, BSP_LCD_V_RES);
-    lv_obj_set_style_bg_color(s_app_root, lv_color_hex(0x11161c), 0);
+    lv_obj_set_style_bg_color(s_app_root, ui_theme_color(UI_THEME_COLOR_CANVAS_BG), 0);
     lv_obj_set_style_bg_opa(s_app_root, LV_OPA_COVER, 0);
 
     ESP_RETURN_ON_ERROR(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer), TAG,
