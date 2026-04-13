@@ -73,6 +73,8 @@ typedef struct {
     uint32_t text_us;
 } direct_frame_perf_t;
 
+typedef void (*pixel_writer_t)(void *ctx, int32_t x, int32_t y, uint16_t color);
+
 static uint16_t *s_framebufs[DIRECT_FRAMEBUF_COUNT];
 static uint16_t *s_framebuf;
 static lv_color32_t *s_bg_buf;
@@ -84,6 +86,7 @@ static QueueHandle_t s_free_queue;
 static QueueHandle_t s_ready_queue;
 static TaskHandle_t s_push_task;
 static SemaphoreHandle_t s_push_task_done;
+static SemaphoreHandle_t s_render_mutex;
 static direct_frame_perf_t s_frame_perf[DIRECT_FRAMEBUF_COUNT];
 static bool s_ready;
 static volatile bool s_push_stop_requested;
@@ -127,22 +130,41 @@ static inline uint32_t native_index_from_logical(int32_t x, int32_t y)
     return native_y * BSP_LCD_PANEL_H_RES + native_x;
 }
 
+static void compute_bg_view(uint32_t *view_w, uint32_t *view_h, uint32_t *margin_x,
+                            uint32_t *margin_y)
+{
+    uint32_t resolved_view_w = ((uint32_t)DIRECT_BG_W * DIRECT_BG_VIEW_W_PCT + 50U) / 100U;
+    uint32_t resolved_view_h = ((uint32_t)DIRECT_BG_H * DIRECT_BG_VIEW_H_PCT + 50U) / 100U;
+
+    if (resolved_view_w == 0 || resolved_view_w > DIRECT_BG_W) {
+        resolved_view_w = DIRECT_BG_W;
+    }
+    if (resolved_view_h == 0 || resolved_view_h > DIRECT_BG_H) {
+        resolved_view_h = DIRECT_BG_H;
+    }
+
+    if (view_w != NULL) {
+        *view_w = resolved_view_w;
+    }
+    if (view_h != NULL) {
+        *view_h = resolved_view_h;
+    }
+    if (margin_x != NULL) {
+        *margin_x = (DIRECT_BG_W - resolved_view_w) / 2U;
+    }
+    if (margin_y != NULL) {
+        *margin_y = (DIRECT_BG_H - resolved_view_h) / 2U;
+    }
+}
+
 static void init_native_scale_maps(void)
 {
-    uint32_t view_w = ((uint32_t)DIRECT_BG_W * DIRECT_BG_VIEW_W_PCT + 50U) / 100U;
-    uint32_t view_h = ((uint32_t)DIRECT_BG_H * DIRECT_BG_VIEW_H_PCT + 50U) / 100U;
+    uint32_t view_w;
+    uint32_t view_h;
     uint32_t margin_x;
     uint32_t margin_y;
 
-    if (view_w == 0 || view_w > DIRECT_BG_W) {
-        view_w = DIRECT_BG_W;
-    }
-    if (view_h == 0 || view_h > DIRECT_BG_H) {
-        view_h = DIRECT_BG_H;
-    }
-
-    margin_x = (DIRECT_BG_W - view_w) / 2U;
-    margin_y = (DIRECT_BG_H - view_h) / 2U;
+    compute_bg_view(&view_w, &view_h, &margin_x, &margin_y);
 
     for (uint16_t native_y = 0; native_y < BSP_LCD_PANEL_V_RES; native_y++) {
         int32_t logical_x;
@@ -189,13 +211,25 @@ static void init_native_scale_maps(void)
     }
 }
 
-static void put_pixel_logical(int32_t x, int32_t y, uint16_t color)
+static void put_pixel_native(void *ctx, int32_t x, int32_t y, uint16_t color)
 {
+    (void)ctx;
     if (x < 0 || y < 0 || x >= DIRECT_LOGICAL_W || y >= DIRECT_LOGICAL_H || s_framebuf == NULL) {
         return;
     }
 
     s_framebuf[native_index_from_logical(x, y)] = color;
+}
+
+static void put_pixel_logical_buffer(void *ctx, int32_t x, int32_t y, uint16_t color)
+{
+    uint16_t *pixels = ctx;
+
+    if (pixels == NULL || x < 0 || y < 0 || x >= DIRECT_LOGICAL_W || y >= DIRECT_LOGICAL_H) {
+        return;
+    }
+
+    pixels[(size_t)y * DIRECT_LOGICAL_W + x] = color;
 }
 
 static const uint8_t *find_glyph_rows(char c)
@@ -209,7 +243,8 @@ static const uint8_t *find_glyph_rows(char c)
     return s_glyphs[0].rows;
 }
 
-static void draw_char(int32_t x, int32_t y, int32_t scale, char ch, uint16_t color)
+static void draw_char_with_writer(pixel_writer_t writer, void *ctx, int32_t x, int32_t y,
+                                  int32_t scale, char ch, uint16_t color)
 {
     const uint8_t *rows = find_glyph_rows(ch);
 
@@ -221,23 +256,24 @@ static void draw_char(int32_t x, int32_t y, int32_t scale, char ch, uint16_t col
 
             for (int32_t dy = 0; dy < scale; dy++) {
                 for (int32_t dx = 0; dx < scale; dx++) {
-                    put_pixel_logical(x + col * scale + dx, y + row * scale + dy, color);
+                    writer(ctx, x + col * scale + dx, y + row * scale + dy, color);
                 }
             }
         }
     }
 }
 
-static void draw_text(int32_t x, int32_t y, int32_t scale, const char *text, uint16_t color)
+static void draw_text_with_writer(pixel_writer_t writer, void *ctx, int32_t x, int32_t y,
+                                  int32_t scale, const char *text, uint16_t color)
 {
     int32_t cursor = x;
 
-    if (text == NULL) {
+    if (writer == NULL || text == NULL) {
         return;
     }
 
     for (size_t i = 0; text[i] != '\0'; i++) {
-        draw_char(cursor, y, scale, text[i], color);
+        draw_char_with_writer(writer, ctx, cursor, y, scale, text[i], color);
         cursor += 6 * scale;
     }
 }
@@ -256,6 +292,42 @@ static void upscale_background_to_native(void)
         for (uint16_t native_x = 0; native_x < BSP_LCD_PANEL_H_RES; native_x++) {
             lv_color32_t bg = s_bg_buf[s_bg_row_offset_from_native_x[native_x] + bg_x];
             dst[native_x] = rgb565(bg.red, bg.green, bg.blue);
+        }
+    }
+}
+
+static void upscale_background_to_logical(uint16_t *pixels)
+{
+    uint32_t view_w;
+    uint32_t view_h;
+    uint32_t margin_x;
+    uint32_t margin_y;
+    uint16_t logical_y;
+
+    if (pixels == NULL) {
+        return;
+    }
+
+    compute_bg_view(&view_w, &view_h, &margin_x, &margin_y);
+    for (logical_y = 0; logical_y < DIRECT_LOGICAL_H; logical_y++) {
+        uint16_t *dst = &pixels[(size_t)logical_y * DIRECT_LOGICAL_W];
+        uint32_t bg_y = margin_y + ((uint32_t)logical_y * view_h) / DIRECT_LOGICAL_H;
+        uint16_t logical_x;
+
+        if (bg_y >= DIRECT_BG_H) {
+            bg_y = DIRECT_BG_H - 1U;
+        }
+
+        for (logical_x = 0; logical_x < DIRECT_LOGICAL_W; logical_x++) {
+            uint32_t bg_x = margin_x + ((uint32_t)logical_x * view_w) / DIRECT_LOGICAL_W;
+            lv_color32_t bg;
+
+            if (bg_x >= DIRECT_BG_W) {
+                bg_x = DIRECT_BG_W - 1U;
+            }
+
+            bg = s_bg_buf[bg_y * DIRECT_BG_W + bg_x];
+            dst[logical_x] = rgb565(bg.red, bg.green, bg.blue);
         }
     }
 }
@@ -370,6 +442,11 @@ bool screensaver_direct_init(void)
     s_ready_queue = xQueueCreate(DIRECT_FRAMEBUF_COUNT, sizeof(uint8_t));
     s_push_task_done = xSemaphoreCreateBinary();
     if (s_free_queue == NULL || s_ready_queue == NULL || s_push_task_done == NULL) {
+        screensaver_direct_deinit();
+        return false;
+    }
+    s_render_mutex = xSemaphoreCreateMutex();
+    if (s_render_mutex == NULL) {
         screensaver_direct_deinit();
         return false;
     }
@@ -488,6 +565,10 @@ void screensaver_direct_deinit(void)
         vSemaphoreDelete(s_push_task_done);
         s_push_task_done = NULL;
     }
+    if (s_render_mutex != NULL) {
+        vSemaphoreDelete(s_render_mutex);
+        s_render_mutex = NULL;
+    }
     if (s_bg_buf != NULL) {
         heap_caps_free(s_bg_buf);
         s_bg_buf = NULL;
@@ -528,15 +609,23 @@ esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_
     s_framebuf = s_framebufs[frame_idx];
     frame_start_us = esp_timer_get_time();
 
+    if (s_render_mutex == NULL || xSemaphoreTake(s_render_mutex, portMAX_DELAY) != pdTRUE) {
+        if (xQueueSend(s_free_queue, &frame_idx, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "free buffer recovery failed");
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+
     compose_start_us = frame_start_us;
     fill_background_lowres(time_ms);
     upscale_background_to_native();
     compose_us = (uint32_t)(esp_timer_get_time() - compose_start_us);
 
     text_start_us = esp_timer_get_time();
-    draw_text((DIRECT_LOGICAL_W - time_width) / 2, time_y, time_scale,
-              (time_text != NULL) ? time_text : "--:--", time_color);
+    draw_text_with_writer(put_pixel_native, NULL, (DIRECT_LOGICAL_W - time_width) / 2, time_y,
+                          time_scale, (time_text != NULL) ? time_text : "--:--", time_color);
     text_us = (uint32_t)(esp_timer_get_time() - text_start_us);
+    xSemaphoreGive(s_render_mutex);
 
     s_frame_perf[frame_idx].frame_start_us = frame_start_us;
     s_frame_perf[frame_idx].compose_us = compose_us;
@@ -546,6 +635,49 @@ esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_
             ESP_LOGW(TAG, "free buffer recovery failed");
         }
         return ESP_ERR_TIMEOUT;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t screensaver_direct_render_snapshot_rgb565(uint32_t time_ms, const char *time_text,
+                                                    uint16_t *pixels, size_t capacity_bytes,
+                                                    uint16_t *out_width, uint16_t *out_height,
+                                                    uint16_t *out_stride_bytes)
+{
+    const size_t required_bytes = (size_t)DIRECT_LOGICAL_W * DIRECT_LOGICAL_H * sizeof(uint16_t);
+    int32_t time_scale = DIRECT_TIME_SCALE;
+    int32_t time_width =
+        (DIRECT_TIME_CHAR_COUNT * DIRECT_TIME_CHAR_W + (DIRECT_TIME_CHAR_COUNT - 1)) * time_scale;
+    int32_t time_height = DIRECT_TIME_CHAR_H * time_scale;
+    int32_t time_y = (DIRECT_LOGICAL_H - time_height) / 2;
+    uint16_t time_color = rgb565(243, 248, 255);
+
+    if (!screensaver_direct_is_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (pixels == NULL || capacity_bytes < required_bytes) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_render_mutex == NULL || xSemaphoreTake(s_render_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    fill_background_lowres(time_ms);
+    upscale_background_to_logical(pixels);
+    draw_text_with_writer(put_pixel_logical_buffer, pixels, (DIRECT_LOGICAL_W - time_width) / 2,
+                          time_y, time_scale, (time_text != NULL) ? time_text : "--:--",
+                          time_color);
+    xSemaphoreGive(s_render_mutex);
+
+    if (out_width != NULL) {
+        *out_width = DIRECT_LOGICAL_W;
+    }
+    if (out_height != NULL) {
+        *out_height = DIRECT_LOGICAL_H;
+    }
+    if (out_stride_bytes != NULL) {
+        *out_stride_bytes = DIRECT_LOGICAL_W * sizeof(uint16_t);
     }
 
     return ESP_OK;

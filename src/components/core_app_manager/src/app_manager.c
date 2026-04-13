@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "bsp_board.h"
 #include "esp_check.h"
@@ -10,6 +11,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "others/snapshot/lv_snapshot.h"
 #include "system_state.h"
 
 #define APP_MANAGER_MAX_APPS APP_ID_COUNT
@@ -33,6 +35,7 @@ typedef struct {
 typedef enum {
     UI_CONTROL_SWITCH_TO = 0,
     UI_CONTROL_HOME_SCREENSAVER,
+    UI_CONTROL_SCREENSHOT,
 } ui_control_type_t;
 
 typedef struct {
@@ -42,6 +45,7 @@ typedef struct {
     union {
         app_id_t app_id;
         bool screensaver_enabled;
+        app_screenshot_t *screenshot;
     } arg;
 } ui_control_request_t;
 
@@ -66,6 +70,9 @@ static uint32_t pack_ui_control_result(uint16_t request_id, esp_err_t err);
 static uint16_t unpack_ui_control_request_id(uint32_t notification_value);
 static esp_err_t unpack_ui_control_result(uint32_t notification_value);
 static app_id_t swipe_target_for_touch(app_id_t current_app, const app_touch_event_t *touch);
+static void reset_screenshot_capture(app_screenshot_t *capture);
+static esp_err_t capture_lvgl_screen_locked(app_id_t app_id, app_screenshot_t *capture);
+static esp_err_t capture_screenshot_locked(app_screenshot_t *capture);
 
 static esp_err_t switch_to_locked(app_id_t app_id)
 {
@@ -191,6 +198,84 @@ static app_id_t swipe_target_for_touch(app_id_t current_app, const app_touch_eve
     return APP_ID_INVALID;
 }
 
+static void reset_screenshot_capture(app_screenshot_t *capture)
+{
+    if (capture == NULL) {
+        return;
+    }
+
+    capture->data_size = 0;
+    memset(&capture->info, 0, sizeof(capture->info));
+}
+
+static esp_err_t capture_lvgl_screen_locked(app_id_t app_id, app_screenshot_t *capture)
+{
+    lv_obj_t *screen = NULL;
+    lv_draw_buf_t draw_buf;
+    lv_result_t lv_res = LV_RESULT_INVALID;
+    uint32_t row_bytes = 0;
+    size_t required_bytes = 0;
+
+    ESP_RETURN_ON_FALSE(capture != NULL, ESP_ERR_INVALID_ARG, TAG, "capture is required");
+    ESP_RETURN_ON_FALSE(capture->buffer != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "capture buffer is required");
+
+    screen = lv_screen_active();
+    ESP_RETURN_ON_FALSE(screen != NULL, ESP_ERR_INVALID_STATE, TAG, "active screen is missing");
+
+    lv_res = lv_draw_buf_init(&draw_buf, lv_obj_get_width(screen), lv_obj_get_height(screen),
+                              LV_COLOR_FORMAT_RGB565, LV_STRIDE_AUTO, capture->buffer,
+                              capture->capacity_bytes);
+    ESP_RETURN_ON_FALSE(lv_res == LV_RESULT_OK, ESP_ERR_NO_MEM, TAG,
+                        "snapshot draw buffer init failed");
+
+    lv_res = lv_snapshot_take_to_draw_buf(screen, LV_COLOR_FORMAT_RGB565, &draw_buf);
+    ESP_RETURN_ON_FALSE(lv_res == LV_RESULT_OK, ESP_ERR_NO_MEM, TAG, "lvgl snapshot failed");
+
+    row_bytes = draw_buf.header.w * sizeof(uint16_t);
+    required_bytes = (size_t)draw_buf.header.stride * draw_buf.header.h;
+    ESP_RETURN_ON_FALSE(draw_buf.header.stride >= row_bytes, ESP_FAIL, TAG,
+                        "snapshot stride is too small");
+    ESP_RETURN_ON_FALSE(capture->capacity_bytes >= required_bytes, ESP_ERR_NO_MEM, TAG,
+                        "capture buffer is too small");
+
+    capture->data_size = required_bytes;
+    capture->info.app_id = app_id;
+    capture->info.format = APP_SCREENSHOT_FORMAT_RGB565;
+    capture->info.source = APP_SCREENSHOT_SOURCE_LVGL;
+    capture->info.width = draw_buf.header.w;
+    capture->info.height = draw_buf.header.h;
+    capture->info.stride_bytes = (uint16_t)draw_buf.header.stride;
+    return ESP_OK;
+}
+
+static esp_err_t capture_screenshot_locked(app_screenshot_t *capture)
+{
+    const app_slot_t *slot = NULL;
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+
+    reset_screenshot_capture(capture);
+    ESP_RETURN_ON_FALSE(capture != NULL, ESP_ERR_INVALID_ARG, TAG, "capture is required");
+    ESP_RETURN_ON_FALSE(capture->buffer != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "capture buffer is required");
+
+    slot = find_slot(s_foreground_app);
+    ESP_RETURN_ON_FALSE(slot != NULL, ESP_ERR_NOT_FOUND, TAG, "foreground app is not registered");
+
+    if (slot->descriptor.handle_control != NULL) {
+        err = slot->descriptor.handle_control(APP_CONTROL_CAPTURE_SCREENSHOT, capture);
+        if (err == ESP_OK) {
+            capture->info.app_id = s_foreground_app;
+            return ESP_OK;
+        }
+        if (err != ESP_ERR_NOT_SUPPORTED) {
+            return err;
+        }
+    }
+
+    return capture_lvgl_screen_locked(s_foreground_app, capture);
+}
+
 static esp_err_t post_ui_control(const ui_control_request_t *request)
 {
     ui_control_request_t queued_request;
@@ -288,6 +373,8 @@ static esp_err_t execute_ui_control(const ui_control_request_t *request)
                             "home app does not support controls");
         return slot->descriptor.handle_control(APP_CONTROL_HOME_SCREENSAVER, &control);
     }
+    case UI_CONTROL_SCREENSHOT:
+        return capture_screenshot_locked(request->arg.screenshot);
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -406,6 +493,17 @@ esp_err_t app_manager_request_home_screensaver(bool enabled, uint32_t timeout_ms
         .type = UI_CONTROL_HOME_SCREENSAVER,
         .waiter_task = NULL,
         .arg.screensaver_enabled = enabled,
+    };
+
+    return request_ui_control(&request, timeout_ms);
+}
+
+esp_err_t app_manager_request_screenshot(app_screenshot_t *capture, uint32_t timeout_ms)
+{
+    ui_control_request_t request = {
+        .type = UI_CONTROL_SCREENSHOT,
+        .waiter_task = NULL,
+        .arg.screenshot = capture,
     };
 
     return request_ui_control(&request, timeout_ms);

@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "home_internal.h"
 #include "home_presenter.h"
+#include "screensaver_direct.h"
 #include "service_claude.h"
 #include "service_home.h"
 #include "service_time.h"
@@ -112,6 +113,42 @@ static void exit_screensaver(home_runtime_t *runtime)
     if (runtime->snapshot_refresh_timer != NULL) {
         lv_timer_resume(runtime->snapshot_refresh_timer);
     }
+}
+
+static esp_err_t capture_direct_screensaver(home_runtime_t *runtime, app_screenshot_t *capture)
+{
+    char time_text[sizeof(runtime->screensaver.fx.time_text)];
+    uint16_t width = 0;
+    uint16_t height = 0;
+    uint16_t stride_bytes = 0;
+    esp_err_t err;
+
+    if (runtime == NULL || capture == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!home_screensaver_is_active(&runtime->screensaver) ||
+        !runtime->screensaver.fx.direct_active) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    memcpy(time_text, runtime->screensaver.fx.time_text, sizeof(time_text));
+    time_text[sizeof(time_text) - 1] = '\0';
+
+    err = screensaver_direct_render_snapshot_rgb565(
+        runtime->screensaver.fx.time_ms, time_text, (uint16_t *)capture->buffer,
+        capture->capacity_bytes, &width, &height, &stride_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    capture->data_size = (size_t)stride_bytes * height;
+    capture->info.app_id = APP_ID_HOME;
+    capture->info.format = APP_SCREENSHOT_FORMAT_RGB565;
+    capture->info.source = APP_SCREENSHOT_SOURCE_HOME_DIRECT;
+    capture->info.width = width;
+    capture->info.height = height;
+    capture->info.stride_bytes = stride_bytes;
+    return ESP_OK;
 }
 
 static void screensaver_touch_exit_cb(void *ctx)
@@ -337,6 +374,8 @@ esp_err_t home_runtime_handle_control(home_runtime_t *runtime, app_control_type_
         }
         return ESP_OK;
     }
+    case APP_CONTROL_CAPTURE_SCREENSHOT:
+        return capture_direct_screensaver(runtime, (app_screenshot_t *)payload);
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }

@@ -99,33 +99,23 @@ pub fn install_launchd(executable: &Path) -> Result<PathBuf> {
     bootout_path_if_present(&uid, &plist_path);
 
     let output = Command::new("launchctl")
-        .args([
-            "bootstrap",
-            &format!("gui/{uid}"),
-            plist_path.to_string_lossy().as_ref(),
-        ])
+        .args(["bootstrap", &format!("gui/{uid}"), plist_path.to_string_lossy().as_ref()])
         .output()
         .context("failed to run launchctl bootstrap")?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "launchctl bootstrap failed: {}",
-            command_failure_detail(&output)
-        ));
+        return Err(anyhow!("launchctl bootstrap failed: {}", command_failure_detail(&output)));
     }
 
-    let _ = Command::new("launchctl")
-        .args(["kickstart", "-k", &format!("gui/{uid}/{LABEL}")])
-        .status();
+    let _ =
+        Command::new("launchctl").args(["kickstart", "-k", &format!("gui/{uid}/{LABEL}")]).status();
 
     Ok(plist_path)
 }
 
 pub fn uninstall_launchd() -> Result<Option<PathBuf>> {
     let base_dirs = BaseDirs::new().context("failed to resolve home directory")?;
-    let plist_path = base_dirs
-        .home_dir()
-        .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist"));
+    let plist_path =
+        base_dirs.home_dir().join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
     let uid = current_uid()?;
 
     bootout_service_if_present(&uid, LABEL);
@@ -139,26 +129,17 @@ pub fn uninstall_launchd() -> Result<Option<PathBuf>> {
 }
 
 fn bootout_service_if_present(uid: &str, label: &str) {
-    let _ = Command::new("launchctl")
-        .args(["bootout", &format!("gui/{uid}/{label}")])
-        .status();
+    let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{label}")]).status();
 }
 
 fn bootout_path_if_present(uid: &str, plist_path: &Path) {
     let _ = Command::new("launchctl")
-        .args([
-            "bootout",
-            &format!("gui/{uid}"),
-            plist_path.to_string_lossy().as_ref(),
-        ])
+        .args(["bootout", &format!("gui/{uid}"), plist_path.to_string_lossy().as_ref()])
         .status();
 }
 
 fn current_uid() -> Result<String> {
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .context("failed to execute id -u")?;
+    let output = Command::new("id").arg("-u").output().context("failed to execute id -u")?;
     if !output.status.success() {
         return Err(anyhow!("id -u returned non-zero status"));
     }

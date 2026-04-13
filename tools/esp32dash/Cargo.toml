@@ -6,10 +6,12 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["json"] }
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 directories = "6"
 inquire = "0.9.4"
 libc = "0.2"
+png = "0.17"
 reqwest = { version = "0.13.2", default-features = false, features = [
   "json",
   "rustls",

@@ -169,10 +169,7 @@ fn matches_event(entry: &Entry, event: &LocalHookEvent) -> bool {
         return false;
     }
 
-    match (
-        entry.request.tool_use_id.as_deref(),
-        event.tool_use_id.as_deref(),
-    ) {
+    match (entry.request.tool_use_id.as_deref(), event.tool_use_id.as_deref()) {
         (Some(expected), Some(actual)) => expected == actual,
         _ => true,
     }
@@ -234,9 +231,7 @@ mod tests {
             store2.resolve(&id2, ApprovalDecision::Deny).await;
         });
 
-        let decision = store
-            .wait_for_decision(&id, Duration::from_millis(10))
-            .await;
+        let decision = store.wait_for_decision(&id, Duration::from_millis(10)).await;
         assert_eq!(decision, Some(ApprovalDecision::Deny));
     }
 

@@ -14,11 +14,8 @@ fn main() {
 
     let out_path =
         PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("supported_cjk_chars.rs");
-    fs::write(
-        out_path,
-        format!("pub const FONT_SUPPORTED_NON_ASCII: &str = \"{escaped}\";\n"),
-    )
-    .expect("failed to write generated supported_cjk_chars.rs");
+    fs::write(out_path, format!("pub const FONT_SUPPORTED_NON_ASCII: &str = \"{escaped}\";\n"))
+        .expect("failed to write generated supported_cjk_chars.rs");
 }
 
 fn extract_symbols(source: &str) -> Result<String, &'static str> {

@@ -12,6 +12,7 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
@@ -29,6 +30,7 @@
 #include "service_bitcoin.h"
 
 #include "mbedtls/platform_util.h"
+#include "mbedtls/base64.h"
 
 #include "event_bus.h"
 
@@ -39,18 +41,28 @@
 #define DEVICE_LINK_WRITE_TIMEOUT_MS 20
 #define DEVICE_LINK_WRITE_CHUNK_BYTES 128
 #define APPROVAL_TIMEOUT_MS 300000
+#define APPROVAL_RPC_ID_MAX 64
+#define APPROVAL_WAIT_TASK_STACK 4096
 #define UI_CONTROL_TIMEOUT_MS 2000
+#define SCREENSHOT_TIMEOUT_MS 5000
+#define SCREENSHOT_BUFFER_BYTES ((size_t)BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t))
+#define SCREENSHOT_CHUNK_RAW_BYTES 1024U
+#define SCREENSHOT_CHUNK_BASE64_BYTES ((((SCREENSHOT_CHUNK_RAW_BYTES + 2U) / 3U) * 4U) + 4U)
 
 static const char *TAG = "device_link";
 static SemaphoreHandle_t s_stdout_lock;
 static char s_device_id[32];
 static bool s_started;
+static uint32_t s_screenshot_seq;
 
 /* Approval state — shared between reader task and LVGL task */
 static SemaphoreHandle_t s_approval_sem;
 static approval_request_t s_approval_req;
 static approval_decision_t s_approval_decision;
 static bool s_approval_uses_rpc;
+static char s_approval_rpc_id[APPROVAL_RPC_ID_MAX];
+
+static void reset_approval_state(void);
 
 typedef struct {
     bool set_timezone_name;
@@ -80,6 +92,7 @@ static const char *capabilities[] = {
     "claude.approval.resolved",
     "home.screensaver",
     "app.switch",
+    "screen.capture.start",
     "debug.market_snapshot",
     "slot.export_hit",
 };
@@ -255,10 +268,161 @@ static void send_event_frame(const char *method, cJSON *payload)
     cJSON_Delete(root);
 }
 
+static const char *screenshot_source_to_string(app_screenshot_source_t source)
+{
+    switch (source) {
+    case APP_SCREENSHOT_SOURCE_HOME_DIRECT:
+        return "home_direct";
+    case APP_SCREENSHOT_SOURCE_LVGL:
+    default:
+        return "lvgl";
+    }
+}
+
+static cJSON *build_screenshot_start_result(const char *capture_id, const app_screenshot_t *capture)
+{
+    cJSON *result = cJSON_CreateObject();
+    uint32_t chunk_count;
+
+    if (result == NULL || capture == NULL || capture_id == NULL) {
+        cJSON_Delete(result);
+        return NULL;
+    }
+
+    chunk_count = (uint32_t)((capture->data_size + SCREENSHOT_CHUNK_RAW_BYTES - 1U) /
+                             SCREENSHOT_CHUNK_RAW_BYTES);
+    cJSON_AddStringToObject(result, "capture_id", capture_id);
+    cJSON_AddStringToObject(result, "app", app_id_to_string(capture->info.app_id));
+    cJSON_AddStringToObject(result, "source", screenshot_source_to_string(capture->info.source));
+    cJSON_AddStringToObject(result, "format", "rgb565_le");
+    cJSON_AddNumberToObject(result, "width", capture->info.width);
+    cJSON_AddNumberToObject(result, "height", capture->info.height);
+    cJSON_AddNumberToObject(result, "stride_bytes", capture->info.stride_bytes);
+    cJSON_AddNumberToObject(result, "data_size", (double)capture->data_size);
+    cJSON_AddNumberToObject(result, "chunk_bytes", SCREENSHOT_CHUNK_RAW_BYTES);
+    cJSON_AddNumberToObject(result, "chunk_count", chunk_count);
+    return result;
+}
+
+static void send_screenshot_error_event(const char *capture_id, const char *message)
+{
+    cJSON *payload = cJSON_CreateObject();
+
+    if (payload == NULL) {
+        return;
+    }
+
+    cJSON_AddStringToObject(payload, "capture_id", (capture_id != NULL) ? capture_id : "");
+    cJSON_AddStringToObject(payload, "message", (message != NULL) ? message : "unknown error");
+    send_event_frame("screen.capture.error", payload);
+}
+
+static esp_err_t stream_screenshot_capture(const char *capture_id, const app_screenshot_t *capture)
+{
+    char encoded[SCREENSHOT_CHUNK_BASE64_BYTES];
+    size_t offset = 0;
+    uint32_t index = 0;
+
+    ESP_RETURN_ON_FALSE(capture_id != NULL, ESP_ERR_INVALID_ARG, TAG, "capture id is required");
+    ESP_RETURN_ON_FALSE(capture != NULL, ESP_ERR_INVALID_ARG, TAG, "capture is required");
+    ESP_RETURN_ON_FALSE(capture->buffer != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "capture buffer is required");
+
+    while (offset < capture->data_size) {
+        const size_t chunk_bytes = ((capture->data_size - offset) > SCREENSHOT_CHUNK_RAW_BYTES)
+                                       ? SCREENSHOT_CHUNK_RAW_BYTES
+                                       : (capture->data_size - offset);
+        size_t encoded_len = 0;
+        cJSON *payload = NULL;
+        int ret = mbedtls_base64_encode((unsigned char *)encoded, sizeof(encoded), &encoded_len,
+                                        capture->buffer + offset, chunk_bytes);
+
+        if (ret != 0 || encoded_len >= sizeof(encoded)) {
+            return ESP_FAIL;
+        }
+
+        encoded[encoded_len] = '\0';
+        payload = cJSON_CreateObject();
+        if (payload == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+
+        cJSON_AddStringToObject(payload, "capture_id", capture_id);
+        cJSON_AddNumberToObject(payload, "index", index);
+        cJSON_AddStringToObject(payload, "data", encoded);
+        send_event_frame("screen.capture.chunk", payload);
+        offset += chunk_bytes;
+        index++;
+    }
+
+    {
+        cJSON *payload = cJSON_CreateObject();
+
+        if (payload == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+
+        cJSON_AddStringToObject(payload, "capture_id", capture_id);
+        cJSON_AddNumberToObject(payload, "chunks_sent", index);
+        cJSON_AddNumberToObject(payload, "bytes_sent", (double)capture->data_size);
+        send_event_frame("screen.capture.done", payload);
+    }
+
+    return ESP_OK;
+}
+
 static void publish_ui_event(app_event_type_t type)
 {
     app_event_t evt = {.type = type, .payload = NULL};
     event_bus_publish(&evt);
+}
+
+static esp_err_t focus_home_for_approval(void)
+{
+    return app_manager_request_switch_to(APP_ID_HOME, UI_CONTROL_TIMEOUT_MS);
+}
+
+static void send_approval_rpc_response(approval_decision_t decision)
+{
+    const char *decision_str = "deny";
+    cJSON *result = NULL;
+
+    if (s_approval_rpc_id[0] == '\0') {
+        return;
+    }
+
+    if (decision == APPROVAL_DECISION_ALLOW) {
+        decision_str = "allow";
+    } else if (decision == APPROVAL_DECISION_YOLO) {
+        decision_str = "yolo";
+    }
+
+    result = cJSON_CreateObject();
+    if (result == NULL) {
+        return;
+    }
+
+    cJSON_AddStringToObject(result, "decision", decision_str);
+    send_response_ok(s_approval_rpc_id, result);
+}
+
+static void approval_rpc_wait_task(void *arg)
+{
+    const BaseType_t got_decision =
+        xSemaphoreTake(s_approval_sem, pdMS_TO_TICKS(APPROVAL_TIMEOUT_MS));
+    approval_decision_t decision = APPROVAL_DECISION_DENY;
+
+    (void)arg;
+
+    if (got_decision == pdTRUE) {
+        decision = s_approval_decision;
+    } else {
+        ESP_LOGW(TAG, "claude.approve: timed out waiting for user");
+    }
+
+    send_approval_rpc_response(decision);
+    reset_approval_state();
+    vTaskDelete(NULL);
 }
 
 static void reset_approval_state(void)
@@ -266,6 +430,7 @@ static void reset_approval_state(void)
     memset(&s_approval_req, 0, sizeof(s_approval_req));
     s_approval_decision = APPROVAL_DECISION_DENY;
     s_approval_uses_rpc = false;
+    s_approval_rpc_id[0] = '\0';
 }
 
 static esp_err_t set_pending_approval(const cJSON *req_id, const cJSON *tool, const cJSON *desc,
@@ -275,6 +440,9 @@ static esp_err_t set_pending_approval(const cJSON *req_id, const cJSON *tool, co
                         TAG, "approval request missing id");
 
     reset_approval_state();
+    if (s_approval_sem != NULL) {
+        (void)xSemaphoreTake(s_approval_sem, 0);
+    }
     strlcpy(s_approval_req.id, req_id->valuestring, sizeof(s_approval_req.id));
     if (cJSON_IsString(tool)) {
         strlcpy(s_approval_req.tool_name, tool->valuestring, sizeof(s_approval_req.tool_name));
@@ -847,6 +1015,7 @@ static void handle_event_frame(const cJSON *root)
         const cJSON *tool = cJSON_GetObjectItemCaseSensitive(payload, "tool_name");
         const cJSON *desc = cJSON_GetObjectItemCaseSensitive(payload, "description");
         const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
+        esp_err_t err;
 
         if (s_approval_req.pending) {
             ESP_LOGW(TAG, "approval request ignored because another approval is pending");
@@ -854,6 +1023,13 @@ static void handle_event_frame(const cJSON *root)
         }
         if (set_pending_approval(req_id, tool, desc, false) != ESP_OK) {
             ESP_LOGW(TAG, "claude.approval.request: invalid payload");
+            return;
+        }
+        err = focus_home_for_approval();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "claude.approval.request: failed to focus home: %s",
+                     esp_err_to_name(err));
+            device_link_resolve_approval(APPROVAL_DECISION_DENY);
             return;
         }
         publish_ui_event(APP_EVENT_PERMISSION_REQUEST);
@@ -991,6 +1167,9 @@ static void handle_request_frame(const cJSON *root)
     }
 
     if (strcmp(method->valuestring, "claude.approve") == 0) {
+        esp_err_t err;
+        BaseType_t task_ok;
+
         /* Already have a pending approval — reject new one */
         if (s_approval_req.pending) {
             send_response_error(id->valuestring, "busy", "approval already pending");
@@ -1006,27 +1185,24 @@ static void handle_request_frame(const cJSON *root)
             return;
         }
 
+        err = focus_home_for_approval();
+        if (err != ESP_OK) {
+            reset_approval_state();
+            send_response_error(id->valuestring, "ui_control_failed", esp_err_to_name(err));
+            return;
+        }
+
+        strlcpy(s_approval_rpc_id, id->valuestring, sizeof(s_approval_rpc_id));
+        task_ok = xTaskCreatePinnedToCore(approval_rpc_wait_task, "approval_wait",
+                                          APPROVAL_WAIT_TASK_STACK, NULL, 4, NULL, 1);
+        if (task_ok != pdPASS) {
+            reset_approval_state();
+            send_response_error(id->valuestring, "no_memory", "approval wait task create failed");
+            return;
+        }
+
         /* Notify LVGL task to show approval UI */
         publish_ui_event(APP_EVENT_PERMISSION_REQUEST);
-
-        /* Block until user taps a button (or timeout) */
-        if (xSemaphoreTake(s_approval_sem, pdMS_TO_TICKS(APPROVAL_TIMEOUT_MS)) == pdTRUE) {
-            const char *decision_str = "deny";
-            if (s_approval_decision == APPROVAL_DECISION_ALLOW)
-                decision_str = "allow";
-            else if (s_approval_decision == APPROVAL_DECISION_YOLO)
-                decision_str = "yolo";
-
-            cJSON *result = cJSON_CreateObject();
-            cJSON_AddStringToObject(result, "decision", decision_str);
-            send_response_ok(id->valuestring, result);
-        } else {
-            ESP_LOGW(TAG, "claude.approve: timed out waiting for user");
-            cJSON *result = cJSON_CreateObject();
-            cJSON_AddStringToObject(result, "decision", "deny");
-            send_response_ok(id->valuestring, result);
-        }
-        reset_approval_state();
         return;
     }
 
@@ -1064,6 +1240,57 @@ static void handle_request_frame(const cJSON *root)
         cJSON *result = cJSON_CreateObject();
         cJSON_AddStringToObject(result, "app", app_id_to_string(app_id));
         send_response_ok(id->valuestring, result);
+        return;
+    }
+
+    if (strcmp(method->valuestring, "screen.capture.start") == 0) {
+        app_screenshot_t capture = {0};
+        uint8_t *buffer = NULL;
+        char capture_id[32];
+        cJSON *result = NULL;
+        esp_err_t err;
+
+        buffer = heap_caps_malloc(SCREENSHOT_BUFFER_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (buffer == NULL) {
+            buffer = heap_caps_malloc(SCREENSHOT_BUFFER_BYTES, MALLOC_CAP_8BIT);
+        }
+        if (buffer == NULL) {
+            send_response_error(id->valuestring, "no_memory",
+                                "failed to allocate screenshot buffer");
+            return;
+        }
+
+        capture.buffer = buffer;
+        capture.capacity_bytes = SCREENSHOT_BUFFER_BYTES;
+        err = app_manager_request_screenshot(&capture, SCREENSHOT_TIMEOUT_MS);
+        if (err != ESP_OK) {
+            heap_caps_free(buffer);
+            send_response_error(id->valuestring, "capture_failed", esp_err_to_name(err));
+            return;
+        }
+        if (capture.data_size == 0 || capture.info.width == 0 || capture.info.height == 0 ||
+            capture.info.stride_bytes == 0 || capture.info.format != APP_SCREENSHOT_FORMAT_RGB565) {
+            heap_caps_free(buffer);
+            send_response_error(id->valuestring, "capture_failed", "invalid screenshot metadata");
+            return;
+        }
+
+        s_screenshot_seq++;
+        snprintf(capture_id, sizeof(capture_id), "capture-%lu", (unsigned long)s_screenshot_seq);
+        result = build_screenshot_start_result(capture_id, &capture);
+        if (result == NULL) {
+            heap_caps_free(buffer);
+            send_response_error(id->valuestring, "no_memory",
+                                "failed to build screenshot metadata");
+            return;
+        }
+
+        send_response_ok(id->valuestring, result);
+        err = stream_screenshot_capture(capture_id, &capture);
+        if (err != ESP_OK) {
+            send_screenshot_error_event(capture_id, esp_err_to_name(err));
+        }
+        heap_caps_free(buffer);
         return;
     }
 

@@ -17,6 +17,7 @@ cargo run -- claude ingest --event-from-stdin
 cargo run -- device list
 cargo run -- device info
 cargo run -- device reboot
+cargo run -- device screenshot --out screen.png
 cargo run -- config
 cargo run -- install-launchd
 cargo run -- uninstall-launchd
@@ -115,7 +116,7 @@ Protocol frames share the same serial line as normal ESP-IDF logs. Only lines st
 Device hello:
 
 ```json
-@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved"]}
+@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved","screen.capture.start"]}
 ```
 
 Host request:
@@ -164,4 +165,28 @@ Host approval dismiss:
 
 ```json
 @esp32dash {"type":"event","method":"claude.approval.dismiss","payload":{"id":"approval-1"}}
+```
+
+Host screenshot capture start:
+
+```json
+@esp32dash {"type":"request","id":"rpc-5","method":"screen.capture.start","params":{}}
+```
+
+Device screenshot capture metadata:
+
+```json
+@esp32dash {"type":"response","id":"rpc-5","ok":true,"result":{"capture_id":"capture-1","app":"home","source":"lvgl","format":"rgb565_le","width":640,"height":172,"stride_bytes":1280,"data_size":220160,"chunk_bytes":1024,"chunk_count":215}}
+```
+
+Device screenshot chunk:
+
+```json
+@esp32dash {"type":"event","method":"screen.capture.chunk","payload":{"capture_id":"capture-1","index":0,"data":"...base64..."}}
+```
+
+Device screenshot completion:
+
+```json
+@esp32dash {"type":"event","method":"screen.capture.done","payload":{"capture_id":"capture-1","chunks_sent":215,"bytes_sent":220160}}
 ```

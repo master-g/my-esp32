@@ -144,10 +144,7 @@ pub async fn run(config: Config) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind admin addr {}", config.admin_addr_raw))?;
 
-    info!(
-        "esp32dash admin endpoint listening on {}",
-        config.admin_addr_raw
-    );
+    info!("esp32dash admin endpoint listening on {}", config.admin_addr_raw);
 
     tokio::select! {
         res = axum::serve(listener, router) => {
@@ -384,15 +381,13 @@ fn apply_event_to_sessions(
     event: &LocalHookEvent,
 ) {
     let key = session_key_for(event);
-    let entry = sessions
-        .entry(key.clone())
-        .or_insert_with(|| PersistedSessionState {
-            key: key.clone(),
-            snapshot: Snapshot::empty(event.recv_ts),
-            cwd: event.cwd.clone(),
-            last_activity_ts: event.recv_ts,
-            claude_pid: event.claude_pid,
-        });
+    let entry = sessions.entry(key.clone()).or_insert_with(|| PersistedSessionState {
+        key: key.clone(),
+        snapshot: Snapshot::empty(event.recv_ts),
+        cwd: event.cwd.clone(),
+        last_activity_ts: event.recv_ts,
+        claude_pid: event.claude_pid,
+    });
 
     let current = entry.snapshot.clone();
     let mut next = normalize(event, &current);
@@ -535,10 +530,7 @@ fn process_exists(pid: u32) -> bool {
         return true;
     }
 
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
+    matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
 }
 
 fn event_clears_pending_approval(event: &LocalHookEvent) -> bool {
@@ -634,11 +626,7 @@ async fn post_approval(
             .filter(|value| !value.is_empty()),
     };
     let id = state.approvals.submit(body.id, request.clone()).await;
-    info!(
-        approval_id = id,
-        tool = tool_name,
-        "approval submitted, forwarding to device"
-    );
+    info!(approval_id = id, tool = tool_name, "approval submitted, forwarding to device");
 
     if let Err(err) = state.device_manager.send_protocol_event(
         "claude.approval.request",
@@ -651,10 +639,7 @@ async fn post_approval(
         warn!(approval_id = id, error = %err, "failed to forward approval request to device");
     }
 
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "ok": true, "id": id })),
-    )
+    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": id })))
 }
 
 async fn get_approval(
@@ -691,10 +676,7 @@ fn load_state(path: &PathBuf) -> Option<PersistedState> {
     match serde_json::from_str(&contents) {
         Ok(state) => Some(state),
         Err(e) => {
-            warn!(
-                "corrupted state file {}, starting fresh: {e}",
-                path.display()
-            );
+            warn!("corrupted state file {}, starting fresh: {e}", path.display());
             None
         }
     }
@@ -711,11 +693,7 @@ fn persist_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
     file.write_all(json.as_bytes())?;
     file.sync_all()?;
     fs::rename(&tmp_path, path).with_context(|| {
-        format!(
-            "failed to rename {} -> {}",
-            tmp_path.display(),
-            path.display()
-        )
+        format!("failed to rename {} -> {}", tmp_path.display(), path.display())
     })?;
     Ok(())
 }
@@ -740,7 +718,10 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
     tokio::spawn(async move {
         while let Some(event) = device_event_rx.recv().await {
             match event {
-                DeviceEvent::ApprovalResolved { id, decision } => {
+                DeviceEvent::ApprovalResolved {
+                    id,
+                    decision,
+                } => {
                     if approvals_for_device.resolve(&id, decision).await {
                         info!(approval_id = id, ?decision, "device resolved approval");
                     } else {
@@ -757,10 +738,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
 
     AppState {
         config,
-        state: Arc::new(Mutex::new(AgentState::new(
-            initial_snapshot,
-            initial_sessions,
-        ))),
+        state: Arc::new(Mutex::new(AgentState::new(initial_snapshot, initial_sessions))),
         pending_generation: Arc::new(AtomicU64::new(0)),
         device_manager,
         approvals,
@@ -817,10 +795,7 @@ fn build_router(app_state: AppState) -> Router {
 }
 
 fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 #[cfg(test)]
@@ -876,19 +851,14 @@ mod tests {
         }
 
         fn write_frame(&mut self, frame: &WireFrame) -> Result<()> {
-            self.writes
-                .lock()
-                .expect("writes mutex poisoned")
-                .push(frame.clone());
+            self.writes.lock().expect("writes mutex poisoned").push(frame.clone());
             Ok(())
         }
     }
 
     #[tokio::test]
     async fn status_endpoint_returns_serial_and_snapshot_state() -> Result<()> {
-        let unique = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_nanos();
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
         let state_dir = std::env::temp_dir().join(format!("esp32dash-status-test-{unique}"));
         fs::create_dir_all(&state_dir)?;
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -935,9 +905,7 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_event_pushes_snapshot_to_serial_worker() -> Result<()> {
-        let unique = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_nanos();
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
         let state_dir = std::env::temp_dir().join(format!("esp32dash-ingest-test-{unique}"));
         fs::create_dir_all(&state_dir)?;
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -985,17 +953,15 @@ mod tests {
 
         let writes = writes.lock().expect("writes mutex poisoned");
         assert!(!writes.is_empty());
-        let last = writes
-            .last()
-            .expect("serial worker should have written a frame");
+        let last = writes.last().expect("serial worker should have written a frame");
         match last {
-            WireFrame::Event { method, payload } => {
+            WireFrame::Event {
+                method,
+                payload,
+            } => {
                 assert_eq!(method, "claude.update");
                 assert_eq!(payload["status"], "unknown");
-                assert_eq!(
-                    payload["attention"],
-                    serde_json::to_value(Attention::Medium)?
-                );
+                assert_eq!(payload["attention"], serde_json::to_value(Attention::Medium)?);
             }
             other => panic!("unexpected frame written to serial worker: {other:?}"),
         }
@@ -1006,9 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_follow_up_event_dismisses_pending_approval_on_device() -> Result<()> {
-        let unique = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_nanos();
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
         let state_dir = std::env::temp_dir().join(format!("esp32dash-approval-test-{unique}"));
         fs::create_dir_all(&state_dir)?;
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -1152,13 +1116,8 @@ mod tests {
             },
         );
 
-        assert!(reconcile_session_map(
-            &mut sessions,
-            PIDLESS_ACTIVE_SESSION_TIMEOUT_SECS + 2
-        ));
-        let session = sessions
-            .get("sess-1")
-            .expect("session should remain tracked");
+        assert!(reconcile_session_map(&mut sessions, PIDLESS_ACTIVE_SESSION_TIMEOUT_SECS + 2));
+        let session = sessions.get("sess-1").expect("session should remain tracked");
         assert_eq!(session.snapshot.status, "unknown");
         assert_eq!(session.snapshot.event, "SessionLivenessLost");
     }
@@ -1171,9 +1130,7 @@ mod tests {
         snapshot.status = "processing".into();
 
         let sessions = restored_sessions(None, &snapshot);
-        let session = sessions
-            .get("sess-legacy")
-            .expect("legacy snapshot should seed one session");
+        let session = sessions.get("sess-legacy").expect("legacy snapshot should seed one session");
         assert_eq!(session.snapshot.status, "processing");
         assert_eq!(session.last_activity_ts, 42);
     }

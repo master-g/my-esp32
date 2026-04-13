@@ -202,12 +202,7 @@ fn apply_install(claude_dir: &Path, analysis: &InstallAnalysis) -> Result<()> {
 
     if analysis.script_written {
         fs::write(&analysis.hook_script_path, &analysis.hook_script_contents).with_context(
-            || {
-                format!(
-                    "failed to write hook script {}",
-                    analysis.hook_script_path.display()
-                )
-            },
+            || format!("failed to write hook script {}", analysis.hook_script_path.display()),
         )?;
     }
     ensure_executable(&analysis.hook_script_path)?;
@@ -226,20 +221,11 @@ fn build_confirm_message(analysis: &InstallAnalysis) -> String {
     let mut lines = Vec::new();
     lines.push("Install esp32dash Claude hooks?".to_string());
     if analysis.script_written {
-        lines.push(format!(
-            "Write hook script: {}",
-            analysis.hook_script_path.display()
-        ));
+        lines.push(format!("Write hook script: {}", analysis.hook_script_path.display()));
     }
     if analysis.settings_updated {
-        lines.push(format!(
-            "Update settings: {}",
-            analysis.settings_path.display()
-        ));
-        lines.push(format!(
-            "Add hook entries: {}",
-            analysis.updated_specs.join(", ")
-        ));
+        lines.push(format!("Update settings: {}", analysis.settings_path.display()));
+        lines.push(format!("Add hook entries: {}", analysis.updated_specs.join(", ")));
     }
     lines.join("\n")
 }
@@ -296,13 +282,11 @@ fn ensure_settings_hooks(
     command_path: &str,
     command_variants: &[String],
 ) -> Result<Vec<String>> {
-    let root_object = root
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("settings.json root must be a JSON object"))?;
+    let root_object =
+        root.as_object_mut().ok_or_else(|| anyhow!("settings.json root must be a JSON object"))?;
 
-    let hooks_value = root_object
-        .entry("hooks".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
+    let hooks_value =
+        root_object.entry("hooks".to_string()).or_insert_with(|| Value::Object(Map::new()));
     let hooks_object = hooks_value
         .as_object_mut()
         .ok_or_else(|| anyhow!("settings.json hooks must be a JSON object"))?;
@@ -323,9 +307,8 @@ fn ensure_hook_entry(
     command_path: &str,
     command_variants: &[String],
 ) -> Result<bool> {
-    let event_value = hooks_object
-        .entry(spec.event.to_string())
-        .or_insert_with(|| Value::Array(Vec::new()));
+    let event_value =
+        hooks_object.entry(spec.event.to_string()).or_insert_with(|| Value::Array(Vec::new()));
     let event_array = event_value
         .as_array_mut()
         .ok_or_else(|| anyhow!("settings.json hooks.{} must be an array", spec.event))?;
@@ -341,20 +324,13 @@ fn ensure_hook_entry(
             continue;
         }
 
-        let hooks_value = entry_object
-            .entry("hooks".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
+        let hooks_value =
+            entry_object.entry("hooks".to_string()).or_insert_with(|| Value::Array(Vec::new()));
         let hooks_array = hooks_value.as_array_mut().ok_or_else(|| {
-            anyhow!(
-                "settings.json hooks.{}[].hooks must be an array",
-                spec.event
-            )
+            anyhow!("settings.json hooks.{}[].hooks must be an array", spec.event)
         })?;
 
-        if hooks_array
-            .iter()
-            .any(|hook| command_hook_matches(hook, command_variants))
-        {
+        if hooks_array.iter().any(|hook| command_hook_matches(hook, command_variants)) {
             return Ok(false);
         }
 
@@ -372,14 +348,9 @@ fn ensure_hook_entry(
         let entry_object = event_array[index]
             .as_object_mut()
             .ok_or_else(|| anyhow!("settings.json hooks.{} entries must be objects", spec.event))?;
-        let hooks_array = entry_object
-            .get_mut("hooks")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| {
-                anyhow!(
-                    "settings.json hooks.{}[].hooks must be an array",
-                    spec.event
-                )
+        let hooks_array =
+            entry_object.get_mut("hooks").and_then(Value::as_array_mut).ok_or_else(|| {
+                anyhow!("settings.json hooks.{}[].hooks must be an array", spec.event)
             })?;
         hooks_array.push(hook_value);
         return Ok(true);
@@ -454,22 +425,16 @@ mod tests {
     };
 
     fn temp_claude_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
         std::env::temp_dir().join(format!("esp32dash-hooks-{name}-{}-{unique}", process::id()))
     }
 
     #[test]
     fn ensure_settings_hooks_initializes_empty_settings() {
         let mut root = Value::Object(Map::new());
-        let updated = ensure_settings_hooks(
-            &mut root,
-            HOOK_COMMAND_PATH,
-            &[HOOK_COMMAND_PATH.to_string()],
-        )
-        .unwrap();
+        let updated =
+            ensure_settings_hooks(&mut root, HOOK_COMMAND_PATH, &[HOOK_COMMAND_PATH.to_string()])
+                .unwrap();
 
         assert_eq!(updated.len(), HOOK_SPECS.len());
         let hooks = root.get("hooks").and_then(Value::as_object).unwrap();
@@ -518,9 +483,7 @@ mod tests {
             command_hook_matches(hook, &["~/.claude/hooks/notchi-hook.sh".to_string()])
         }));
         assert!(
-            hooks
-                .iter()
-                .any(|hook| command_hook_matches(hook, &[HOOK_COMMAND_PATH.to_string()]))
+            hooks.iter().any(|hook| command_hook_matches(hook, &[HOOK_COMMAND_PATH.to_string()]))
         );
     }
 
@@ -547,9 +510,7 @@ mod tests {
             ensure_settings_hooks(&mut root, HOOK_COMMAND_PATH, &command_variants).unwrap();
 
         assert!(!updated.iter().any(|item| item == "SessionStart"));
-        let hooks = root["hooks"]["SessionStart"][0]["hooks"]
-            .as_array()
-            .unwrap();
+        let hooks = root["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
         assert_eq!(hooks.len(), 1);
     }
 
@@ -564,17 +525,10 @@ mod tests {
         let hook_script_path = hooks_dir.join(HOOK_SCRIPT_NAME);
         fs::write(&hook_script_path, &expected_script).unwrap();
         let mut settings = Value::Object(Map::new());
-        ensure_settings_hooks(
-            &mut settings,
-            HOOK_COMMAND_PATH,
-            &[HOOK_COMMAND_PATH.to_string()],
-        )
-        .unwrap();
-        fs::write(
-            claude_dir.join(SETTINGS_NAME),
-            serde_json::to_string_pretty(&settings).unwrap(),
-        )
-        .unwrap();
+        ensure_settings_hooks(&mut settings, HOOK_COMMAND_PATH, &[HOOK_COMMAND_PATH.to_string()])
+            .unwrap();
+        fs::write(claude_dir.join(SETTINGS_NAME), serde_json::to_string_pretty(&settings).unwrap())
+            .unwrap();
 
         let analysis = analyze_install(&claude_dir, &executable).unwrap();
         assert!(!analysis.script_written);

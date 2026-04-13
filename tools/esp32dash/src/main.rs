@@ -11,7 +11,8 @@ mod text_sanitize;
 
 use std::{
     env,
-    io::{self, Read},
+    fs::{self, File},
+    io::{self, BufWriter, Read},
     path::PathBuf,
     sync::Arc,
 };
@@ -27,13 +28,13 @@ use tracing_subscriber::{EnvFilter, fmt};
 use crate::{
     agent::Config,
     device::{
-        UnixSerialFactory, discover_devices, open_direct_session, request_direct,
-        request_direct_with_timeout, send_event_direct, send_protocol_event_direct,
+        UnixSerialFactory, capture_screenshot_direct, discover_devices, open_direct_session,
+        request_direct, request_direct_with_timeout, send_event_direct, send_protocol_event_direct,
     },
     hooks::InstallHooksResult,
     model::{
-        AdminErrorResponse, AdminRpcResponse, Attention, LocalHookEvent, RawHookInput, RpcRequest,
-        RunStatus, Snapshot, WireFrame,
+        AdminErrorResponse, AdminRpcResponse, Attention, DeviceScreenshot, LocalHookEvent,
+        RawHookInput, RpcRequest, RunStatus, Snapshot, WireFrame,
     },
     text_sanitize::{
         build_approval_id, sanitize_approval_summary, sanitize_message, sanitize_permission_mode,
@@ -158,25 +159,37 @@ enum DeviceCommand {
         )]
         port: Option<String>,
     },
+    #[command(about = "Capture the current device screen to a PNG file over direct serial")]
+    Screenshot {
+        #[arg(short = 'o', long, help = "Output PNG path")]
+        out: PathBuf,
+        #[arg(long, help = "Use a specific serial port instead of autodiscovery")]
+        port: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
 struct ConfigArgs {
-    #[arg(
-        long,
-        help = "Use a specific serial port instead of autodiscovery or the running agent"
-    )]
+    #[arg(long, help = "Use a specific serial port instead of autodiscovery or the running agent")]
     port: Option<String>,
 }
 
 #[derive(Debug, Args)]
 struct InstallHooksArgs {
-    #[arg(
-        short = 'f',
-        long,
-        help = "Overwrite and update without interactive confirmation"
-    )]
+    #[arg(short = 'f', long, help = "Overwrite and update without interactive confirmation")]
     force: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ScreenshotCommandResult {
+    ok: bool,
+    path: String,
+    app: String,
+    source: String,
+    format: String,
+    width: u16,
+    height: u16,
+    bytes: usize,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -243,10 +256,7 @@ enum ChibiCommand {
             help = "Milliseconds to keep the overlay visible before dismissing it"
         )]
         delay_ms: u64,
-        #[arg(
-            long,
-            help = "Serial port for direct fallback when the local agent is unavailable"
-        )]
+        #[arg(long, help = "Serial port for direct fallback when the local agent is unavailable")]
         port: Option<String>,
     },
     #[command(about = "Force the Home screensaver on or off for quick testing")]
@@ -286,7 +296,9 @@ async fn main() -> Result<()> {
             command: AgentCommand::Status,
         } => agent_status().await,
         Command::Claude {
-            command: ClaudeCommand::Ingest { event_from_stdin },
+            command: ClaudeCommand::Ingest {
+                event_from_stdin,
+            },
         } => {
             if !event_from_stdin {
                 return Err(anyhow!("ingest requires --event-from-stdin"));
@@ -294,20 +306,28 @@ async fn main() -> Result<()> {
             ingest_from_stdin().await
         }
         Command::Claude {
-            command: ClaudeCommand::Approve { event_from_stdin },
+            command: ClaudeCommand::Approve {
+                event_from_stdin,
+            },
         } => {
             if !event_from_stdin {
                 return Err(anyhow!("approve requires --event-from-stdin"));
             }
             approve_from_stdin().await
         }
-        Command::Device { command } => run_device_command(command).await,
+        Command::Device {
+            command,
+        } => run_device_command(command).await,
         Command::Config(args) => config_ui::run_config_editor(args.port).await,
         Command::InstallLaunchd => install_launchd(),
         Command::UninstallLaunchd => uninstall_launchd(),
         Command::InstallHooks(args) => install_hooks(args),
-        Command::Chibi { command } => run_chibi_command(command).await,
-        Command::Slot { command } => run_slot_command(command).await,
+        Command::Chibi {
+            command,
+        } => run_chibi_command(command).await,
+        Command::Slot {
+            command,
+        } => run_slot_command(command).await,
     }
 }
 
@@ -317,7 +337,9 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
             let devices = discover_devices(Arc::new(UnixSerialFactory), compat::serial_baud())?;
             print_json(&devices)
         }
-        DeviceCommand::Info { port } => {
+        DeviceCommand::Info {
+            port,
+        } => {
             let result = run_request(
                 port.as_deref(),
                 RpcRequest {
@@ -328,7 +350,9 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
             .await?;
             print_json(&result)
         }
-        DeviceCommand::Reboot { port } => {
+        DeviceCommand::Reboot {
+            port,
+        } => {
             let result = run_request(
                 port.as_deref(),
                 RpcRequest {
@@ -339,12 +363,37 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
             .await?;
             print_json(&result)
         }
+        DeviceCommand::Screenshot {
+            out,
+            port,
+        } => {
+            let screenshot = capture_screenshot_direct(
+                Arc::new(UnixSerialFactory),
+                port.as_deref(),
+                compat::serial_baud(),
+            )?;
+            write_screenshot_png(&out, &screenshot)?;
+            let output_path = out.canonicalize().unwrap_or(out);
+
+            print_json(&ScreenshotCommandResult {
+                ok: true,
+                path: output_path.to_string_lossy().into_owned(),
+                app: screenshot.meta.app,
+                source: screenshot.meta.source,
+                format: screenshot.meta.format,
+                width: screenshot.meta.width,
+                height: screenshot.meta.height,
+                bytes: screenshot.data.len(),
+            })
+        }
     }
 }
 
 async fn run_slot_command(command: SlotCommand) -> Result<()> {
     match command {
-        SlotCommand::Export { port } => {
+        SlotCommand::Export {
+            port,
+        } => {
             let result = run_request(
                 port.as_deref(),
                 RpcRequest {
@@ -355,18 +404,10 @@ async fn run_slot_command(command: SlotCommand) -> Result<()> {
             .await?;
 
             if let Some(wif) = result.get("wif").and_then(|v| v.as_str()) {
-                let label = result
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let hash160 = result
-                    .get("hash160")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let is_self_test = result
-                    .get("is_self_test")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let label = result.get("label").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let hash160 = result.get("hash160").and_then(|v| v.as_str()).unwrap_or("?");
+                let is_self_test =
+                    result.get("is_self_test").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 eprintln!("=== Satoshi Slot Hit Record ===");
                 eprintln!("Label:     {label}");
@@ -396,12 +437,7 @@ pub(crate) async fn run_request(port: Option<&str>, request: RpcRequest) -> Resu
         }
     }
 
-    request_direct(
-        Arc::new(UnixSerialFactory),
-        port,
-        compat::serial_baud(),
-        request,
-    )
+    request_direct(Arc::new(UnixSerialFactory), port, compat::serial_baud(), request)
 }
 
 async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
@@ -429,7 +465,9 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             );
             Ok(())
         }
-        ChibiCommand::Demo { port } => {
+        ChibiCommand::Demo {
+            port,
+        } => {
             let factory = Arc::new(UnixSerialFactory);
             let baud = compat::serial_baud();
             let mut session = open_direct_session(factory, port.as_deref(), baud)?;
@@ -467,7 +505,11 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             println!("demo complete");
             Ok(())
         }
-        ChibiCommand::Approve { tool, desc, port } => {
+        ChibiCommand::Approve {
+            tool,
+            desc,
+            port,
+        } => {
             println!("sending approval request: tool={tool} desc=\"{desc}\"");
             println!("waiting for user to tap a button on the device...");
 
@@ -488,10 +530,7 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 std::time::Duration::from_secs(300),
             )?;
 
-            let decision = result
-                .get("decision")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            let decision = result.get("decision").and_then(|v| v.as_str()).unwrap_or("unknown");
             println!("device responded: decision={decision}");
             Ok(())
         }
@@ -523,7 +562,10 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             }
             Ok(())
         }
-        ChibiCommand::Screensaver { action, port } => {
+        ChibiCommand::Screensaver {
+            action,
+            port,
+        } => {
             let enabled = matches!(action, ScreensaverAction::Enter);
             run_request(
                 port.as_deref(),
@@ -535,7 +577,14 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 },
             )
             .await?;
-            println!("screensaver {}", if enabled { "entered" } else { "exited" });
+            println!(
+                "screensaver {}",
+                if enabled {
+                    "entered"
+                } else {
+                    "exited"
+                }
+            );
             Ok(())
         }
     }
@@ -580,9 +629,8 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
     let approval_id = build_approval_id(now_ms, &display_tool_name);
     let session_id = format!("approve-dismiss-{now_ms:x}");
     let tool_use_id = format!("tool-{approval_id}");
-    let cwd = env::current_dir()
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let cwd =
+        env::current_dir().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
     let request_event = LocalHookEvent {
         session_id: session_id.clone(),
         cwd: cwd.clone(),
@@ -649,12 +697,7 @@ async fn post_agent_event(client: &Client, base_url: &str, event: &LocalHookEven
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
-        .with_context(|| {
-            format!(
-                "failed to send {} event to local agent",
-                event.hook_event_name
-            )
-        })?
+        .with_context(|| format!("failed to send {} event to local agent", event.hook_event_name))?
         .error_for_status()
         .with_context(|| format!("local agent rejected {} event", event.hook_event_name))?;
     Ok(())
@@ -750,18 +793,10 @@ async fn wait_for_approval_dismissal(
         if response.status().is_success() {
             let body: Value = response.json().await.unwrap_or_default();
             let approval = body.get("approval").unwrap_or(&Value::Null);
-            if approval
-                .get("dismissed")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
+            if approval.get("dismissed").and_then(|value| value.as_bool()).unwrap_or(false) {
                 return Ok(());
             }
-            if approval
-                .get("decision")
-                .and_then(|value| value.as_str())
-                .is_some()
-            {
+            if approval.get("decision").and_then(|value| value.as_str()).is_some() {
                 return Err(anyhow!(
                     "approval {approval_id} was resolved on device before host dismiss test completed"
                 ));
@@ -771,16 +806,12 @@ async fn wait_for_approval_dismissal(
         tokio::time::sleep(poll_interval).await;
     }
 
-    Err(anyhow!(
-        "approval {approval_id} was not dismissed by the local agent within 5s"
-    ))
+    Err(anyhow!("approval {approval_id} was not dismissed by the local agent within 5s"))
 }
 
 async fn ingest_from_stdin() -> Result<()> {
     let mut stdin = String::new();
-    io::stdin()
-        .read_to_string(&mut stdin)
-        .context("failed to read stdin")?;
+    io::stdin().read_to_string(&mut stdin).context("failed to read stdin")?;
 
     let raw: RawHookInput = match serde_json::from_str(&stdin) {
         Ok(raw) => raw,
@@ -843,22 +874,17 @@ async fn rpc_via_agent(request: RpcRequest) -> Result<Value> {
     if !rpc.ok {
         return Err(anyhow!(
             "{}",
-            rpc.error
-                .unwrap_or_else(|| "agent rpc failed without an error body".to_string())
+            rpc.error.unwrap_or_else(|| "agent rpc failed without an error body".to_string())
         ));
     }
 
-    rpc.result
-        .context("agent rpc succeeded but did not include a result payload")
+    rpc.result.context("agent rpc succeeded but did not include a result payload")
 }
 
 fn install_launchd() -> Result<()> {
     let executable = env::current_exe().context("failed to resolve current executable")?;
     let plist_path = launchd::install_launchd(&executable)?;
-    println!(
-        "{{\"ok\":true,\"plist_path\":\"{}\"}}",
-        json_escape_path(plist_path)
-    );
+    println!("{{\"ok\":true,\"plist_path\":\"{}\"}}", json_escape_path(plist_path));
     Ok(())
 }
 
@@ -878,10 +904,7 @@ fn install_hooks(args: InstallHooksArgs) -> Result<()> {
 }
 
 fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
-    let message = raw
-        .message
-        .or(raw.reason)
-        .and_then(|message| sanitize_message(&message));
+    let message = raw.message.or(raw.reason).and_then(|message| sanitize_message(&message));
 
     let prompt_preview = raw.prompt.as_deref().and_then(sanitize_prompt_preview);
     let permission_mode = raw
@@ -913,10 +936,7 @@ fn hook_claude_pid() -> Option<u32> {
 }
 
 fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 fn now_epoch_millis() -> u64 {
@@ -935,17 +955,69 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
+fn write_screenshot_png(path: &PathBuf, screenshot: &DeviceScreenshot) -> Result<()> {
+    let width = screenshot.meta.width as usize;
+    let height = screenshot.meta.height as usize;
+    let stride = screenshot.meta.stride_bytes as usize;
+    let row_bytes = width * 2;
+    let expected_min = stride * height;
+    let mut rgb = vec![0u8; width * height * 3];
+
+    if screenshot.meta.format != "rgb565_le" {
+        return Err(anyhow!("unsupported screenshot format {}", screenshot.meta.format));
+    }
+    if stride < row_bytes {
+        return Err(anyhow!("invalid screenshot stride {} for width {}", stride, width));
+    }
+    if screenshot.data.len() < expected_min {
+        return Err(anyhow!(
+            "screenshot data too short: {} < {}",
+            screenshot.data.len(),
+            expected_min
+        ));
+    }
+
+    for y in 0..height {
+        let src_row = &screenshot.data[y * stride..y * stride + row_bytes];
+        let dst_row = &mut rgb[y * width * 3..(y + 1) * width * 3];
+
+        for x in 0..width {
+            let pixel = u16::from_le_bytes([src_row[x * 2], src_row[x * 2 + 1]]);
+            let red = ((pixel >> 11) & 0x1F) as u8;
+            let green = ((pixel >> 5) & 0x3F) as u8;
+            let blue = (pixel & 0x1F) as u8;
+
+            dst_row[x * 3] = (u16::from(red) * 255 / 31) as u8;
+            dst_row[x * 3 + 1] = (u16::from(green) * 255 / 63) as u8;
+            dst_row[x * 3 + 2] = (u16::from(blue) * 255 / 31) as u8;
+        }
+    }
+
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create screenshot directory {}", parent.display())
+        })?;
+    }
+
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let writer = BufWriter::new(file);
+    let mut encoder =
+        png::Encoder::new(writer, screenshot.meta.width.into(), screenshot.meta.height.into());
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut png_writer = encoder.write_header().context("failed to write PNG header")?;
+    png_writer.write_image_data(&rgb).context("failed to write PNG image data")?;
+    Ok(())
+}
+
 fn json_escape_path(path: PathBuf) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 async fn approve_from_stdin() -> Result<()> {
     let mut stdin = String::new();
-    io::stdin()
-        .read_to_string(&mut stdin)
-        .context("failed to read stdin")?;
+    io::stdin().read_to_string(&mut stdin).context("failed to read stdin")?;
 
     let raw: Value = match serde_json::from_str(&stdin) {
         Ok(v) => v,
@@ -955,11 +1027,7 @@ async fn approve_from_stdin() -> Result<()> {
         }
     };
 
-    let tool_name = raw
-        .get("tool_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let tool_name = raw.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
     let display_tool_name = sanitize_tool_name(&tool_name).unwrap_or_else(|| "unknown".into());
 
     let tool_input_summary = summarize_tool_input(&raw);
@@ -972,9 +1040,7 @@ async fn approve_from_stdin() -> Result<()> {
         .unwrap_or_else(|| "default".into());
 
     let approval_id = build_approval_id(now_epoch_millis(), &tool_name);
-    let event = serde_json::from_str::<RawHookInput>(&stdin)
-        .ok()
-        .map(sanitize_raw_event);
+    let event = serde_json::from_str::<RawHookInput>(&stdin).ok().map(sanitize_raw_event);
 
     // Also ingest as a normal event so the dashboard updates
     if let Some(event) = event.as_ref() {
@@ -1039,11 +1105,7 @@ async fn approve_from_stdin() -> Result<()> {
         tokio::time::sleep(poll_interval).await;
 
         let response = client
-            .get(format!(
-                "{}/v1/claude/approvals/{}",
-                admin_base_url(),
-                approval_id
-            ))
+            .get(format!("{}/v1/claude/approvals/{}", admin_base_url(), approval_id))
             .timeout(std::time::Duration::from_secs(2))
             .send()
             .await;
@@ -1058,26 +1120,17 @@ async fn approve_from_stdin() -> Result<()> {
             None => continue,
         };
 
-        let resolved = approval
-            .get("resolved")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let resolved = approval.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
         if !resolved {
             continue;
         }
 
-        let dismissed = approval
-            .get("dismissed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let dismissed = approval.get("dismissed").and_then(|v| v.as_bool()).unwrap_or(false);
         if dismissed {
             return Ok(());
         }
 
-        let decision = approval
-            .get("decision")
-            .and_then(|v| v.as_str())
-            .unwrap_or("deny");
+        let decision = approval.get("decision").and_then(|v| v.as_str()).unwrap_or("deny");
 
         let output = match decision {
             "allow" => json!({
@@ -1217,10 +1270,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_agent_available_detects_running_agent() -> Result<()> {
-        let router = Router::new().route(
-            "/v1/agent/status",
-            get(|| async { Json(json!({ "ok": true })) }),
-        );
+        let router =
+            Router::new().route("/v1/agent/status", get(|| async { Json(json!({ "ok": true })) }));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -1259,31 +1310,17 @@ mod tests {
         assert_eq!(requests[0].body["hook_event_name"], "PermissionRequest");
         assert_eq!(requests[1].path, "/v1/claude/approvals");
         assert_eq!(requests[1].body["id"], scenario.approval_id);
-        assert_eq!(
-            requests[1].body["session_id"],
-            scenario.request_event.session_id
-        );
+        assert_eq!(requests[1].body["session_id"], scenario.request_event.session_id);
         assert_eq!(
             requests[1].body["tool_use_id"],
-            scenario
-                .request_event
-                .tool_use_id
-                .as_deref()
-                .unwrap_or_default()
+            scenario.request_event.tool_use_id.as_deref().unwrap_or_default()
         );
         assert_eq!(requests[2].path, "/v1/claude/events");
         assert_eq!(requests[2].body["hook_event_name"], "PreToolUse");
-        assert_eq!(
-            requests[2].body["session_id"],
-            scenario.clear_event.session_id
-        );
+        assert_eq!(requests[2].body["session_id"], scenario.clear_event.session_id);
         assert_eq!(
             requests[2].body["tool_use_id"],
-            scenario
-                .clear_event
-                .tool_use_id
-                .as_deref()
-                .unwrap_or_default()
+            scenario.clear_event.tool_use_id.as_deref().unwrap_or_default()
         );
 
         server.abort();

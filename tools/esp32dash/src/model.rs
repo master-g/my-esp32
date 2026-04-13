@@ -191,6 +191,46 @@ pub struct DeviceListEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotStartResponse {
+    pub capture_id: String,
+    pub app: String,
+    pub source: String,
+    pub format: String,
+    pub width: u16,
+    pub height: u16,
+    pub stride_bytes: u16,
+    pub data_size: u32,
+    pub chunk_bytes: u32,
+    pub chunk_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotChunkEvent {
+    pub capture_id: String,
+    pub index: u32,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotDoneEvent {
+    pub capture_id: String,
+    pub chunks_sent: u32,
+    pub bytes_sent: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotErrorEvent {
+    pub capture_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceScreenshot {
+    pub meta: ScreenshotStartResponse,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcRequest {
     pub method: String,
     #[serde(default)]

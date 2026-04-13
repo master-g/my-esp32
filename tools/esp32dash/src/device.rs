@@ -18,9 +18,12 @@ use std::{
 
 use crate::approvals::ApprovalDecision;
 use crate::model::{
-    DeviceHello, DeviceListEntry, RpcRequest, SerialConnectionStatus, Snapshot, WireFrame,
+    DeviceHello, DeviceListEntry, DeviceScreenshot, RpcRequest, ScreenshotChunkEvent,
+    ScreenshotDoneEvent, ScreenshotErrorEvent, ScreenshotStartResponse, SerialConnectionStatus,
+    Snapshot, WireFrame,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -31,9 +34,15 @@ const MAX_LINE_BUFFER: usize = 4096;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT_APPROVAL: Duration = Duration::from_secs(310);
+const RPC_TIMEOUT_SCREENSHOT_START: Duration = Duration::from_secs(10);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const SCREENSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(60);
+const SCREENSHOT_FORMAT_RGB565_LE: &str = "rgb565_le";
+const SCREENSHOT_MAX_WIDTH: usize = 640;
+const SCREENSHOT_MAX_HEIGHT: usize = 172;
+const SCREENSHOT_MAX_BYTES: usize = SCREENSHOT_MAX_WIDTH * SCREENSHOT_MAX_HEIGHT * 2;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -93,17 +102,13 @@ impl DeviceManager {
         let worker_status = status.clone();
 
         thread::spawn(move || {
-            worker_loop(
-                config,
-                factory,
-                worker_status,
-                cmd_rx,
-                initial_snapshot,
-                event_tx,
-            )
+            worker_loop(config, factory, worker_status, cmd_rx, initial_snapshot, event_tx)
         });
 
-        Self { cmd_tx, status }
+        Self {
+            cmd_tx,
+            status,
+        }
     }
 
     pub fn send_snapshot(&self, snapshot: Snapshot) {
@@ -137,10 +142,7 @@ impl DeviceManager {
     }
 
     pub fn status(&self) -> SerialConnectionStatus {
-        self.status
-            .lock()
-            .expect("serial status mutex poisoned")
-            .clone()
+        self.status.lock().expect("serial status mutex poisoned").clone()
     }
 }
 
@@ -154,7 +156,10 @@ pub fn discover_devices(
     for port in candidates {
         debug!(port, "probing...");
         if let Ok((_, hello)) = connect_port(factory.as_ref(), &port, baud) {
-            devices.push(DeviceListEntry { port, hello });
+            devices.push(DeviceListEntry {
+                port,
+                hello,
+            });
         }
     }
     Ok(devices)
@@ -179,6 +184,16 @@ pub fn request_direct_with_timeout(
     let port = resolve_port(factory.clone(), preferred_port, baud)?;
     let (mut session, _) = connect_port(factory.as_ref(), &port, baud)?;
     perform_rpc(session.as_mut(), request, timeout)
+}
+
+pub fn capture_screenshot_direct(
+    factory: Arc<dyn SessionFactory>,
+    preferred_port: Option<&str>,
+    baud: u32,
+) -> Result<DeviceScreenshot> {
+    let port = resolve_port(factory.clone(), preferred_port, baud)?;
+    let (mut session, _) = connect_port(factory.as_ref(), &port, baud)?;
+    capture_screenshot(session.as_mut())
 }
 
 pub fn send_event_direct(
@@ -231,11 +246,7 @@ pub fn open_direct_session(
 }
 
 pub fn encode_frame_line(frame: &WireFrame) -> Result<String> {
-    Ok(format!(
-        "{}{}\n",
-        PROTOCOL_PREFIX,
-        serde_json::to_string(frame)?
-    ))
+    Ok(format!("{}{}\n", PROTOCOL_PREFIX, serde_json::to_string(frame)?))
 }
 
 pub fn decode_frame_line(line: &str) -> Result<Option<WireFrame>> {
@@ -293,7 +304,10 @@ fn worker_loop(
                                 break;
                             }
                         }
-                        Ok(WorkerCommand::Event { method, payload }) => {
+                        Ok(WorkerCommand::Event {
+                            method,
+                            payload,
+                        }) => {
                             if let Err(err) = send_named_event(session.as_mut(), &method, payload) {
                                 set_last_error(
                                     &status,
@@ -303,7 +317,10 @@ fn worker_loop(
                                 break;
                             }
                         }
-                        Ok(WorkerCommand::Rpc { request, reply }) => {
+                        Ok(WorkerCommand::Rpc {
+                            request,
+                            reply,
+                        }) => {
                             let timeout = if request.method == "claude.approve" {
                                 RPC_TIMEOUT_APPROVAL
                             } else {
@@ -345,7 +362,10 @@ fn worker_loop(
                                     },
                                 );
                             }
-                            WireFrame::Event { method, payload } => {
+                            WireFrame::Event {
+                                method,
+                                payload,
+                            } => {
                                 if let Some(device_event) = parse_device_event(&method, &payload) {
                                     if let Err(err) = event_tx.send(device_event) {
                                         warn!(
@@ -372,8 +392,13 @@ fn worker_loop(
                     Ok(WorkerCommand::UpdateSnapshot(snapshot)) => {
                         pending_snapshot = Some(snapshot)
                     }
-                    Ok(WorkerCommand::Event { .. }) => {}
-                    Ok(WorkerCommand::Rpc { reply, .. }) => {
+                    Ok(WorkerCommand::Event {
+                        ..
+                    }) => {}
+                    Ok(WorkerCommand::Rpc {
+                        reply,
+                        ..
+                    }) => {
                         let _ = reply.send(Err("no compatible device connected".to_string()));
                     }
                     Err(std_mpsc::RecvTimeoutError::Timeout) => {}
@@ -388,11 +413,7 @@ fn connect_for_worker(
     config: DeviceConfig,
     factory: Arc<dyn SessionFactory>,
 ) -> Result<(String, Box<dyn DeviceSession>, DeviceHello)> {
-    let port = resolve_port(
-        factory.clone(),
-        config.preferred_port.as_deref(),
-        config.baud,
-    )?;
+    let port = resolve_port(factory.clone(), config.preferred_port.as_deref(), config.baud)?;
     let (session, hello) = connect_port(factory.as_ref(), &port, config.baud)?;
     Ok((port, session, hello))
 }
@@ -436,6 +457,192 @@ fn connect_port(
     Ok((session, hello))
 }
 
+fn capture_screenshot(session: &mut dyn DeviceSession) -> Result<DeviceScreenshot> {
+    let start_value = perform_rpc(
+        session,
+        RpcRequest {
+            method: "screen.capture.start".into(),
+            params: json!({}),
+        },
+        RPC_TIMEOUT_SCREENSHOT_START,
+    )?;
+    let meta: ScreenshotStartResponse =
+        serde_json::from_value(start_value).context("invalid screenshot start response")?;
+    validate_screenshot_meta(&meta)?;
+
+    let mut data = vec![0u8; meta.data_size as usize];
+    let mut received = vec![false; meta.chunk_count as usize];
+    let mut bytes_received = 0usize;
+    let deadline = Instant::now() + SCREENSHOT_STREAM_TIMEOUT;
+
+    loop {
+        let remaining = remaining(deadline);
+        if remaining.is_zero() {
+            bail!("timed out waiting for screenshot stream");
+        }
+
+        match session.read_frame(remaining)? {
+            Some(WireFrame::Event {
+                method,
+                payload,
+            }) if method == "screen.capture.chunk" => {
+                let chunk: ScreenshotChunkEvent =
+                    serde_json::from_value(payload).context("invalid screenshot chunk payload")?;
+                let index = chunk.index as usize;
+                let offset = index * meta.chunk_bytes as usize;
+                let decoded = BASE64
+                    .decode(chunk.data.as_bytes())
+                    .context("invalid base64 screenshot chunk")?;
+
+                if chunk.capture_id != meta.capture_id {
+                    continue;
+                }
+                if index >= received.len() {
+                    bail!("screenshot chunk index {index} is out of range");
+                }
+                if received[index] {
+                    bail!("received duplicate screenshot chunk {index}");
+                }
+                let expected_chunk_len = usize::min(meta.chunk_bytes as usize, data.len() - offset);
+                if decoded.len() != expected_chunk_len {
+                    bail!(
+                        "screenshot chunk {index} has invalid size {} (expected {expected_chunk_len})",
+                        decoded.len()
+                    );
+                }
+                if offset + decoded.len() > data.len() {
+                    bail!("screenshot chunk {index} exceeds declared image size");
+                }
+
+                data[offset..offset + decoded.len()].copy_from_slice(&decoded);
+                received[index] = true;
+                bytes_received += decoded.len();
+            }
+            Some(WireFrame::Event {
+                method,
+                payload,
+            }) if method == "screen.capture.done" => {
+                let done: ScreenshotDoneEvent =
+                    serde_json::from_value(payload).context("invalid screenshot done payload")?;
+
+                if done.capture_id != meta.capture_id {
+                    continue;
+                }
+                if done.bytes_sent != meta.data_size {
+                    bail!(
+                        "device reported {} screenshot bytes, expected {}",
+                        done.bytes_sent,
+                        meta.data_size
+                    );
+                }
+                if done.chunks_sent != meta.chunk_count {
+                    bail!(
+                        "device reported {} screenshot chunks, expected {}",
+                        done.chunks_sent,
+                        meta.chunk_count
+                    );
+                }
+                break;
+            }
+            Some(WireFrame::Event {
+                method,
+                payload,
+            }) if method == "screen.capture.error" => {
+                let error: ScreenshotErrorEvent =
+                    serde_json::from_value(payload).context("invalid screenshot error payload")?;
+
+                if error.capture_id.is_empty() || error.capture_id == meta.capture_id {
+                    bail!("device screenshot failed: {}", error.message);
+                }
+            }
+            Some(_) => {}
+            None => bail!("timed out waiting for screenshot stream"),
+        }
+    }
+
+    if received.iter().any(|chunk| !chunk) {
+        bail!("screenshot stream ended before all chunks arrived");
+    }
+    if bytes_received != data.len() {
+        bail!("screenshot stream delivered {} bytes, expected {}", bytes_received, data.len());
+    }
+
+    Ok(DeviceScreenshot {
+        meta,
+        data,
+    })
+}
+
+fn validate_screenshot_meta(meta: &ScreenshotStartResponse) -> Result<()> {
+    if meta.capture_id.is_empty() {
+        bail!("device returned an empty screenshot capture_id");
+    }
+    if meta.format != SCREENSHOT_FORMAT_RGB565_LE {
+        bail!(
+            "unsupported screenshot format {} (expected {SCREENSHOT_FORMAT_RGB565_LE})",
+            meta.format
+        );
+    }
+    if meta.width == 0
+        || meta.height == 0
+        || meta.stride_bytes == 0
+        || meta.data_size == 0
+        || meta.chunk_bytes == 0
+        || meta.chunk_count == 0
+    {
+        bail!("device returned incomplete screenshot metadata");
+    }
+
+    let width = usize::from(meta.width);
+    let height = usize::from(meta.height);
+    let stride_bytes = usize::from(meta.stride_bytes);
+    let data_size = meta.data_size as usize;
+    let chunk_bytes = meta.chunk_bytes as usize;
+    let chunk_count = meta.chunk_count as usize;
+
+    if width > SCREENSHOT_MAX_WIDTH || height > SCREENSHOT_MAX_HEIGHT {
+        bail!("device returned oversized screenshot dimensions {}x{}", meta.width, meta.height);
+    }
+
+    let expected_stride =
+        width.checked_mul(2).ok_or_else(|| anyhow!("screenshot stride overflow"))?;
+    if stride_bytes != expected_stride {
+        bail!(
+            "device reported screenshot stride {} but expected {}",
+            meta.stride_bytes,
+            expected_stride
+        );
+    }
+
+    let expected_data_size =
+        stride_bytes.checked_mul(height).ok_or_else(|| anyhow!("screenshot byte size overflow"))?;
+    if expected_data_size > SCREENSHOT_MAX_BYTES {
+        bail!(
+            "device reported screenshot size {} larger than supported maximum {}",
+            expected_data_size,
+            SCREENSHOT_MAX_BYTES
+        );
+    }
+    if data_size != expected_data_size {
+        bail!(
+            "device reported screenshot size {} but expected {}",
+            meta.data_size,
+            expected_data_size
+        );
+    }
+
+    let expected_chunk_count = data_size.div_ceil(chunk_bytes);
+    if chunk_count != expected_chunk_count {
+        bail!(
+            "device reported screenshot chunk_count {} but expected {}",
+            meta.chunk_count,
+            expected_chunk_count
+        );
+    }
+
+    Ok(())
+}
+
 fn wait_for_hello(session: &mut dyn DeviceSession, timeout: Duration) -> Result<DeviceHello> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -461,11 +668,7 @@ fn perform_rpc(
     timeout: Duration,
 ) -> Result<Value> {
     let request_id = format!("rpc-{}", NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst));
-    session.write_frame(&WireFrame::request(
-        request_id.clone(),
-        request.method,
-        request.params,
-    ))?;
+    session.write_frame(&WireFrame::request(request_id.clone(), request.method, request.params))?;
 
     let deadline = Instant::now() + timeout;
     loop {
@@ -515,15 +718,15 @@ fn parse_device_event(method: &str, payload: &Value) -> Option<DeviceEvent> {
         "deny" => ApprovalDecision::Deny,
         "yolo" => ApprovalDecision::Yolo,
         other => {
-            warn!(
-                decision = other,
-                "ignoring unknown approval decision from device"
-            );
+            warn!(decision = other, "ignoring unknown approval decision from device");
             return None;
         }
     };
 
-    Some(DeviceEvent::ApprovalResolved { id, decision })
+    Some(DeviceEvent::ApprovalResolved {
+        id,
+        decision,
+    })
 }
 
 fn set_connected(status: &Arc<Mutex<SerialConnectionStatus>>, port: &str, hello: &DeviceHello) {
@@ -577,7 +780,13 @@ fn candidate_ports() -> Result<Vec<String>> {
         }
     }
 
-    names.sort_by_key(|name| if name.starts_with("tty.") { 0 } else { 1 });
+    names.sort_by_key(|name| {
+        if name.starts_with("tty.") {
+            0
+        } else {
+            1
+        }
+    });
 
     let mut ports = Vec::new();
     for name in names {
@@ -601,10 +810,7 @@ fn looks_like_serial_port(name: &str) -> bool {
 }
 
 fn canonical_port_name(name: &str) -> String {
-    if let Some(stripped) = name
-        .strip_prefix("tty.")
-        .or_else(|| name.strip_prefix("cu."))
-    {
+    if let Some(stripped) = name.strip_prefix("tty.").or_else(|| name.strip_prefix("cu.")) {
         stripped.to_string()
     } else {
         name.to_string()
@@ -672,10 +878,7 @@ impl UnixSerialPort {
         let c_path = CString::new(Path::new(path).as_os_str().as_bytes())
             .with_context(|| format!("serial path contains interior NUL: {path}"))?;
         let fd = unsafe {
-            libc::open(
-                c_path.as_ptr(),
-                libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK,
-            )
+            libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK)
         };
         if fd < 0 {
             return Err(io::Error::last_os_error())
@@ -816,9 +1019,12 @@ fn wait_fd(fd: i32, events: i16, timeout: Duration) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::Mutex;
 
     use super::*;
     use crate::model::Attention;
+
+    static REQUEST_ID_LOCK: Mutex<()> = Mutex::new(());
 
     struct FakeSession {
         reads: VecDeque<Result<Option<WireFrame>>>,
@@ -901,7 +1107,10 @@ mod tests {
 
         assert_eq!(session.writes.len(), 1);
         match &session.writes[0] {
-            WireFrame::Event { method, payload } => {
+            WireFrame::Event {
+                method,
+                payload,
+            } => {
                 assert_eq!(method, "claude.update");
                 assert_eq!(payload["seq"], 7);
             }
@@ -926,5 +1135,172 @@ mod tests {
                 decision: ApprovalDecision::Allow,
             })
         );
+    }
+
+    #[test]
+    fn capture_screenshot_collects_chunk_stream() {
+        let _guard = REQUEST_ID_LOCK.lock().unwrap();
+        let chunk = BASE64.encode([0x34u8, 0x12, 0x78, 0x56]);
+        let mut session = FakeSession::new(vec![
+            Ok(Some(WireFrame::Response {
+                id: "rpc-1".into(),
+                ok: true,
+                result: Some(json!({
+                    "capture_id": "capture-1",
+                    "app": "home",
+                    "source": "lvgl",
+                    "format": "rgb565_le",
+                    "width": 2,
+                    "height": 1,
+                    "stride_bytes": 4,
+                    "data_size": 4,
+                    "chunk_bytes": 4,
+                    "chunk_count": 1
+                })),
+                error: None,
+            })),
+            Ok(Some(WireFrame::Event {
+                method: "screen.capture.chunk".into(),
+                payload: json!({
+                    "capture_id": "capture-1",
+                    "index": 0,
+                    "data": chunk
+                }),
+            })),
+            Ok(Some(WireFrame::Event {
+                method: "screen.capture.done".into(),
+                payload: json!({
+                    "capture_id": "capture-1",
+                    "chunks_sent": 1,
+                    "bytes_sent": 4
+                }),
+            })),
+        ]);
+
+        NEXT_REQUEST_ID.store(1, Ordering::SeqCst);
+        let screenshot = capture_screenshot(&mut session).unwrap();
+
+        assert_eq!(screenshot.meta.capture_id, "capture-1");
+        assert_eq!(screenshot.meta.width, 2);
+        assert_eq!(screenshot.meta.height, 1);
+        assert_eq!(screenshot.data, vec![0x34, 0x12, 0x78, 0x56]);
+        assert_eq!(session.writes.len(), 1);
+        match &session.writes[0] {
+            WireFrame::Request {
+                method,
+                ..
+            } => assert_eq!(method, "screen.capture.start"),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_screenshot_rejects_duplicate_chunks() {
+        let _guard = REQUEST_ID_LOCK.lock().unwrap();
+        let chunk = BASE64.encode([0x34u8, 0x12]);
+        let mut session = FakeSession::new(vec![
+            Ok(Some(WireFrame::Response {
+                id: "rpc-1".into(),
+                ok: true,
+                result: Some(json!({
+                    "capture_id": "capture-2",
+                    "app": "home",
+                    "source": "lvgl",
+                    "format": "rgb565_le",
+                    "width": 1,
+                    "height": 1,
+                    "stride_bytes": 2,
+                    "data_size": 2,
+                    "chunk_bytes": 2,
+                    "chunk_count": 1
+                })),
+                error: None,
+            })),
+            Ok(Some(WireFrame::Event {
+                method: "screen.capture.chunk".into(),
+                payload: json!({
+                    "capture_id": "capture-2",
+                    "index": 0,
+                    "data": chunk
+                }),
+            })),
+            Ok(Some(WireFrame::Event {
+                method: "screen.capture.chunk".into(),
+                payload: json!({
+                    "capture_id": "capture-2",
+                    "index": 0,
+                    "data": BASE64.encode([0x78u8, 0x56])
+                }),
+            })),
+        ]);
+
+        NEXT_REQUEST_ID.store(1, Ordering::SeqCst);
+        let err = capture_screenshot(&mut session).unwrap_err();
+
+        assert!(err.to_string().contains("duplicate screenshot chunk 0"));
+    }
+
+    #[test]
+    fn capture_screenshot_rejects_oversized_metadata() {
+        let _guard = REQUEST_ID_LOCK.lock().unwrap();
+        let mut session = FakeSession::new(vec![Ok(Some(WireFrame::Response {
+            id: "rpc-1".into(),
+            ok: true,
+            result: Some(json!({
+                "capture_id": "capture-3",
+                "app": "home",
+                "source": "lvgl",
+                "format": "rgb565_le",
+                "width": 641,
+                "height": 172,
+                "stride_bytes": 1282,
+                "data_size": 220504,
+                "chunk_bytes": 1024,
+                "chunk_count": 216
+            })),
+            error: None,
+        }))]);
+
+        NEXT_REQUEST_ID.store(1, Ordering::SeqCst);
+        let err = capture_screenshot(&mut session).unwrap_err();
+
+        assert!(err.to_string().contains("oversized screenshot dimensions"));
+    }
+
+    #[test]
+    fn capture_screenshot_rejects_short_chunk() {
+        let _guard = REQUEST_ID_LOCK.lock().unwrap();
+        let mut session = FakeSession::new(vec![
+            Ok(Some(WireFrame::Response {
+                id: "rpc-1".into(),
+                ok: true,
+                result: Some(json!({
+                    "capture_id": "capture-4",
+                    "app": "home",
+                    "source": "lvgl",
+                    "format": "rgb565_le",
+                    "width": 1,
+                    "height": 1,
+                    "stride_bytes": 2,
+                    "data_size": 2,
+                    "chunk_bytes": 2,
+                    "chunk_count": 1
+                })),
+                error: None,
+            })),
+            Ok(Some(WireFrame::Event {
+                method: "screen.capture.chunk".into(),
+                payload: json!({
+                    "capture_id": "capture-4",
+                    "index": 0,
+                    "data": BASE64.encode([0x34u8])
+                }),
+            })),
+        ]);
+
+        NEXT_REQUEST_ID.store(1, Ordering::SeqCst);
+        let err = capture_screenshot(&mut session).unwrap_err();
+
+        assert!(err.to_string().contains("invalid size 1 (expected 2)"));
     }
 }

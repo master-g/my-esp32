@@ -92,9 +92,21 @@ impl fmt::Display for WiFiProfileEntry {
             f,
             "{}{}{}{}",
             self.ssid,
-            if self.hidden { " [hidden]" } else { "" },
-            if self.active { " [active]" } else { "" },
-            if self.has_password { "" } else { " [open]" }
+            if self.hidden {
+                " [hidden]"
+            } else {
+                ""
+            },
+            if self.active {
+                " [active]"
+            } else {
+                ""
+            },
+            if self.has_password {
+                ""
+            } else {
+                " [open]"
+            }
         )
     }
 }
@@ -315,11 +327,8 @@ fn build_menu_choices(
         .map(|zone| zone.name)
         .or(current.timezone_name.as_deref())
         .unwrap_or("Custom TZ");
-    let weather = pending
-        .weather
-        .as_ref()
-        .map(|weather| weather.label.as_str())
-        .unwrap_or_else(|| {
+    let weather =
+        pending.weather.as_ref().map(|weather| weather.label.as_str()).unwrap_or_else(|| {
             if current.weather_city_label.is_empty() {
                 "<not set>"
             } else {
@@ -334,10 +343,7 @@ fn build_menu_choices(
             wifi_profiles.len(),
             active_profile
         )),
-        ConfigMenuChoice::Time(format!(
-            "Time zone: {} ({})",
-            timezone_name, current.timezone_tz
-        )),
+        ConfigMenuChoice::Time(format!("Time zone: {} ({})", timezone_name, current.timezone_tz)),
         ConfigMenuChoice::Weather(format!(
             "Weather city: {} ({}, {})",
             weather, current.weather_latitude, current.weather_longitude
@@ -378,12 +384,7 @@ async fn edit_wifi_profiles(profiles: &[WiFiProfileEntry], port: Option<&str>) -
 
     let Some(action) = prompt_select(
         "Choose how to manage Wi-Fi profiles",
-        vec![
-            WiFiAction::AddVisible,
-            WiFiAction::AddHidden,
-            WiFiAction::Remove,
-            WiFiAction::Back,
-        ],
+        vec![WiFiAction::AddVisible, WiFiAction::AddHidden, WiFiAction::Remove, WiFiAction::Back],
     )?
     else {
         return Ok(false);
@@ -415,12 +416,7 @@ async fn select_visible_network(profiles: &[WiFiProfileEntry], port: Option<&str
     }
 
     let mut aps = response.aps;
-    aps.sort_by(|left, right| {
-        right
-            .rssi
-            .cmp(&left.rssi)
-            .then_with(|| left.ssid.cmp(&right.ssid))
-    });
+    aps.sort_by(|left, right| right.rssi.cmp(&left.rssi).then_with(|| left.ssid.cmp(&right.ssid)));
     aps.dedup_by(|left, right| left.ssid == right.ssid);
 
     let Some(ap) = prompt_select("Select a visible Wi-Fi network", aps)? else {
@@ -452,11 +448,7 @@ async fn select_visible_network(profiles: &[WiFiProfileEntry], port: Option<&str
 
         let Some(action) = prompt_select(
             &format!("How should `{}` use its password?", ap.ssid),
-            vec![
-                PasswordAction::Keep,
-                PasswordAction::EnterNew,
-                PasswordAction::Clear,
-            ],
+            vec![PasswordAction::Keep, PasswordAction::EnterNew, PasswordAction::Clear],
         )?
         else {
             return Ok(false);
@@ -509,11 +501,7 @@ async fn join_hidden_network(profiles: &[WiFiProfileEntry], port: Option<&str>) 
         if existing.has_password {
             let Some(action) = prompt_select(
                 &format!("How should hidden profile `{}` use its password?", ssid),
-                vec![
-                    HiddenAction::Keep,
-                    HiddenAction::EnterNew,
-                    HiddenAction::Clear,
-                ],
+                vec![HiddenAction::Keep, HiddenAction::EnterNew, HiddenAction::Clear],
             )?
             else {
                 return Ok(false);
@@ -555,10 +543,8 @@ async fn remove_wifi_profile(profiles: &[WiFiProfileEntry], port: Option<&str>) 
     else {
         return Ok(false);
     };
-    let Some(confirm) = prompt_confirm(
-        &format!("Remove `{}` from stored Wi-Fi profiles?", profile.ssid),
-        false,
-    )?
+    let Some(confirm) =
+        prompt_confirm(&format!("Remove `{}` from stored Wi-Fi profiles?", profile.ssid), false)?
     else {
         return Ok(false);
     };
@@ -613,11 +599,8 @@ fn edit_timezone(
     current: &DeviceConfigState,
     pending: &PendingChanges,
 ) -> Result<Option<TimeZoneChoice>> {
-    let initial = pending
-        .timezone
-        .as_ref()
-        .map(|zone| zone.name)
-        .or(current.timezone_name.as_deref());
+    let initial =
+        pending.timezone.as_ref().map(|zone| zone.name).or(current.timezone_name.as_deref());
 
     loop {
         let Some(query) = prompt_text("Search for a timezone name", initial)? else {
@@ -657,12 +640,7 @@ async fn search_weather_locations(query: &str) -> Result<Vec<WeatherChoice>> {
         .get(
             Url::parse_with_params(
                 GEOCODING_ENDPOINT,
-                [
-                    ("name", query),
-                    ("count", "10"),
-                    ("language", "en"),
-                    ("format", "json"),
-                ],
+                [("name", query), ("count", "10"), ("language", "en"), ("format", "json")],
             )
             .context("failed to build the geocoding request URL")?,
         )
@@ -698,10 +676,7 @@ fn print_pending_summary(current: &DeviceConfigState, pending: &PendingChanges) 
             current.timezone_name.as_deref().unwrap_or("Custom TZ"),
             zone.name
         );
-        println!(
-            "  time.timezone_tz: {} -> {}",
-            current.timezone_tz, zone.posix_tz
-        );
+        println!("  time.timezone_tz: {} -> {}", current.timezone_tz, zone.posix_tz);
     }
     if let Some(weather) = pending.weather.as_ref() {
         println!(
@@ -774,7 +749,11 @@ fn value_to_string(value: Value) -> Option<String> {
 }
 
 fn display_text(value: &str) -> &str {
-    if value.is_empty() { "<empty>" } else { value }
+    if value.is_empty() {
+        "<empty>"
+    } else {
+        value
+    }
 }
 
 fn truncate_city_label(name: &str) -> String {
@@ -783,11 +762,7 @@ fn truncate_city_label(name: &str) -> String {
 
 fn format_geocoding_label(result: &GeocodingResult) -> String {
     let mut parts = vec![result.name.clone()];
-    if let Some(admin1) = result
-        .admin1
-        .as_ref()
-        .filter(|admin1| *admin1 != &result.name)
-    {
+    if let Some(admin1) = result.admin1.as_ref().filter(|admin1| *admin1 != &result.name) {
         parts.push(admin1.clone());
     }
     if let Some(country) = result.country.as_ref() {
@@ -796,12 +771,7 @@ fn format_geocoding_label(result: &GeocodingResult) -> String {
     if let Some(timezone) = result.timezone.as_ref() {
         parts.push(timezone.clone());
     }
-    format!(
-        "{} ({:.4}, {:.4})",
-        parts.join(", "),
-        result.latitude,
-        result.longitude
-    )
+    format!("{} ({:.4}, {:.4})", parts.join(", "), result.latitude, result.longitude)
 }
 
 fn find_timezones(query: &str) -> Vec<TimeZoneChoice> {

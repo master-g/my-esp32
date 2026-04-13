@@ -25,24 +25,34 @@ static void approval_btn_cb(lv_event_t *e)
     }
 }
 
-static lv_obj_t *create_approval_btn(lv_obj_t *parent, const char *text, uint32_t color,
-                                     approval_decision_t decision)
+static lv_obj_t *create_approval_btn(lv_obj_t *parent, const char *icon, const char *text,
+                                     uint32_t color, approval_decision_t decision)
 {
     lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_t *label;
+    lv_obj_t *icon_label;
+    lv_obj_t *text_label;
 
     lv_obj_set_height(btn, APPROVE_BTN_H);
     lv_obj_set_flex_grow(btn, 1);
     lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(btn, 6, 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_pad_hor(btn, 10, 0);
+    lv_obj_set_style_pad_ver(btn, 0, 0);
+    lv_obj_set_style_pad_column(btn, 6, 0);
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    label = lv_label_create(btn);
-    lv_label_set_text(label, text);
-    lv_obj_set_style_text_font(label, ui_font_text_11(), 0);
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_center(label);
+    icon_label = lv_label_create(btn);
+    lv_label_set_text(icon_label, icon);
+    lv_obj_set_style_text_font(icon_label, LV_FONT_DEFAULT, 0);
+    lv_obj_set_style_text_color(icon_label, lv_color_white(), 0);
+
+    text_label = lv_label_create(btn);
+    lv_label_set_text(text_label, text);
+    lv_obj_set_style_text_font(text_label, ui_font_text_11(), 0);
+    lv_obj_set_style_text_color(text_label, lv_color_white(), 0);
 
     lv_obj_add_event_cb(btn, approval_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)decision);
     return btn;
@@ -92,12 +102,12 @@ void home_approval_create(home_approval_t *approval, lv_obj_t *root)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(btn_row, APPROVE_BTN_GAP, 0);
 
-    approval->btn_allow =
-        create_approval_btn(btn_row, "Accept", APPROVE_ALLOW_COLOR, APPROVAL_DECISION_ALLOW);
-    approval->btn_deny =
-        create_approval_btn(btn_row, "Decline", APPROVE_DENY_COLOR, APPROVAL_DECISION_DENY);
-    approval->btn_yolo =
-        create_approval_btn(btn_row, "YOLO", APPROVE_YOLO_COLOR, APPROVAL_DECISION_YOLO);
+    approval->btn_allow = create_approval_btn(btn_row, LV_SYMBOL_OK, "Accept", APPROVE_ALLOW_COLOR,
+                                              APPROVAL_DECISION_ALLOW);
+    approval->btn_deny = create_approval_btn(btn_row, LV_SYMBOL_CLOSE, "Decline",
+                                             APPROVE_DENY_COLOR, APPROVAL_DECISION_DENY);
+    approval->btn_yolo = create_approval_btn(btn_row, LV_SYMBOL_WARNING, "YOLO", APPROVE_YOLO_COLOR,
+                                             APPROVAL_DECISION_YOLO);
 }
 
 void home_approval_show_pending(home_approval_t *approval)

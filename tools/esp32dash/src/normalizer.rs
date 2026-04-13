@@ -11,16 +11,10 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
     let permission_mode = event.permission_mode.clone();
 
     let (title, detail) = match event.hook_event_name.as_str() {
-        "SessionStart" => (
-            "Session started".to_string(),
-            "Workspace available".to_string(),
-        ),
+        "SessionStart" => ("Session started".to_string(), "Workspace available".to_string()),
         "UserPromptSubmit" => (
             "Processing prompt".to_string(),
-            event
-                .prompt_preview
-                .clone()
-                .unwrap_or_else(|| "User prompt received".to_string()),
+            event.prompt_preview.clone().unwrap_or_else(|| "User prompt received".to_string()),
         ),
         "PreToolUse" => {
             if event.tool_name.as_deref() == Some("AskUserQuestion") {
@@ -28,20 +22,12 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
             }
             (
                 "Running tool".to_string(),
-                event
-                    .tool_name
-                    .as_deref()
-                    .unwrap_or("Tool execution started")
-                    .to_string(),
+                event.tool_name.as_deref().unwrap_or("Tool execution started").to_string(),
             )
         }
         "PostToolUse" => (
             "Tool finished".to_string(),
-            event
-                .tool_name
-                .as_deref()
-                .unwrap_or("Tool execution completed")
-                .to_string(),
+            event.tool_name.as_deref().unwrap_or("Tool execution completed").to_string(),
         ),
         "PostToolUseFailure" => (
             "Tool failed".to_string(),
@@ -75,70 +61,43 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
                     .unwrap_or_else(|| "Tool execution was denied".to_string()),
             )
         }
-        "PreCompact" => (
-            "Compacting context".to_string(),
-            "Preparing context window".to_string(),
-        ),
-        "PostCompact" => (
-            "Compaction finished".to_string(),
-            "Continuing work".to_string(),
-        ),
+        "PreCompact" => ("Compacting context".to_string(), "Preparing context window".to_string()),
+        "PostCompact" => ("Compaction finished".to_string(), "Continuing work".to_string()),
         "Elicitation" => {
             unread = true;
             attention = Attention::High;
             (
                 "Awaiting input".to_string(),
-                event
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "MCP server requested input".to_string()),
+                event.message.clone().unwrap_or_else(|| "MCP server requested input".to_string()),
             )
         }
         "ElicitationResult" => (
             "Input received".to_string(),
-            event
-                .message
-                .clone()
-                .unwrap_or_else(|| "Continuing after user input".to_string()),
+            event.message.clone().unwrap_or_else(|| "Continuing after user input".to_string()),
         ),
         "SubagentStart" => (
             "Subagent running".to_string(),
-            event
-                .message
-                .as_deref()
-                .unwrap_or("Delegated task in progress")
-                .to_string(),
+            event.message.as_deref().unwrap_or("Delegated task in progress").to_string(),
         ),
         "Stop" => {
             unread = true;
             attention = Attention::Medium;
             (
                 "Idle".to_string(),
-                event
-                    .message
-                    .as_deref()
-                    .unwrap_or("Previous action completed")
-                    .to_string(),
+                event.message.as_deref().unwrap_or("Previous action completed").to_string(),
             )
         }
         "SubagentStop" => {
             status = preserve_activity_status(current, RunStatus::Processing);
             (
                 "Subagent finished".to_string(),
-                event
-                    .message
-                    .as_deref()
-                    .unwrap_or("Latest subagent task completed")
-                    .to_string(),
+                event.message.as_deref().unwrap_or("Latest subagent task completed").to_string(),
             )
         }
         "SessionEnd" => {
             unread = true;
             attention = Attention::Medium;
-            (
-                "Session ended".to_string(),
-                "Workspace session ended".to_string(),
-            )
+            ("Session ended".to_string(), "Workspace session ended".to_string())
         }
         "StopFailure" => {
             unread = true;
@@ -286,10 +245,7 @@ mod tests {
     #[test]
     fn prompt_preview_is_single_line_and_truncated() {
         let prompt = "hello world\nsecond line";
-        assert_eq!(
-            sanitize_prompt_preview(prompt).as_deref(),
-            Some("hello world")
-        );
+        assert_eq!(sanitize_prompt_preview(prompt).as_deref(), Some("hello world"));
     }
 
     #[test]

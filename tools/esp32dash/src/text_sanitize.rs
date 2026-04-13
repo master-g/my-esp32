@@ -88,10 +88,7 @@ pub fn build_workspace(cwd: &str) -> String {
 
 pub fn build_approval_id(now_epoch: u64, tool_name: &str) -> String {
     truncate_ascii_token(
-        &format!(
-            "approval-{now_epoch:x}-{:08x}",
-            fnv1a_32(tool_name.as_bytes())
-        ),
+        &format!("approval-{now_epoch:x}-{:08x}", fnv1a_32(tool_name.as_bytes())),
         APPROVAL_ID_MAX_BYTES,
     )
 }
@@ -186,10 +183,7 @@ mod tests {
 
     #[test]
     fn emoji_is_replaced() {
-        assert_eq!(
-            sanitize_display_text("building 🔨 stuff", 96),
-            "building ? stuff"
-        );
+        assert_eq!(sanitize_display_text("building 🔨 stuff", 96), "building ? stuff");
     }
 
     #[test]
@@ -199,10 +193,7 @@ mod tests {
 
     #[test]
     fn approval_summary_uses_device_limit() {
-        assert_eq!(
-            sanitize_approval_summary("创建文件 test.rs 并写入"),
-            "创建文件 test.rs 并写入"
-        );
+        assert_eq!(sanitize_approval_summary("创建文件 test.rs 并写入"), "创建文件 test.rs 并写入");
     }
 
     #[test]
@@ -212,10 +203,7 @@ mod tests {
 
     #[test]
     fn tool_name_is_byte_safe() {
-        assert_eq!(
-            sanitize_tool_name("exec_command").as_deref(),
-            Some("exec_command")
-        );
+        assert_eq!(sanitize_tool_name("exec_command").as_deref(), Some("exec_command"));
     }
 
     #[test]
