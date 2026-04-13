@@ -224,14 +224,13 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_obj_set_size(view->weather_row, HOME_LEFT_HALF_W, HOME_WEATHER_ROW_HEIGHT);
     lv_obj_align(view->weather_row, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_set_flex_flow(view->weather_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(view->weather_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+    lv_obj_set_flex_align(view->weather_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(view->weather_row, HOME_WEATHER_ICON_GAP, 0);
 
     view->weather_icon = lv_label_create(view->weather_row);
     lv_label_set_text_static(view->weather_icon, APP_HOME_SYMBOL_WEATHER_UNKNOWN);
     lv_obj_set_style_text_font(view->weather_icon, &app_home_status_font, 0);
-    lv_obj_set_style_translate_y(view->weather_icon, HOME_WEATHER_ICON_Y_OFFSET, 0);
 
     view->weather_label = lv_label_create(view->weather_row);
     lv_obj_set_width(view->weather_label,
@@ -239,7 +238,6 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_label_set_long_mode(view->weather_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_font(view->weather_label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(view->weather_label, lv_color_hex(HOME_WEATHER_TEXT_COLOR), 0);
-    lv_obj_set_style_translate_y(view->weather_label, HOME_WEATHER_TEXT_Y_OFFSET, 0);
 
     view->sprite_img = lv_image_create(view->root);
     lv_image_set_src(view->sprite_img, &sprite_idle_frames[0]);
