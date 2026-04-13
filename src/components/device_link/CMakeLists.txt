@@ -18,6 +18,7 @@ idf_component_register(
         nvs_flash
         service_bitcoin
         service_claude
+        service_market
         service_time
         service_weather
 )

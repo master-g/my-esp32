@@ -1,8 +1,10 @@
 idf_component_register(
     SRCS
-        "src/market_feed_okx.c"
+        "src/market_feed_gate.c"
         "src/market_http.c"
         "src/market_feed_rest.c"
+        "src/market_stream_binance.c"
+        "src/market_symbols.c"
         "src/service_market.c"
     INCLUDE_DIRS
         "include"
@@ -15,4 +17,5 @@ idf_component_register(
         net_manager
         power_policy
         esp_timer
+        esp_websocket_client
 )

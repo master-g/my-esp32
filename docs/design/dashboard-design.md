@@ -214,8 +214,8 @@ P1 不包含：
 
 - Home 内的 Claude 区域不能依赖“前台时才开始采集”来保证状态完整性
 - `Trading` 页在电池模式下降级为低频刷新，不维持高频市场流
-- 当前阶段行情源先用 REST polling，服务边界为后续切换到 WebSocket 预留
-- 当前代码线采用 `OKX` 主源、`Binance` 备源的自动回退
+- `Trading` 页当前采用混合 transport：`Gate REST` 做主源与历史回填，`Binance REST` 做备源，`Binance WebSocket` 在 `REALTIME` 模式下负责当前前台 summary + chart 流
+- 当前代码线继续为 market feed 开启 mbedTLS external SPIRAM 分配，避免显示栈长期占用 internal DRAM 时 REST / WSS 的 TLS setup 失效
 - 天气始终属于缓存型数据，不进入高频更新路径
 
 ### 6.3 计算密集型页面策略
@@ -566,7 +566,8 @@ project/
 
 - Waveshare Wiki: https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-3.49
 - Claude Code hooks: https://docs.anthropic.com/en/docs/claude-code/hooks
-- Binance Spot API: https://binance-docs.github.io/apidocs/spot/en/
+- Gate API v4: https://www.gate.io/docs/developers/apiv4/en/
+- Binance Spot API: https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams
 - OpenWeatherMap API: https://openweathermap.org/api
 - secp256k1: https://github.com/bitcoin-core/secp256k1
 

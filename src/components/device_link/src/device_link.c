@@ -21,7 +21,9 @@
 #include "freertos/task.h"
 #include "net_manager.h"
 #include "nvs.h"
+#include "power_policy.h"
 #include "service_claude.h"
+#include "service_market.h"
 #include "service_time.h"
 #include "service_weather.h"
 #include "service_bitcoin.h"
@@ -77,6 +79,8 @@ static const char *capabilities[] = {
     "claude.approval.dismiss",
     "claude.approval.resolved",
     "home.screensaver",
+    "app.switch",
+    "debug.market_snapshot",
     "slot.export_hit",
 };
 
@@ -690,6 +694,102 @@ static cJSON *build_device_info(void)
     return result;
 }
 
+static const char *market_state_to_string(trading_data_state_t state)
+{
+    switch (state) {
+    case TRADING_DATA_LOADING:
+        return "loading";
+    case TRADING_DATA_LIVE:
+        return "live";
+    case TRADING_DATA_STALE:
+        return "stale";
+    case TRADING_DATA_ERROR:
+        return "error";
+    case TRADING_DATA_EMPTY:
+    default:
+        return "empty";
+    }
+}
+
+static const char *refresh_mode_to_string(refresh_mode_t mode)
+{
+    switch (mode) {
+    case REFRESH_MODE_REALTIME:
+        return "realtime";
+    case REFRESH_MODE_INTERACTIVE_POLL:
+        return "interactive_poll";
+    case REFRESH_MODE_BACKGROUND_CACHE:
+        return "background_cache";
+    case REFRESH_MODE_PAUSED:
+    default:
+        return "paused";
+    }
+}
+
+static bool parse_app_id_value(const char *value, app_id_t *out)
+{
+    if (value == NULL || out == NULL) {
+        return false;
+    }
+
+    if (strcmp(value, "home") == 0) {
+        *out = APP_ID_HOME;
+        return true;
+    }
+    if (strcmp(value, "trading") == 0) {
+        *out = APP_ID_TRADING;
+        return true;
+    }
+    if (strcmp(value, "slot") == 0 || strcmp(value, "satoshi_slot") == 0) {
+        *out = APP_ID_SATOSHI_SLOT;
+        return true;
+    }
+    if (strcmp(value, "settings") == 0) {
+        *out = APP_ID_SETTINGS;
+        return true;
+    }
+
+    return false;
+}
+
+static cJSON *build_market_snapshot_debug(void)
+{
+    market_snapshot_t market = {0};
+    power_policy_input_t policy_input = {0};
+    power_policy_output_t policy_output = {0};
+    cJSON *result = cJSON_CreateObject();
+
+    if (result == NULL) {
+        return NULL;
+    }
+
+    market_service_get_snapshot(&market);
+    power_policy_get_input(&policy_input);
+    power_policy_get_output(&policy_output);
+
+    cJSON_AddStringToObject(result, "state", market_state_to_string(market.state));
+    cJSON_AddBoolToObject(result, "wifi_connected", market.wifi_connected);
+    cJSON_AddStringToObject(result, "pair", market.pair_label);
+    cJSON_AddStringToObject(result, "price_text", market.price_text);
+    cJSON_AddStringToObject(result, "change_text", market.change_text);
+    cJSON_AddBoolToObject(result, "has_chart_data", market.has_chart_data);
+    cJSON_AddNumberToObject(result, "summary_updated_at_epoch_s",
+                            market.summary_updated_at_epoch_s);
+    cJSON_AddNumberToObject(result, "chart_updated_at_epoch_s", market.chart_updated_at_epoch_s);
+    cJSON_AddStringToObject(result, "active_source", market_source_label(market.active_source));
+    cJSON_AddBoolToObject(result, "fallback_active", market.fallback_active);
+    cJSON_AddNumberToObject(result, "source_error_count", market.source_error_count);
+    cJSON_AddStringToObject(result, "foreground_app",
+                            app_id_to_string(app_manager_get_foreground_app()));
+    cJSON_AddStringToObject(result, "display_state",
+                            (policy_input.display_state == DISPLAY_STATE_ACTIVE) ? "active"
+                            : (policy_input.display_state == DISPLAY_STATE_DIM)  ? "dim"
+                                                                                 : "sleep");
+    cJSON_AddStringToObject(result, "market_mode",
+                            refresh_mode_to_string(policy_output.market_mode));
+    return result;
+}
+
 static esp_err_t parse_claude_update(const cJSON *payload, claude_snapshot_t *snapshot)
 {
     const cJSON *seq = cJSON_GetObjectItemCaseSensitive(payload, "seq");
@@ -940,6 +1040,42 @@ static void handle_request_frame(const cJSON *root)
             return;
         }
         send_response_ok(id->valuestring, cJSON_CreateObject());
+        return;
+    }
+
+    if (strcmp(method->valuestring, "app.switch") == 0) {
+        const cJSON *app = cJSON_GetObjectItemCaseSensitive(params, "app");
+        app_id_t app_id = APP_ID_INVALID;
+        esp_err_t err;
+
+        if (!cJSON_IsString(app) || app->valuestring == NULL ||
+            !parse_app_id_value(app->valuestring, &app_id)) {
+            send_response_error(id->valuestring, "invalid_request",
+                                "app must be one of home/trading/slot/settings");
+            return;
+        }
+
+        err = app_manager_request_switch_to(app_id, UI_CONTROL_TIMEOUT_MS);
+        if (err != ESP_OK) {
+            send_response_error(id->valuestring, "ui_control_failed", esp_err_to_name(err));
+            return;
+        }
+
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddStringToObject(result, "app", app_id_to_string(app_id));
+        send_response_ok(id->valuestring, result);
+        return;
+    }
+
+    if (strcmp(method->valuestring, "debug.market_snapshot") == 0) {
+        cJSON *result = build_market_snapshot_debug();
+
+        if (result == NULL) {
+            send_response_error(id->valuestring, "internal_error",
+                                "failed to build market snapshot");
+            return;
+        }
+        send_response_ok(id->valuestring, result);
         return;
     }
 

@@ -36,7 +36,7 @@ typedef enum {
 } market_transport_hint_t;
 
 typedef enum {
-    MARKET_SOURCE_OKX = 0,
+    MARKET_SOURCE_GATE = 0,
     MARKET_SOURCE_BINANCE,
     MARKET_SOURCE_COUNT,
     MARKET_SOURCE_UNKNOWN = 0xff,

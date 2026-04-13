@@ -12,7 +12,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "screensaver_balatro.h"
+#include "screensaver_renderer.h"
 
 #define TAG "screensaver_direct"
 #define DIRECT_LOGICAL_W BSP_LCD_H_RES
@@ -78,8 +78,8 @@ static uint16_t *s_framebuf;
 static lv_color32_t *s_bg_buf;
 static uint8_t s_bg_x_from_native_y[BSP_LCD_PANEL_V_RES];
 static uint16_t s_bg_row_offset_from_native_x[BSP_LCD_PANEL_H_RES];
-static uint16_t s_base_balatro_w;
-static uint16_t s_base_balatro_h;
+static uint16_t s_base_renderer_w;
+static uint16_t s_base_renderer_h;
 static QueueHandle_t s_free_queue;
 static QueueHandle_t s_ready_queue;
 static TaskHandle_t s_push_task;
@@ -244,7 +244,7 @@ static void draw_text(int32_t x, int32_t y, int32_t scale, const char *text, uin
 
 static void fill_background_lowres(uint32_t time_ms)
 {
-    balatro_render(s_bg_buf, DIRECT_BG_W, time_ms);
+    screensaver_renderer_render(s_bg_buf, DIRECT_BG_W, time_ms);
 }
 
 static void upscale_background_to_native(void)
@@ -365,7 +365,7 @@ bool screensaver_direct_init(void)
     }
 
     memset(s_bg_buf, 0, bg_bytes);
-    balatro_get_dimensions(&s_base_balatro_w, &s_base_balatro_h);
+    screensaver_renderer_get_dimensions(&s_base_renderer_w, &s_base_renderer_h);
     s_free_queue = xQueueCreate(DIRECT_FRAMEBUF_COUNT, sizeof(uint8_t));
     s_ready_queue = xQueueCreate(DIRECT_FRAMEBUF_COUNT, sizeof(uint8_t));
     s_push_task_done = xSemaphoreCreateBinary();
@@ -403,8 +403,8 @@ bool screensaver_direct_is_ready(void)
 
 void screensaver_direct_reset(void)
 {
-    if (!balatro_init(DIRECT_BG_W, DIRECT_BG_H)) {
-        ESP_LOGW(TAG, "balatro direct init failed; renderer will use fallback pattern");
+    if (!screensaver_renderer_init(DIRECT_BG_W, DIRECT_BG_H)) {
+        ESP_LOGW(TAG, "screensaver direct init failed; renderer will use fallback pattern");
     }
     memset(&s_perf_snapshot, 0, sizeof(s_perf_snapshot));
     s_perf_frames = 0;
@@ -417,11 +417,12 @@ void screensaver_direct_reset(void)
 
 void screensaver_direct_restore_background(void)
 {
-    if (s_base_balatro_w == 0 || s_base_balatro_h == 0) {
+    if (s_base_renderer_w == 0 || s_base_renderer_h == 0) {
         return;
     }
-    if (!balatro_init(s_base_balatro_w, s_base_balatro_h)) {
-        ESP_LOGW(TAG, "balatro restore init failed for %ux%u", s_base_balatro_w, s_base_balatro_h);
+    if (!screensaver_renderer_init(s_base_renderer_w, s_base_renderer_h)) {
+        ESP_LOGW(TAG, "renderer restore init failed for %ux%u", s_base_renderer_w,
+                 s_base_renderer_h);
     }
 }
 

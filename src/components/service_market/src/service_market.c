@@ -15,10 +15,11 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "market_feed.h"
+#include "market_stream_binance.h"
 #include "net_manager.h"
 #include "power_policy.h"
 
-#define MARKET_SERVICE_QUEUE_LEN 8
+#define MARKET_SERVICE_QUEUE_LEN 16
 #define MARKET_SERVICE_TASK_STACK (20 * 1024)
 #define MARKET_SUMMARY_STALE_US (30LL * 1000 * 1000)
 #define MARKET_SUMMARY_REALTIME_US (5LL * 1000 * 1000)
@@ -26,16 +27,25 @@
 #define MARKET_CHART_REALTIME_US (60LL * 1000 * 1000)
 #define MARKET_CHART_INTERACTIVE_US (120LL * 1000 * 1000)
 #define MARKET_PRIMARY_RETRY_US (60LL * 1000 * 1000)
+#define MARKET_STREAM_RETRY_US (15LL * 1000 * 1000)
 
 typedef enum {
     MARKET_CMD_REFRESH_SUMMARY = 1,
     MARKET_CMD_REFRESH_CHART,
+    MARKET_CMD_STREAM_CONNECTED,
+    MARKET_CMD_STREAM_DISCONNECTED,
+    MARKET_CMD_STREAM_SUMMARY,
+    MARKET_CMD_STREAM_KLINE,
 } market_command_type_t;
 
 typedef struct {
     market_command_type_t type;
     market_pair_id_t pair;
     market_interval_id_t interval;
+    market_feed_summary_t summary;
+    market_candle_t candle;
+    esp_err_t error;
+    int status_code;
 } market_command_t;
 
 typedef struct {
@@ -43,6 +53,7 @@ typedef struct {
     bool loading;
     bool had_error;
     uint32_t updated_at_epoch_s;
+    int64_t updated_at_monotonic_us;
     uint32_t last_error_epoch_s;
     int32_t last_price_scaled;
     int32_t change_bp;
@@ -68,8 +79,10 @@ static refresh_mode_t s_refresh_mode;
 static market_transport_hint_t s_transport_hint;
 static market_source_t s_active_source;
 static bool s_fallback_active;
+static bool s_stream_connected;
 static uint8_t s_source_error_count;
 static int64_t s_primary_retry_after_us;
+static int64_t s_stream_retry_after_us;
 static market_summary_cache_t s_summaries[MARKET_PAIR_COUNT];
 static market_chart_cache_t s_charts[MARKET_PAIR_COUNT][MARKET_INTERVAL_COUNT];
 static int64_t s_last_summary_request_us[MARKET_PAIR_COUNT];
@@ -118,8 +131,8 @@ const char *market_source_label(market_source_t source)
     switch (source) {
     case MARKET_SOURCE_BINANCE:
         return "BINANCE";
-    case MARKET_SOURCE_OKX:
-        return "OKX";
+    case MARKET_SOURCE_GATE:
+        return "GATE";
     default:
         return "UNKNOWN";
     }
@@ -253,16 +266,16 @@ static const market_feed_iface_t *feed_for_source(market_source_t source)
 
 static market_source_t alternate_source(market_source_t source)
 {
-    if (source == MARKET_SOURCE_OKX) {
+    if (source == MARKET_SOURCE_GATE) {
         return MARKET_SOURCE_BINANCE;
     }
 
-    return MARKET_SOURCE_OKX;
+    return MARKET_SOURCE_GATE;
 }
 
 static market_source_t current_preferred_source(int64_t now_us)
 {
-    market_source_t preferred = MARKET_SOURCE_OKX;
+    market_source_t preferred = MARKET_SOURCE_GATE;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (s_fallback_active && s_active_source < MARKET_SOURCE_COUNT &&
@@ -277,7 +290,7 @@ static market_source_t current_preferred_source(int64_t now_us)
 static void note_primary_success(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_active_source = MARKET_SOURCE_OKX;
+    s_active_source = MARKET_SOURCE_GATE;
     s_fallback_active = false;
     s_source_error_count = 0;
     s_primary_retry_after_us = 0;
@@ -299,7 +312,7 @@ static void note_fallback_success(market_source_t source, market_transport_hint_
 static void note_refresh_failure(market_source_t failed_source)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (failed_source == MARKET_SOURCE_OKX) {
+    if (failed_source == MARKET_SOURCE_GATE) {
         s_primary_retry_after_us = esp_timer_get_time() + MARKET_PRIMARY_RETRY_US;
     }
     if (s_source_error_count < UINT8_MAX) {
@@ -314,6 +327,23 @@ static void note_active_transport(market_source_t source, market_transport_hint_
     s_active_source = source;
     s_transport_hint = transport_hint;
     xSemaphoreGive(s_mutex);
+}
+
+static bool stream_should_run(refresh_mode_t mode, bool wifi_connected)
+{
+    return wifi_connected && mode == REFRESH_MODE_REALTIME;
+}
+
+static bool stream_selection_matches_locked(market_pair_id_t pair, market_interval_id_t interval)
+{
+    return s_selection.pair == pair && s_selection.interval == interval;
+}
+
+static void note_streaming_active_locked(void)
+{
+    s_active_source = MARKET_SOURCE_BINANCE;
+    s_transport_hint = MARKET_TRANSPORT_STREAMING;
+    s_fallback_active = false;
 }
 
 static esp_err_t fetch_summary_with_fallback(market_pair_id_t pair, market_feed_summary_t *out,
@@ -331,7 +361,7 @@ static esp_err_t fetch_summary_with_fallback(market_pair_id_t pair, market_feed_
     err = primary_feed->fetch_summary(pair, out);
     if (err == ESP_OK) {
         note_active_transport(primary_source, primary_feed->transport_hint());
-        if (primary_source == MARKET_SOURCE_OKX) {
+        if (primary_source == MARKET_SOURCE_GATE) {
             note_primary_success();
         }
         if (source_out != NULL) {
@@ -370,7 +400,7 @@ static esp_err_t fetch_candles_with_fallback(market_pair_id_t pair, market_inter
     err = primary_feed->fetch_candles(pair, interval, out);
     if (err == ESP_OK) {
         note_active_transport(primary_source, primary_feed->transport_hint());
-        if (primary_source == MARKET_SOURCE_OKX) {
+        if (primary_source == MARKET_SOURCE_GATE) {
             note_primary_success();
         }
         if (source_out != NULL) {
@@ -400,6 +430,70 @@ static bool queue_command(const market_command_t *command)
     }
 
     return xQueueSend(s_command_queue, command, 0) == pdTRUE;
+}
+
+static void market_stream_connected_cb(market_pair_id_t pair, market_interval_id_t interval,
+                                       void *context)
+{
+    const market_command_t command = {
+        .type = MARKET_CMD_STREAM_CONNECTED,
+        .pair = pair,
+        .interval = interval,
+    };
+
+    (void)context;
+    (void)queue_command(&command);
+}
+
+static void market_stream_disconnected_cb(market_pair_id_t pair, market_interval_id_t interval,
+                                          esp_err_t last_esp_err, int status_code, void *context)
+{
+    const market_command_t command = {
+        .type = MARKET_CMD_STREAM_DISCONNECTED,
+        .pair = pair,
+        .interval = interval,
+        .error = last_esp_err,
+        .status_code = status_code,
+    };
+
+    (void)context;
+    (void)queue_command(&command);
+}
+
+static void market_stream_summary_cb(market_pair_id_t pair, const market_feed_summary_t *summary,
+                                     void *context)
+{
+    market_command_t command = {
+        .type = MARKET_CMD_STREAM_SUMMARY,
+        .pair = pair,
+        .interval = MARKET_INTERVAL_1H,
+    };
+
+    (void)context;
+    if (summary == NULL) {
+        return;
+    }
+
+    command.summary = *summary;
+    (void)queue_command(&command);
+}
+
+static void market_stream_kline_cb(market_pair_id_t pair, market_interval_id_t interval,
+                                   const market_candle_t *candle, void *context)
+{
+    market_command_t command = {
+        .type = MARKET_CMD_STREAM_KLINE,
+        .pair = pair,
+        .interval = interval,
+    };
+
+    (void)context;
+    if (candle == NULL) {
+        return;
+    }
+
+    command.candle = *candle;
+    (void)queue_command(&command);
 }
 
 static bool queue_summary_refresh(market_pair_id_t pair, bool force)
@@ -497,6 +591,7 @@ static bool queue_chart_refresh(market_pair_id_t pair, market_interval_id_t inte
 static void queue_selected_refreshes(bool force)
 {
     market_selection_t selection;
+    bool stream_active = false;
 
     if (!net_manager_is_connected()) {
         return;
@@ -504,7 +599,13 @@ static void queue_selected_refreshes(bool force)
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     selection = s_selection;
+    stream_active = s_stream_connected && s_refresh_mode == REFRESH_MODE_REALTIME &&
+                    market_binance_stream_is_connected();
     xSemaphoreGive(s_mutex);
+
+    if (!force && stream_active) {
+        return;
+    }
 
     (void)queue_summary_refresh(selection.pair, force);
     (void)queue_chart_refresh(selection.pair, selection.interval, force);
@@ -518,6 +619,7 @@ static void apply_summary_success(market_pair_id_t pair, const market_feed_summa
     cache->loading = false;
     cache->had_error = false;
     cache->updated_at_epoch_s = current_epoch_s();
+    cache->updated_at_monotonic_us = esp_timer_get_time();
     cache->last_error_epoch_s = 0;
     cache->last_price_scaled = summary->last_price_scaled;
     cache->change_bp = summary->change_bp;
@@ -557,6 +659,94 @@ static void apply_chart_failure(market_pair_id_t pair, market_interval_id_t inte
     cache->last_error_epoch_s = current_epoch_s();
 }
 
+static void merge_stream_candle_locked(market_pair_id_t pair, market_interval_id_t interval,
+                                       const market_candle_t *candle)
+{
+    market_chart_cache_t *cache = &s_charts[pair][interval];
+
+    if (candle == NULL) {
+        return;
+    }
+
+    if (!cache->valid || cache->window.count == 0) {
+        memset(&cache->window, 0, sizeof(cache->window));
+        cache->window.count = 1;
+        cache->window.candles[0] = *candle;
+    } else {
+        const uint16_t last_idx = cache->window.count - 1U;
+        const uint32_t last_open_time = cache->window.candles[last_idx].open_time_epoch_s;
+
+        if (candle->open_time_epoch_s < last_open_time) {
+            return;
+        }
+        if (candle->open_time_epoch_s == last_open_time) {
+            cache->window.candles[last_idx] = *candle;
+        } else if (cache->window.count < MARKET_MAX_CANDLES) {
+            cache->window.candles[cache->window.count] = *candle;
+            cache->window.count++;
+        } else {
+            memmove(&cache->window.candles[0], &cache->window.candles[1],
+                    sizeof(cache->window.candles[0]) * (MARKET_MAX_CANDLES - 1U));
+            cache->window.candles[MARKET_MAX_CANDLES - 1U] = *candle;
+        }
+    }
+
+    cache->valid = (cache->window.count > 0);
+    cache->loading = false;
+    cache->had_error = false;
+    cache->updated_at_epoch_s = current_epoch_s();
+    cache->last_error_epoch_s = 0;
+}
+
+static void sync_stream_connection(bool clear_backoff)
+{
+    market_selection_t selection;
+    refresh_mode_t refresh_mode;
+    bool should_run;
+    int64_t retry_after_us;
+    esp_err_t err;
+    const bool wifi_connected = net_manager_is_connected();
+    const int64_t now_us = esp_timer_get_time();
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    selection = s_selection;
+    refresh_mode = s_refresh_mode;
+    if (clear_backoff) {
+        s_stream_retry_after_us = 0;
+    }
+    retry_after_us = s_stream_retry_after_us;
+    should_run = stream_should_run(refresh_mode, wifi_connected);
+    xSemaphoreGive(s_mutex);
+
+    if (!should_run) {
+        market_binance_stream_stop();
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        s_stream_connected = false;
+        s_stream_retry_after_us = 0;
+        if (s_transport_hint == MARKET_TRANSPORT_STREAMING) {
+            s_transport_hint = MARKET_TRANSPORT_POLLING;
+            s_active_source = MARKET_SOURCE_GATE;
+            s_fallback_active = false;
+        }
+        xSemaphoreGive(s_mutex);
+        return;
+    }
+
+    if (retry_after_us > now_us) {
+        return;
+    }
+
+    err = market_binance_stream_start(selection.pair, selection.interval);
+    if (err != ESP_OK) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        s_stream_retry_after_us = now_us + MARKET_STREAM_RETRY_US;
+        s_stream_connected = false;
+        xSemaphoreGive(s_mutex);
+        ESP_LOGW(TAG, "stream start failed for %s %s: %s", market_pair_label(selection.pair),
+                 market_interval_label(selection.interval), esp_err_to_name(err));
+    }
+}
+
 static void market_service_task(void *arg)
 {
     market_command_t command;
@@ -567,17 +757,22 @@ static void market_service_task(void *arg)
             continue;
         }
 
-        if (!net_manager_is_connected()) {
+        if (!net_manager_is_connected() && (command.type == MARKET_CMD_REFRESH_SUMMARY ||
+                                            command.type == MARKET_CMD_REFRESH_CHART)) {
             xSemaphoreTake(s_mutex, portMAX_DELAY);
             if (command.type == MARKET_CMD_REFRESH_SUMMARY) {
                 s_summary_pending[command.pair] = false;
                 s_summaries[command.pair].loading = false;
-            } else {
+            } else if (command.type == MARKET_CMD_REFRESH_CHART) {
                 s_chart_pending[command.pair][command.interval] = false;
                 s_charts[command.pair][command.interval].loading = false;
             }
             xSemaphoreGive(s_mutex);
             publish_market_event();
+            continue;
+        }
+
+        if (!net_manager_is_connected()) {
             continue;
         }
 
@@ -590,6 +785,10 @@ static void market_service_task(void *arg)
             s_summary_pending[command.pair] = false;
             if (err == ESP_OK) {
                 apply_summary_success(command.pair, &summary);
+                if (s_stream_connected && command.pair == s_selection.pair &&
+                    s_refresh_mode == REFRESH_MODE_REALTIME) {
+                    note_streaming_active_locked();
+                }
             } else {
                 apply_summary_failure(command.pair);
                 ESP_LOGW(TAG, "summary refresh failed for %s: %s", market_pair_label(command.pair),
@@ -614,6 +813,11 @@ static void market_service_task(void *arg)
             s_chart_pending[command.pair][command.interval] = false;
             if (err == ESP_OK) {
                 apply_chart_success(command.pair, command.interval, &window);
+                if (s_stream_connected &&
+                    stream_selection_matches_locked(command.pair, command.interval) &&
+                    s_refresh_mode == REFRESH_MODE_REALTIME) {
+                    note_streaming_active_locked();
+                }
             } else {
                 apply_chart_failure(command.pair, command.interval);
                 ESP_LOGW(TAG, "chart refresh failed for %s %s: %s", market_pair_label(command.pair),
@@ -625,6 +829,69 @@ static void market_service_task(void *arg)
                          market_source_label(used_source), market_pair_label(command.pair),
                          market_interval_label(command.interval));
             }
+            publish_market_event();
+            continue;
+        }
+
+        if (command.type == MARKET_CMD_STREAM_CONNECTED) {
+            bool needs_chart_seed = false;
+
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
+            s_stream_connected = true;
+            s_stream_retry_after_us = 0;
+            if (stream_selection_matches_locked(command.pair, command.interval) &&
+                s_refresh_mode == REFRESH_MODE_REALTIME) {
+                note_streaming_active_locked();
+                needs_chart_seed = !s_charts[command.pair][command.interval].valid;
+            }
+            xSemaphoreGive(s_mutex);
+            if (needs_chart_seed) {
+                (void)queue_chart_refresh(command.pair, command.interval, true);
+            }
+            publish_market_event();
+            continue;
+        }
+
+        if (command.type == MARKET_CMD_STREAM_DISCONNECTED) {
+            market_binance_stream_stop();
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
+            s_stream_connected = false;
+            s_stream_retry_after_us = esp_timer_get_time() + MARKET_STREAM_RETRY_US;
+            if (s_transport_hint == MARKET_TRANSPORT_STREAMING) {
+                s_transport_hint = MARKET_TRANSPORT_POLLING;
+                s_active_source = MARKET_SOURCE_GATE;
+                s_fallback_active = false;
+            }
+            xSemaphoreGive(s_mutex);
+            ESP_LOGW(TAG, "stream disconnected for %s %s status=%d err=%s",
+                     market_pair_label(command.pair), market_interval_label(command.interval),
+                     command.status_code, esp_err_to_name(command.error));
+            publish_market_event();
+            queue_selected_refreshes(true);
+            continue;
+        }
+
+        if (command.type == MARKET_CMD_STREAM_SUMMARY) {
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
+            if (command.pair == s_selection.pair && s_refresh_mode == REFRESH_MODE_REALTIME) {
+                s_summary_pending[command.pair] = false;
+                apply_summary_success(command.pair, &command.summary);
+                note_streaming_active_locked();
+            }
+            xSemaphoreGive(s_mutex);
+            publish_market_event();
+            continue;
+        }
+
+        if (command.type == MARKET_CMD_STREAM_KLINE) {
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
+            if (stream_selection_matches_locked(command.pair, command.interval) &&
+                s_refresh_mode == REFRESH_MODE_REALTIME) {
+                s_chart_pending[command.pair][command.interval] = false;
+                merge_stream_candle_locked(command.pair, command.interval, &command.candle);
+                note_streaming_active_locked();
+            }
+            xSemaphoreGive(s_mutex);
             publish_market_event();
         }
     }
@@ -655,12 +922,15 @@ static void market_service_event_handler(const app_event_t *event, void *context
         if (refresh_mode_allows_network(policy.market_mode)) {
             queue_selected_refreshes(true);
         }
+        sync_stream_connection(true);
         break;
     case APP_EVENT_NET_CHANGED:
         publish_market_event();
         queue_selected_refreshes(true);
+        sync_stream_connection(true);
         break;
     case APP_EVENT_TICK_1S:
+        sync_stream_connection(false);
         queue_selected_refreshes(false);
         break;
     default:
@@ -672,19 +942,19 @@ static trading_data_state_t market_snapshot_state(const market_summary_cache_t *
                                                   bool wifi_connected)
 {
     int64_t age_us;
-    uint32_t now_epoch_s;
+    int64_t now_us;
 
     if (summary == NULL) {
         return TRADING_DATA_EMPTY;
     }
 
     if (summary->valid) {
-        now_epoch_s = current_epoch_s();
-        if (!wifi_connected || summary->updated_at_epoch_s == 0 || now_epoch_s == 0) {
+        now_us = esp_timer_get_time();
+        if (!wifi_connected || summary->updated_at_monotonic_us <= 0) {
             return TRADING_DATA_STALE;
         }
 
-        age_us = (int64_t)(now_epoch_s - summary->updated_at_epoch_s) * 1000000LL;
+        age_us = now_us - summary->updated_at_monotonic_us;
         if (age_us > MARKET_SUMMARY_STALE_US || summary->had_error) {
             return TRADING_DATA_STALE;
         }
@@ -706,6 +976,12 @@ static trading_data_state_t market_snapshot_state(const market_summary_cache_t *
 esp_err_t market_service_init(void)
 {
     power_policy_output_t policy;
+    const market_binance_stream_callbacks_t stream_callbacks = {
+        .on_connected = market_stream_connected_cb,
+        .on_disconnected = market_stream_disconnected_cb,
+        .on_summary = market_stream_summary_cb,
+        .on_kline = market_stream_kline_cb,
+    };
 
     s_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_mutex != NULL, ESP_ERR_NO_MEM, TAG, "market mutex alloc failed");
@@ -720,22 +996,26 @@ esp_err_t market_service_init(void)
     memset(s_summary_pending, 0, sizeof(s_summary_pending));
     memset(s_chart_pending, 0, sizeof(s_chart_pending));
 
-    s_feeds[MARKET_SOURCE_OKX] = market_feed_okx_get_iface();
+    s_feeds[MARKET_SOURCE_GATE] = market_feed_gate_get_iface();
     s_feeds[MARKET_SOURCE_BINANCE] = market_feed_binance_get_iface();
-    ESP_RETURN_ON_FALSE(s_feeds[MARKET_SOURCE_OKX] != NULL &&
+    ESP_RETURN_ON_FALSE(s_feeds[MARKET_SOURCE_GATE] != NULL &&
                             s_feeds[MARKET_SOURCE_BINANCE] != NULL,
                         ESP_ERR_INVALID_STATE, TAG, "market feeds missing");
 
-    s_active_source = MARKET_SOURCE_OKX;
-    s_transport_hint = s_feeds[MARKET_SOURCE_OKX]->transport_hint();
+    s_active_source = MARKET_SOURCE_GATE;
+    s_transport_hint = s_feeds[MARKET_SOURCE_GATE]->transport_hint();
     s_fallback_active = false;
+    s_stream_connected = false;
     s_source_error_count = 0;
     s_primary_retry_after_us = 0;
+    s_stream_retry_after_us = 0;
     s_selection.pair = MARKET_PAIR_BTC_USDT;
     s_selection.interval = MARKET_INTERVAL_1H;
     power_policy_get_output(&policy);
     s_refresh_mode = policy.market_mode;
 
+    ESP_RETURN_ON_ERROR(market_binance_stream_init(&stream_callbacks, NULL), TAG,
+                        "stream init failed");
     ESP_RETURN_ON_ERROR(event_bus_subscribe(market_service_event_handler, NULL), TAG,
                         "market subscribe failed");
     {
@@ -768,6 +1048,7 @@ void market_service_select_pair(market_pair_id_t pair)
 
     publish_market_event();
     queue_selected_refreshes(true);
+    sync_stream_connection(true);
 }
 
 void market_service_select_interval(market_interval_id_t interval)
@@ -791,6 +1072,7 @@ void market_service_select_interval(market_interval_id_t interval)
 
     publish_market_event();
     queue_selected_refreshes(true);
+    sync_stream_connection(true);
 }
 
 void market_service_get_snapshot(market_snapshot_t *out)

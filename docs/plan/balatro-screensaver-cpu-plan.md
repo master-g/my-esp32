@@ -1,5 +1,7 @@
 # Home screensaver optimization plan
 
+> Note: The active Home screensaver background now lives in `src/apps/app_home/src/screensaver_renderer.c` and follows the newer `screensaver.glsl`-style effect. This document remains useful as historical context for the direct-mode pipeline and earlier Balatro-specific measurements.
+
 ## Goal
 
 Keep the Balatro shader as the visual reference, but optimize the **current direct-to-panel screensaver path** instead of returning to the old LVGL full-render path.

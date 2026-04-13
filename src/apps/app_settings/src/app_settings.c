@@ -26,7 +26,17 @@
 #define SETTINGS_BODY_H (BSP_LCD_V_RES - SETTINGS_BODY_Y - 4)
 #define SETTINGS_ROW_H 28
 #define SETTINGS_SUMMARY_H 28
-#define SETTINGS_KEYBOARD_H 76
+#define SETTINGS_INPUT_SHEET_MARGIN 6
+#define SETTINGS_INPUT_SHEET_H 156
+#define SETTINGS_INPUT_CONTENT_INSET 10
+#define SETTINGS_INPUT_FIELD_H 34
+#define SETTINGS_INPUT_KEYBOARD_H 96
+#define SETTINGS_INPUT_SHOW_BTN_W 80
+#define SETTINGS_INPUT_PROMPT_Y 8
+#define SETTINGS_INPUT_FIELD_Y 24
+#define SETTINGS_INPUT_KEYBOARD_Y 54
+#define SETTINGS_INPUT_ANIM_MS 120
+#define SETTINGS_INPUT_SCRIM_OPA 144
 #define SETTINGS_NAV_DEPTH_MAX 6
 #define SETTINGS_ERROR_TEXT_MAX 96
 
@@ -72,13 +82,18 @@ typedef struct {
     lv_obj_t *btn_home;
     lv_obj_t *body;
     lv_obj_t *content_list;
+    lv_obj_t *input_overlay;
+    lv_obj_t *input_sheet;
     lv_obj_t *input_textarea;
+    lv_obj_t *input_visibility_btn;
+    lv_obj_t *input_visibility_label;
     settings_snapshot_t snapshot;
     settings_nav_entry_t nav_stack[SETTINGS_NAV_DEPTH_MAX];
     size_t nav_depth;
     char selected_ssid[NET_MANAGER_SSID_MAX];
     char pending_ssid[NET_MANAGER_SSID_MAX];
     bool pending_hidden;
+    bool input_password_visible;
     char input_text[NET_MANAGER_PASSWORD_MAX];
     char error_message[SETTINGS_ERROR_TEXT_MAX];
 } settings_runtime_t;
@@ -243,6 +258,24 @@ static void set_button_enabled(lv_obj_t *btn, bool enabled)
     }
 }
 
+static void settings_clear_input_overlay(settings_runtime_t *runtime)
+{
+    if (runtime == NULL) {
+        return;
+    }
+
+    if (runtime->input_overlay != NULL) {
+        lv_obj_delete(runtime->input_overlay);
+    }
+
+    runtime->input_overlay = NULL;
+    runtime->input_sheet = NULL;
+    runtime->input_textarea = NULL;
+    runtime->input_visibility_btn = NULL;
+    runtime->input_visibility_label = NULL;
+    runtime->input_password_visible = false;
+}
+
 static settings_page_t settings_current_page(const settings_runtime_t *runtime)
 {
     if (runtime == NULL || runtime->nav_depth == 0) {
@@ -270,6 +303,23 @@ static settings_confirm_mode_t settings_current_confirm_mode(const settings_runt
     }
 
     return runtime->nav_stack[runtime->nav_depth - 1].confirm_mode;
+}
+
+static settings_page_t settings_input_underlay_page(const settings_runtime_t *runtime)
+{
+    int i;
+
+    if (runtime == NULL || runtime->nav_depth == 0) {
+        return SETTINGS_PAGE_INDEX;
+    }
+
+    for (i = (int)runtime->nav_depth - 2; i >= 0; --i) {
+        if (runtime->nav_stack[i].page != SETTINGS_PAGE_WIFI_INPUT) {
+            return runtime->nav_stack[i].page;
+        }
+    }
+
+    return SETTINGS_PAGE_INDEX;
 }
 
 static void settings_nav_set_entry(settings_runtime_t *runtime, size_t index, settings_page_t page,
@@ -343,8 +393,10 @@ static void settings_clear_transient_state(settings_runtime_t *runtime)
         return;
     }
 
+    settings_clear_input_overlay(runtime);
     runtime->pending_ssid[0] = '\0';
     runtime->pending_hidden = false;
+    runtime->input_password_visible = false;
     runtime->input_text[0] = '\0';
     runtime->error_message[0] = '\0';
     runtime->content_list = NULL;
@@ -951,6 +1003,35 @@ static void input_textarea_cb(lv_event_t *e)
     copy_text(runtime->input_text, sizeof(runtime->input_text), text);
 }
 
+static void input_sheet_anim_cb(void *obj, int32_t value)
+{
+    lv_obj_set_style_translate_y((lv_obj_t *)obj, value, 0);
+}
+
+static void input_visibility_update(settings_runtime_t *runtime)
+{
+    if (runtime == NULL || runtime->input_textarea == NULL ||
+        runtime->input_visibility_label == NULL) {
+        return;
+    }
+
+    lv_textarea_set_password_mode(runtime->input_textarea, !runtime->input_password_visible);
+    lv_label_set_text(runtime->input_visibility_label,
+                      runtime->input_password_visible ? "Hide" : "Show");
+}
+
+static void input_visibility_cb(lv_event_t *e)
+{
+    settings_runtime_t *runtime = lv_event_get_user_data(e);
+
+    if (runtime == NULL || runtime->input_textarea == NULL) {
+        return;
+    }
+
+    runtime->input_password_visible = !runtime->input_password_visible;
+    input_visibility_update(runtime);
+}
+
 static void input_keyboard_cb(lv_event_t *e)
 {
     settings_runtime_t *runtime = lv_event_get_user_data(e);
@@ -1286,20 +1367,24 @@ static void render_confirm_page(settings_runtime_t *runtime)
 
 static void render_input_page(settings_runtime_t *runtime)
 {
-    lv_obj_t *panel;
     lv_obj_t *prompt_label;
+    lv_obj_t *field_row;
     lv_obj_t *keyboard;
+    lv_obj_t *show_label;
     const char *title = "Input";
-    const char *prompt = "";
+    char prompt[SETTINGS_ERROR_TEXT_MAX];
     const char *initial_text = runtime->input_text;
     settings_input_mode_t mode = settings_current_input_mode(runtime);
     bool password = false;
     uint32_t max_length = NET_MANAGER_PASSWORD_MAX - 1;
+    lv_coord_t sheet_width;
+    lv_anim_t anim;
 
+    prompt[0] = '\0';
     switch (mode) {
     case SETTINGS_INPUT_HIDDEN_SSID:
         title = "Hidden SSID";
-        prompt = "Enter the exact network name.";
+        copy_text(prompt, sizeof(prompt), "Enter the exact network name.");
         if (initial_text[0] == '\0' && runtime->pending_ssid[0] != '\0') {
             initial_text = runtime->pending_ssid;
         }
@@ -1307,12 +1392,20 @@ static void render_input_page(settings_runtime_t *runtime)
         break;
     case SETTINGS_INPUT_HIDDEN_PASSWORD:
         title = "Hidden Password";
-        prompt = runtime->pending_ssid[0] != '\0' ? runtime->pending_ssid : "Enter the password.";
+        if (runtime->pending_ssid[0] != '\0') {
+            snprintf(prompt, sizeof(prompt), "Hidden Password · %s", runtime->pending_ssid);
+        } else {
+            copy_text(prompt, sizeof(prompt), "Enter the password.");
+        }
         password = true;
         break;
     case SETTINGS_INPUT_PROFILE_PASSWORD:
         title = "Wi-Fi Password";
-        prompt = runtime->pending_ssid[0] != '\0' ? runtime->pending_ssid : "Enter the password.";
+        if (runtime->pending_ssid[0] != '\0') {
+            snprintf(prompt, sizeof(prompt), "Wi-Fi Password · %s", runtime->pending_ssid);
+        } else {
+            copy_text(prompt, sizeof(prompt), "Enter the password.");
+        }
         password = true;
         break;
     default:
@@ -1320,33 +1413,116 @@ static void render_input_page(settings_runtime_t *runtime)
     }
 
     settings_set_shell(runtime, title, NULL, true);
-    panel = create_page_panel(runtime->body);
+    runtime->input_overlay = lv_obj_create(runtime->root);
+    lv_obj_remove_style_all(runtime->input_overlay);
+    lv_obj_set_size(runtime->input_overlay, BSP_LCD_H_RES, BSP_LCD_V_RES);
+    lv_obj_set_style_bg_color(runtime->input_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(runtime->input_overlay, SETTINGS_INPUT_SCRIM_OPA, 0);
+    lv_obj_set_style_pad_all(runtime->input_overlay, 0, 0);
+    lv_obj_add_flag(runtime->input_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_move_foreground(runtime->input_overlay);
 
-    prompt_label = lv_label_create(panel);
-    lv_obj_set_width(prompt_label, lv_pct(100));
+    runtime->input_sheet = lv_obj_create(runtime->input_overlay);
+    lv_obj_remove_style_all(runtime->input_sheet);
+    lv_obj_set_size(runtime->input_sheet, BSP_LCD_H_RES - SETTINGS_INPUT_SHEET_MARGIN * 2,
+                    SETTINGS_INPUT_SHEET_H);
+    lv_obj_align(runtime->input_sheet, LV_ALIGN_BOTTOM_MID, 0, -SETTINGS_INPUT_SHEET_MARGIN);
+    lv_obj_set_style_bg_color(runtime->input_sheet, lv_color_hex(SETTINGS_PANEL_COLOR), 0);
+    lv_obj_set_style_bg_opa(runtime->input_sheet, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(runtime->input_sheet, 8, 0);
+    lv_obj_set_style_border_width(runtime->input_sheet, 1, 0);
+    lv_obj_set_style_border_color(runtime->input_sheet, lv_color_hex(SETTINGS_PANEL_ALT_COLOR), 0);
+    lv_obj_set_style_shadow_width(runtime->input_sheet, 0, 0);
+
+    sheet_width = BSP_LCD_H_RES - SETTINGS_INPUT_SHEET_MARGIN * 2;
+
+    prompt_label = lv_label_create(runtime->input_sheet);
+    lv_obj_set_width(prompt_label, sheet_width - SETTINGS_INPUT_CONTENT_INSET * 2);
     lv_label_set_long_mode(prompt_label, LV_LABEL_LONG_CLIP);
     lv_label_set_text(prompt_label, prompt);
     lv_obj_set_style_text_font(prompt_label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(prompt_label, lv_color_hex(SETTINGS_MUTED_COLOR), 0);
-    lv_obj_align(prompt_label, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_align(prompt_label, LV_ALIGN_TOP_LEFT, SETTINGS_INPUT_CONTENT_INSET,
+                 SETTINGS_INPUT_PROMPT_Y);
 
-    runtime->input_textarea = lv_textarea_create(panel);
-    lv_obj_set_size(runtime->input_textarea, lv_pct(100), 28);
-    lv_obj_align(runtime->input_textarea, LV_ALIGN_TOP_MID, 0, 18);
+    field_row = lv_obj_create(runtime->input_sheet);
+    lv_obj_remove_style_all(field_row);
+    lv_obj_set_size(field_row, sheet_width - SETTINGS_INPUT_CONTENT_INSET * 2,
+                    SETTINGS_INPUT_FIELD_H);
+    lv_obj_align(field_row, LV_ALIGN_TOP_LEFT, SETTINGS_INPUT_CONTENT_INSET,
+                 SETTINGS_INPUT_FIELD_Y);
+    lv_obj_set_flex_flow(field_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(field_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(field_row, 8, 0);
+
+    runtime->input_textarea = lv_textarea_create(field_row);
+    lv_obj_set_height(runtime->input_textarea, SETTINGS_INPUT_FIELD_H);
+    lv_obj_set_flex_grow(runtime->input_textarea, 1);
     lv_textarea_set_one_line(runtime->input_textarea, true);
     lv_textarea_set_password_mode(runtime->input_textarea, password);
     lv_textarea_set_max_length(runtime->input_textarea, max_length);
     lv_textarea_set_text(runtime->input_textarea, initial_text != NULL ? initial_text : "");
-    lv_obj_set_style_text_font(runtime->input_textarea, ui_font_text_11(), 0);
+    lv_textarea_set_placeholder_text(runtime->input_textarea, password ? "Password" : "SSID");
+    lv_textarea_set_cursor_pos(runtime->input_textarea, LV_TEXTAREA_CURSOR_LAST);
+    lv_obj_set_style_text_font(runtime->input_textarea, ui_font_text_22(), 0);
+    lv_obj_set_style_text_color(runtime->input_textarea, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
+    lv_obj_set_style_bg_color(runtime->input_textarea, lv_color_hex(SETTINGS_PANEL_ALT_COLOR), 0);
+    lv_obj_set_style_bg_opa(runtime->input_textarea, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(runtime->input_textarea, 1, 0);
+    lv_obj_set_style_border_color(runtime->input_textarea, lv_color_hex(SETTINGS_PANEL_ALT_COLOR),
+                                  0);
+    lv_obj_set_style_border_color(runtime->input_textarea, lv_color_hex(SETTINGS_ACCENT_COLOR),
+                                  LV_STATE_FOCUSED);
+    lv_obj_set_style_radius(runtime->input_textarea, 6, 0);
+    lv_obj_set_style_pad_left(runtime->input_textarea, 8, 0);
+    lv_obj_set_style_pad_right(runtime->input_textarea, 8, 0);
+    lv_obj_add_state(runtime->input_textarea, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(runtime->input_textarea, input_textarea_cb, LV_EVENT_VALUE_CHANGED,
                         runtime);
 
-    keyboard = lv_keyboard_create(panel);
-    lv_obj_set_size(keyboard, lv_pct(100), SETTINGS_KEYBOARD_H);
-    lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    if (password) {
+        runtime->input_visibility_btn = create_action_button(
+            field_row, "Show", SETTINGS_ACCENT_COLOR, input_visibility_cb, runtime);
+        lv_obj_set_size(runtime->input_visibility_btn, SETTINGS_INPUT_SHOW_BTN_W,
+                        SETTINGS_INPUT_FIELD_H);
+        show_label = lv_obj_get_child(runtime->input_visibility_btn, 0);
+        runtime->input_visibility_label = show_label;
+        runtime->input_password_visible = false;
+        input_visibility_update(runtime);
+    }
+
+    keyboard = lv_keyboard_create(runtime->input_sheet);
+    lv_obj_set_size(keyboard, sheet_width - SETTINGS_INPUT_CONTENT_INSET * 2,
+                    SETTINGS_INPUT_KEYBOARD_H);
+    lv_obj_align(keyboard, LV_ALIGN_TOP_LEFT, SETTINGS_INPUT_CONTENT_INSET,
+                 SETTINGS_INPUT_KEYBOARD_Y);
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(SETTINGS_BG_COLOR), 0);
+    lv_obj_set_style_bg_opa(keyboard, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(keyboard, 0, 0);
+    lv_obj_set_style_radius(keyboard, 8, 0);
+    lv_obj_set_style_pad_all(keyboard, 4, 0);
+    lv_obj_set_style_pad_row(keyboard, 4, 0);
+    lv_obj_set_style_pad_column(keyboard, 4, 0);
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(SETTINGS_PANEL_ALT_COLOR), LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(SETTINGS_ACCENT_COLOR),
+                              LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_text_font(keyboard, ui_font_text_11(), LV_PART_ITEMS);
+    lv_obj_set_style_text_color(keyboard, lv_color_hex(SETTINGS_TEXT_COLOR), LV_PART_ITEMS);
+    lv_obj_set_style_radius(keyboard, 6, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(keyboard, 0, LV_PART_ITEMS);
+    lv_keyboard_set_popovers(keyboard, true);
     lv_keyboard_set_textarea(keyboard, runtime->input_textarea);
     lv_obj_add_event_cb(keyboard, input_keyboard_cb, LV_EVENT_READY, runtime);
     lv_obj_add_event_cb(keyboard, input_keyboard_cb, LV_EVENT_CANCEL, runtime);
+
+    lv_obj_set_style_translate_y(runtime->input_sheet, 28, 0);
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, runtime->input_sheet);
+    lv_anim_set_values(&anim, 28, 0);
+    lv_anim_set_duration(&anim, SETTINGS_INPUT_ANIM_MS);
+    lv_anim_set_exec_cb(&anim, input_sheet_anim_cb);
+    lv_anim_start(&anim);
 }
 
 static void render_placeholder_page(settings_runtime_t *runtime, const char *title,
@@ -1359,17 +1535,9 @@ static void render_placeholder_page(settings_runtime_t *runtime, const char *tit
     create_empty_state(panel, title, body);
 }
 
-static void settings_render(settings_runtime_t *runtime)
+static void render_body_page(settings_runtime_t *runtime, settings_page_t page)
 {
-    if (runtime == NULL || runtime->root == NULL) {
-        return;
-    }
-
-    lv_obj_clean(runtime->body);
-    runtime->content_list = NULL;
-    runtime->input_textarea = NULL;
-
-    switch (settings_current_page(runtime)) {
+    switch (page) {
     case SETTINGS_PAGE_INDEX:
         render_index_page(runtime);
         break;
@@ -1388,9 +1556,6 @@ static void settings_render(settings_runtime_t *runtime)
     case SETTINGS_PAGE_WIFI_CONFIRM:
         render_confirm_page(runtime);
         break;
-    case SETTINGS_PAGE_WIFI_INPUT:
-        render_input_page(runtime);
-        break;
     case SETTINGS_PAGE_TIME_HOME:
         render_placeholder_page(runtime, "Time",
                                 "Time settings will move here once the Wi-Fi flow is stable.");
@@ -1402,6 +1567,32 @@ static void settings_render(settings_runtime_t *runtime)
     default:
         render_index_page(runtime);
         break;
+    }
+}
+
+static void settings_render(settings_runtime_t *runtime)
+{
+    settings_page_t current_page;
+    settings_page_t body_page;
+
+    if (runtime == NULL || runtime->root == NULL) {
+        return;
+    }
+
+    current_page = settings_current_page(runtime);
+    body_page = current_page == SETTINGS_PAGE_WIFI_INPUT ? settings_input_underlay_page(runtime)
+                                                         : current_page;
+
+    settings_clear_input_overlay(runtime);
+    lv_obj_clean(runtime->body);
+    runtime->content_list = NULL;
+    runtime->input_textarea = NULL;
+    runtime->input_visibility_btn = NULL;
+    runtime->input_visibility_label = NULL;
+
+    render_body_page(runtime, body_page);
+    if (current_page == SETTINGS_PAGE_WIFI_INPUT) {
+        render_input_page(runtime);
     }
 }
 

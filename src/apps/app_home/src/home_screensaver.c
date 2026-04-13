@@ -10,8 +10,8 @@
 #include "esp_timer.h"
 #include "generated/departure_mono_55.h"
 #include "home_internal.h"
-#include "screensaver_balatro.h"
 #include "screensaver_direct.h"
+#include "screensaver_renderer.h"
 #include "service_home.h"
 
 #define TAG "home_screensaver"
@@ -90,7 +90,7 @@ static void render_background(home_screensaver_t *screensaver)
 
     pixels = (lv_color32_t *)draw_buf->data;
     stride_px = draw_buf->header.stride / sizeof(lv_color32_t);
-    balatro_render(pixels, stride_px, screensaver->fx.time_ms);
+    screensaver_renderer_render(pixels, stride_px, screensaver->fx.time_ms);
 
     if (screensaver->fx.image != NULL) {
         lv_obj_invalidate(screensaver->fx.image);
@@ -395,7 +395,7 @@ void home_screensaver_create(home_screensaver_t *screensaver, lv_obj_t *root,
         lv_image_set_scale(screensaver->fx.image, HOME_SCREENSAVER_FX_SCALE);
         lv_obj_center(screensaver->fx.image);
 
-        balatro_init(HOME_SCREENSAVER_FX_W, HOME_SCREENSAVER_FX_H);
+        screensaver_renderer_init(HOME_SCREENSAVER_FX_W, HOME_SCREENSAVER_FX_H);
         if (!screensaver_direct_init()) {
             ESP_LOGW(TAG, "screensaver direct buffer alloc failed; using LVGL fallback");
         }

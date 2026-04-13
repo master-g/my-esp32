@@ -89,7 +89,7 @@ typedef struct {
 
 行为：
 
-- `REALTIME`：当前实现为高频 REST 轮询；后续可替换为 WebSocket 摘要流
+- `REALTIME`：当前实现为混合模式；先用 REST 做 bootstrap / candle 历史回填，再由 Binance WebSocket 接管前台 summary 和当前可见 kline
 - `INTERACTIVE_POLL`：低频轮询
 - `BACKGROUND_CACHE`：不主动拉新，只保留缓存
 - `PAUSED`：停止前台相关刷新
@@ -98,7 +98,7 @@ typedef struct {
 
 | 子模块 | 职责 |
 |------|------|
-| `market_feed` | 对接上游采集；当前为双 REST provider，后续可替换为 WebSocket |
+| `market_feed` | 对接上游采集；当前为 `Gate REST + Binance REST + Binance WebSocket` |
 | `market_cache` | 保存最近价格摘要与 candle |
 | `market_aggregate` | 计算涨跌幅和新鲜度 |
 | `market_scheduler` | 根据 `power_policy` 调整刷新模式 |
@@ -122,8 +122,8 @@ bool market_service_get_candles(
 额外约束：
 
 - 页面层不能直接感知 REST / WebSocket 的细节
-- 页面层不能直接感知 `OKX / Binance` 的切换细节
-- WebSocket 若在后续引入，只允许替换 `market_feed` 和部分 `market_scheduler` 逻辑
+- 页面层不能直接感知 `Gate / Binance` 的切换细节
+- WebSocket 只允许替换 `market_feed` 与部分调度逻辑，不能改变 `market_snapshot_t` / `APP_EVENT_DATA_MARKET` 契约
 - `market_cache`、`market_snapshot_t` 和 `APP_EVENT_DATA_MARKET` 事件契约保持不变
 
 ## 7. 退化策略
@@ -141,9 +141,9 @@ bool market_service_get_candles(
 
 ## 9. 假设
 
-- v1 只对接单一市场源
+- v1 仍维持单页单选择模型，不做多路并行市场聚合
 - 价格格式化由 service 统一完成
-- 当前阶段先实现 `OKX -> Binance` 的 REST 自动回退，暂不接入 WebSocket
+- 当前代码线采用 `Gate -> Binance` 的 REST 自动回退，同时在 `REALTIME` 模式下为当前选择接入 Binance WebSocket。由于显示栈会长期占用 internal DRAM，TLS 相关分配继续允许使用 external SPIRAM，避免 REST / WSS 都在 `mbedtls_ssl_setup()` 阶段因 internal heap 碎片而失联。
 
 ---
 

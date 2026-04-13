@@ -18,6 +18,6 @@ typedef struct {
 } market_feed_iface_t;
 
 const market_feed_iface_t *market_feed_binance_get_iface(void);
-const market_feed_iface_t *market_feed_okx_get_iface(void);
+const market_feed_iface_t *market_feed_gate_get_iface(void);
 
 #endif

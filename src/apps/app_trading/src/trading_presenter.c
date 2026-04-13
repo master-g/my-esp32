@@ -19,8 +19,8 @@ static const char *source_chip_label(market_source_t source)
     switch (source) {
     case MARKET_SOURCE_BINANCE:
         return "BNCE";
-    case MARKET_SOURCE_OKX:
-        return "OKX";
+    case MARKET_SOURCE_GATE:
+        return "GATE";
     default:
         return "--";
     }
@@ -88,6 +88,9 @@ void trading_presenter_build(trading_present_model_t *out, const market_snapshot
     case TRADING_DATA_LIVE:
         format_status_time(out->status_text, sizeof(out->status_text),
                            snapshot->summary_updated_at_epoch_s, "LIVE");
+        if (out->status_text[0] == '\0') {
+            snprintf(out->status_text, sizeof(out->status_text), "%s", "LIVE");
+        }
         out->status_color = TRADING_COLOR_UP;
         if (snapshot->fallback_active) {
             snprintf(out->status_text, sizeof(out->status_text), "LIVE %s fallback",

@@ -66,12 +66,13 @@ void trading_chart_apply(trading_chart_t *chart, const trading_present_model_t *
     int32_t pad = 0;
     int32_t width = 0;
     int32_t height = 0;
-    int32_t plot_x = 6;
-    int32_t plot_y = 6;
+    int32_t plot_x = 3;
+    int32_t plot_y = 4;
     int32_t plot_w = 0;
     int32_t plot_h = 0;
     int32_t step = 0;
     int32_t body_w = 0;
+    int32_t wick_w = 0;
     uint32_t i = 0;
     lv_opa_t bar_opa = model->chart_dimmed ? LV_OPA_50 : LV_OPA_COVER;
     lv_opa_t grid_opa = model->chart_dimmed ? LV_OPA_20 : LV_OPA_40;
@@ -130,12 +131,13 @@ void trading_chart_apply(trading_chart_t *chart, const trading_present_model_t *
     if (step < 6) {
         step = 6;
     }
-    body_w = step / 2;
+    body_w = (step / 2) + 1;
     if (body_w < 3) {
         body_w = 3;
-    } else if (body_w > 8) {
-        body_w = 8;
+    } else if (body_w > 10) {
+        body_w = 10;
     }
+    wick_w = (body_w >= 5) ? 2 : 1;
 
     for (i = 0; i < MARKET_MAX_CANDLES; ++i) {
         if (i >= model->candles.count) {
@@ -166,8 +168,8 @@ void trading_chart_apply(trading_chart_t *chart, const trading_present_model_t *
             }
 
             lv_obj_clear_flag(chart->wicks[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(chart->wicks[i], x_center, high_y);
-            lv_obj_set_size(chart->wicks[i], 2, LV_MAX(2, low_y - high_y));
+            lv_obj_set_pos(chart->wicks[i], x_center - (wick_w / 2), high_y);
+            lv_obj_set_size(chart->wicks[i], wick_w, LV_MAX(2, low_y - high_y));
             lv_obj_set_style_bg_color(chart->wicks[i], lv_color_hex(color), 0);
             lv_obj_set_style_bg_opa(chart->wicks[i], bar_opa, 0);
 

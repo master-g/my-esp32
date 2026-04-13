@@ -128,21 +128,20 @@ lv_obj_t *trading_view_create(trading_view_t *view, lv_obj_t *parent)
     lv_obj_set_style_radius(view->chart_panel, 18, 0);
     lv_obj_set_style_bg_color(view->chart_panel, lv_color_hex(TRADING_PANEL), 0);
     lv_obj_set_style_bg_opa(view->chart_panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(view->chart_panel, lv_color_hex(TRADING_BORDER), 0);
-    lv_obj_set_style_border_width(view->chart_panel, 1, 0);
+    lv_obj_set_style_border_width(view->chart_panel, 0, 0);
     lv_obj_set_style_pad_all(view->chart_panel, 0, 0);
     lv_obj_clear_flag(view->chart_panel, LV_OBJ_FLAG_SCROLLABLE);
 
     trading_chart_create(&view->chart, view->chart_panel);
-    lv_obj_set_size(view->chart.root, 330, 92);
-    lv_obj_set_pos(view->chart.root, 10, 12);
+    lv_obj_set_size(view->chart.root, 338, 100);
+    lv_obj_set_pos(view->chart.root, 6, 8);
 
     for (i = 0; i < MARKET_INTERVAL_COUNT; ++i) {
         view->interval_buttons[i] =
             create_segment_button(view->chart_panel, market_interval_label((market_interval_id_t)i),
                                   &view->interval_labels[i]);
         lv_obj_set_size(view->interval_buttons[i], 68, 28);
-        lv_obj_set_pos(view->interval_buttons[i], interval_button_x[i], 110);
+        lv_obj_set_pos(view->interval_buttons[i], interval_button_x[i], 116);
     }
 
     return view->root;
@@ -174,11 +173,6 @@ void trading_view_apply(trading_view_t *view, const trading_present_model_t *mod
                             model->interval_selected[i]);
     }
 
-    lv_obj_set_style_border_color(view->chart_panel,
-                                  model->chart_dimmed
-                                      ? ui_theme_color(UI_THEME_COLOR_STATUS_WARNING)
-                                      : lv_color_hex(TRADING_BORDER),
-                                  0);
     trading_chart_apply(&view->chart, model);
 }
 

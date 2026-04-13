@@ -39,7 +39,8 @@ static int rounded_temperature_c(int16_t temperature_c_tenths)
 
 static bool home_snapshot_has_weather(const home_snapshot_t *snapshot)
 {
-    return snapshot != NULL && snapshot->weather_available && snapshot->updated_at_epoch_s != 0;
+    return snapshot != NULL && snapshot->weather_available &&
+           (snapshot->updated_at_epoch_s != 0 || snapshot->weather_text[0] != '\0');
 }
 
 static const char *weather_icon_symbol(weather_icon_t icon)
@@ -137,11 +138,6 @@ void home_presenter_build(home_present_model_t *out, const home_snapshot_t *snap
     } else {
         snprintf(out->weather_text, sizeof(out->weather_text), "%s  --", city_name);
     }
-    if (snapshot->weather_stale) {
-        snprintf(out->weather_text + strlen(out->weather_text),
-                 sizeof(out->weather_text) - strlen(out->weather_text), "  cached");
-    }
-
     out->sprite_state = map_run_state(snapshot->claude_run_state, snapshot->claude_connected);
     out->bubble_visible =
         snapshot->claude_detail[0] != '\0' && out->sprite_state != SPRITE_STATE_SLEEPING;

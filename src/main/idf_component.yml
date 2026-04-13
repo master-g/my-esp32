@@ -6,3 +6,4 @@ dependencies:
     version: ^9
     public: true
   espressif/esp_lcd_axs15231b: 2.1.0
+  espressif/esp_websocket_client: ^1
