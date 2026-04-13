@@ -17,8 +17,6 @@ typedef struct {
     lv_obj_t *change_label;
     lv_obj_t *status_label;
     lv_obj_t *chart_panel;
-    lv_obj_t *interval_buttons[MARKET_INTERVAL_COUNT];
-    lv_obj_t *interval_labels[MARKET_INTERVAL_COUNT];
     trading_chart_t chart;
 } trading_view_t;
 

@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "bsp_board_config.h"
 #include "lvgl.h"
+#include "service_market.h"
 #include "service_settings.h"
 #include "ui_theme.h"
 #include "ui_fonts.h"
@@ -48,6 +49,8 @@ typedef enum {
     SETTINGS_PAGE_WIFI_SCAN,
     SETTINGS_PAGE_WIFI_CONFIRM,
     SETTINGS_PAGE_WIFI_INPUT,
+    SETTINGS_PAGE_MARKET_HOME,
+    SETTINGS_PAGE_MARKET_INTERVAL,
     SETTINGS_PAGE_TIME_HOME,
     SETTINGS_PAGE_WEATHER_HOME,
 } settings_page_t;
@@ -88,6 +91,7 @@ typedef struct {
     lv_obj_t *input_visibility_btn;
     lv_obj_t *input_visibility_label;
     settings_snapshot_t snapshot;
+    market_preferences_t market_preferences;
     settings_nav_entry_t nav_stack[SETTINGS_NAV_DEPTH_MAX];
     size_t nav_depth;
     char selected_ssid[NET_MANAGER_SSID_MAX];
@@ -620,6 +624,16 @@ static void format_scan_detail(const settings_runtime_t *runtime, const net_scan
     snprintf(out, out_size, "%d dBm · %s%s", result->rssi, auth_text, stored_text);
 }
 
+static const char *market_price_color_summary(bool enabled)
+{
+    return enabled ? "green/red" : "theme";
+}
+
+static const char *market_price_color_detail(bool enabled)
+{
+    return enabled ? "On · Binance green/red" : "Off · Theme default";
+}
+
 static void settings_render(settings_runtime_t *runtime);
 
 static void settings_show_error(settings_runtime_t *runtime, const char *message, esp_err_t err)
@@ -651,6 +665,7 @@ static void settings_service_refresh(settings_runtime_t *runtime)
     }
 
     settings_service_get_snapshot(&runtime->snapshot);
+    market_service_get_preferences(&runtime->market_preferences);
     sync_selected_profile(runtime);
     if (settings_current_page(runtime) == SETTINGS_PAGE_WIFI_PROFILE_ACTIONS &&
         find_selected_profile(runtime) == NULL) {
@@ -712,6 +727,19 @@ static void index_time_cb(lv_event_t *e)
     settings_render(runtime);
 }
 
+static void index_market_cb(lv_event_t *e)
+{
+    settings_runtime_t *runtime = lv_event_get_user_data(e);
+
+    if (runtime == NULL) {
+        return;
+    }
+
+    settings_nav_push(runtime, SETTINGS_PAGE_MARKET_HOME, SETTINGS_INPUT_NONE,
+                      SETTINGS_CONFIRM_NONE);
+    settings_render(runtime);
+}
+
 static void index_weather_cb(lv_event_t *e)
 {
     settings_runtime_t *runtime = lv_event_get_user_data(e);
@@ -723,6 +751,75 @@ static void index_weather_cb(lv_event_t *e)
     settings_nav_push(runtime, SETTINGS_PAGE_WEATHER_HOME, SETTINGS_INPUT_NONE,
                       SETTINGS_CONFIRM_NONE);
     settings_render(runtime);
+}
+
+static void market_interval_row_cb(lv_event_t *e)
+{
+    static const market_interval_id_t interval_order[MARKET_INTERVAL_COUNT] = {
+        MARKET_INTERVAL_5M,
+        MARKET_INTERVAL_1H,
+        MARKET_INTERVAL_4H,
+        MARKET_INTERVAL_1D,
+    };
+    settings_runtime_t *runtime = lv_event_get_user_data(e);
+    lv_obj_t *target = lv_event_get_target_obj(e);
+    int index;
+    market_interval_id_t interval;
+    esp_err_t err;
+
+    if (runtime == NULL || target == NULL || runtime->content_list == NULL) {
+        return;
+    }
+
+    index = find_list_item_index(runtime->content_list, target);
+    if (index < 0 || index >= MARKET_INTERVAL_COUNT) {
+        return;
+    }
+
+    interval = interval_order[index];
+    if (runtime->market_preferences.default_interval == interval) {
+        return;
+    }
+
+    err = market_service_set_default_interval(interval);
+    if (err != ESP_OK) {
+        settings_show_error(runtime, "Crypto Market update failed", err);
+        return;
+    }
+
+    settings_service_refresh(runtime);
+}
+
+static void market_interval_entry_cb(lv_event_t *e)
+{
+    settings_runtime_t *runtime = lv_event_get_user_data(e);
+
+    if (runtime == NULL) {
+        return;
+    }
+
+    settings_nav_push(runtime, SETTINGS_PAGE_MARKET_INTERVAL, SETTINGS_INPUT_NONE,
+                      SETTINGS_CONFIRM_NONE);
+    settings_render(runtime);
+}
+
+static void market_price_color_toggle_cb(lv_event_t *e)
+{
+    settings_runtime_t *runtime = lv_event_get_user_data(e);
+    esp_err_t err;
+
+    if (runtime == NULL) {
+        return;
+    }
+
+    err =
+        market_service_set_binance_price_colors(!runtime->market_preferences.binance_price_colors);
+    if (err != ESP_OK) {
+        settings_show_error(runtime, "Crypto Market update failed", err);
+        return;
+    }
+
+    settings_service_refresh(runtime);
 }
 
 static void wifi_profiles_entry_cb(lv_event_t *e)
@@ -1103,6 +1200,7 @@ static void render_index_page(settings_runtime_t *runtime)
     lv_obj_t *panel;
     lv_obj_t *rows;
     char wifi_detail[64];
+    char market_detail[40];
 
     settings_set_shell(runtime, "Settings", NULL, false);
     panel = create_page_panel(runtime->body);
@@ -1110,13 +1208,79 @@ static void render_index_page(settings_runtime_t *runtime)
     snprintf(wifi_detail, sizeof(wifi_detail), "%s · %u saved",
              net_state_text(runtime->snapshot.net.state),
              (unsigned)runtime->snapshot.profile_count);
+    snprintf(market_detail, sizeof(market_detail), "%s · %s",
+             market_interval_label(runtime->market_preferences.default_interval),
+             market_price_color_summary(runtime->market_preferences.binance_price_colors));
     rows = create_rows_container(panel, 0, SETTINGS_BODY_H);
     create_section_button(rows, "Wi-Fi", wifi_detail, SETTINGS_ACCENT_COLOR, index_wifi_cb,
                           runtime);
+    create_section_button(rows, "Crypto Market", market_detail, SETTINGS_PANEL_ALT_COLOR,
+                          index_market_cb, runtime);
     create_section_button(rows, "Time", "Planned next", SETTINGS_PANEL_ALT_COLOR, index_time_cb,
                           runtime);
     create_section_button(rows, "Weather", "Planned next", SETTINGS_PANEL_ALT_COLOR,
                           index_weather_cb, runtime);
+}
+
+static void render_market_home_page(settings_runtime_t *runtime)
+{
+    lv_obj_t *panel;
+    lv_obj_t *rows;
+    char detail[64];
+
+    settings_set_shell(runtime, "Crypto Market", NULL, true);
+    panel = create_page_panel(runtime->body);
+
+    snprintf(detail, sizeof(detail), "%s interval · %s",
+             market_interval_label(runtime->market_preferences.default_interval),
+             market_price_color_summary(runtime->market_preferences.binance_price_colors));
+    create_info_card(panel, "Trading Defaults", detail, SETTINGS_ACCENT_COLOR);
+
+    rows = create_rows_container(panel, SETTINGS_SUMMARY_H + 6,
+                                 SETTINGS_BODY_H - SETTINGS_SUMMARY_H - 8);
+    create_section_button(rows, "Chart Interval",
+                          market_interval_label(runtime->market_preferences.default_interval),
+                          SETTINGS_PANEL_ALT_COLOR, market_interval_entry_cb, runtime);
+    create_section_button(
+        rows, "Price Digits Color",
+        market_price_color_detail(runtime->market_preferences.binance_price_colors),
+        runtime->market_preferences.binance_price_colors ? SETTINGS_ACCENT_COLOR
+                                                         : SETTINGS_PANEL_ALT_COLOR,
+        market_price_color_toggle_cb, runtime);
+}
+
+static void render_market_interval_page(settings_runtime_t *runtime)
+{
+    static const market_interval_id_t interval_order[MARKET_INTERVAL_COUNT] = {
+        MARKET_INTERVAL_5M,
+        MARKET_INTERVAL_1H,
+        MARKET_INTERVAL_4H,
+        MARKET_INTERVAL_1D,
+    };
+    lv_obj_t *panel;
+    lv_obj_t *rows;
+    size_t i;
+    char detail[32];
+
+    settings_set_shell(runtime, "Chart Interval", NULL, true);
+    panel = create_page_panel(runtime->body);
+
+    snprintf(detail, sizeof(detail), "Current default · %s",
+             market_interval_label(runtime->market_preferences.default_interval));
+    create_info_card(panel, "Trading Chart", detail, SETTINGS_ACCENT_COLOR);
+
+    rows = create_rows_container(panel, SETTINGS_SUMMARY_H + 6,
+                                 SETTINGS_BODY_H - SETTINGS_SUMMARY_H - 8);
+    runtime->content_list = rows;
+    for (i = 0; i < MARKET_INTERVAL_COUNT; ++i) {
+        market_interval_id_t interval = interval_order[i];
+        bool selected = runtime->market_preferences.default_interval == interval;
+
+        create_section_button(rows, market_interval_label(interval),
+                              selected ? "current default" : "apply to Trading chart",
+                              selected ? SETTINGS_ACCENT_COLOR : SETTINGS_PANEL_ALT_COLOR,
+                              market_interval_row_cb, runtime);
+    }
 }
 
 static void render_wifi_home_page(settings_runtime_t *runtime)
@@ -1556,6 +1720,12 @@ static void render_body_page(settings_runtime_t *runtime, settings_page_t page)
     case SETTINGS_PAGE_WIFI_CONFIRM:
         render_confirm_page(runtime);
         break;
+    case SETTINGS_PAGE_MARKET_HOME:
+        render_market_home_page(runtime);
+        break;
+    case SETTINGS_PAGE_MARKET_INTERVAL:
+        render_market_interval_page(runtime);
+        break;
     case SETTINGS_PAGE_TIME_HOME:
         render_placeholder_page(runtime, "Time",
                                 "Time settings will move here once the Wi-Fi flow is stable.");
@@ -1686,6 +1856,7 @@ static void app_settings_handle_event(const app_event_t *event)
     switch (event->type) {
     case APP_EVENT_ENTER:
     case APP_EVENT_DATA_SETTINGS:
+    case APP_EVENT_DATA_MARKET:
     case APP_EVENT_NET_CHANGED:
         settings_service_refresh(&s_runtime);
         break;

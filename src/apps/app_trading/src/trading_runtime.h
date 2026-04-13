@@ -7,6 +7,9 @@
 
 typedef struct {
     trading_view_t view;
+    int32_t last_price_scaled[MARKET_PAIR_COUNT];
+    trading_price_tick_t last_price_tick[MARKET_PAIR_COUNT];
+    bool last_price_valid[MARKET_PAIR_COUNT];
 } trading_runtime_t;
 
 esp_err_t trading_runtime_init(trading_runtime_t *runtime);

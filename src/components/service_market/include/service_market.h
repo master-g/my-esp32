@@ -7,7 +7,7 @@
 #include "esp_err.h"
 
 #define MARKET_PAIR_COUNT 3
-#define MARKET_INTERVAL_COUNT 3
+#define MARKET_INTERVAL_COUNT 4
 #define MARKET_MAX_CANDLES 32
 
 typedef enum {
@@ -17,10 +17,16 @@ typedef enum {
 } market_pair_id_t;
 
 typedef enum {
-    MARKET_INTERVAL_1H = 0,
+    MARKET_INTERVAL_5M = 0,
+    MARKET_INTERVAL_1H,
     MARKET_INTERVAL_4H,
     MARKET_INTERVAL_1D,
 } market_interval_id_t;
+
+typedef struct {
+    market_interval_id_t default_interval;
+    bool binance_price_colors;
+} market_preferences_t;
 
 typedef enum {
     TRADING_DATA_EMPTY = 0,
@@ -77,6 +83,7 @@ typedef struct {
     market_transport_hint_t transport_hint;
     market_source_t active_source;
     bool fallback_active;
+    bool binance_price_colors;
     uint8_t source_error_count;
 } market_snapshot_t;
 
@@ -86,7 +93,9 @@ const char *market_source_label(market_source_t source);
 
 esp_err_t market_service_init(void);
 void market_service_select_pair(market_pair_id_t pair);
-void market_service_select_interval(market_interval_id_t interval);
+void market_service_get_preferences(market_preferences_t *out);
+esp_err_t market_service_set_default_interval(market_interval_id_t interval);
+esp_err_t market_service_set_binance_price_colors(bool enabled);
 void market_service_get_snapshot(market_snapshot_t *out);
 bool market_service_has_chart_data(market_pair_id_t pair, market_interval_id_t interval);
 bool market_service_get_candles(market_pair_id_t pair, market_interval_id_t interval,

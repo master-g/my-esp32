@@ -31,19 +31,26 @@
 
 ### 3.1 选择状态
 
-交易对和周期选择由 `market_service` 持有：
+交易对和周期选择由 `market_service` 持有；其中 interval 默认值属于持久化偏好：
 
 ```c
 typedef struct {
     market_pair_id_t pair;
     market_interval_id_t interval;
 } market_selection_t;
+
+typedef struct {
+    market_interval_id_t default_interval;
+    bool binance_price_colors;
+} market_preferences_t;
 ```
 
 原因：
 
 - 页面切走再回来时可恢复
 - 不让页面各自维护一套隐藏状态
+- Settings 修改默认周期后，可以直接驱动当前前台 Trading 选择
+- Trading 的 price digits 颜色风格也由 market 域偏好统一提供；真正的涨跌方向比较留在 Trading runtime，按上一次显示过的 price 计算
 
 ### 3.2 快照模型
 
@@ -64,6 +71,7 @@ typedef struct {
     bool has_chart_data;
     uint16_t candle_count;
     market_transport_hint_t transport_hint;
+    bool binance_price_colors;
 } market_snapshot_t;
 ```
 
@@ -89,8 +97,8 @@ typedef struct {
 
 行为：
 
-- `REALTIME`：当前实现为混合模式；先用 REST 做 bootstrap / candle 历史回填，再由 Binance WebSocket 接管前台 summary 和当前可见 kline
-- `INTERACTIVE_POLL`：低频轮询
+- `REALTIME`：当前实现为混合模式；先用 REST 做 bootstrap / candle 历史回填，再由 Binance WebSocket 接管前台 summary 和当前可见 kline。默认 interval 为 `5M`，stream 断开时 chart fallback 也保持更短轮询
+- `INTERACTIVE_POLL`：低频轮询；当前 chart cadence 比旧方案更短，避免长时间停在旧 candle
 - `BACKGROUND_CACHE`：不主动拉新，只保留缓存
 - `PAUSED`：停止前台相关刷新
 
@@ -109,7 +117,9 @@ typedef struct {
 ```c
 esp_err_t market_service_init(void);
 void market_service_select_pair(market_pair_id_t pair);
-void market_service_select_interval(market_interval_id_t interval);
+void market_service_get_preferences(market_preferences_t *out);
+esp_err_t market_service_set_default_interval(market_interval_id_t interval);
+esp_err_t market_service_set_binance_price_colors(bool enabled);
 void market_service_get_snapshot(market_snapshot_t *out);
 bool market_service_has_chart_data(market_pair_id_t pair, market_interval_id_t interval);
 bool market_service_get_candles(
@@ -125,6 +135,8 @@ bool market_service_get_candles(
 - 页面层不能直接感知 `Gate / Binance` 的切换细节
 - WebSocket 只允许替换 `market_feed` 与部分调度逻辑，不能改变 `market_snapshot_t` / `APP_EVENT_DATA_MARKET` 契约
 - `market_cache`、`market_snapshot_t` 和 `APP_EVENT_DATA_MARKET` 事件契约保持不变
+- interval 默认值在 market 域内通过 NVS 保存，不经由 Wi-Fi 专用的 `service_settings`
+- price digits 的 Binance 绿涨红跌开关也在 market 域内通过 NVS 保存，并通过同一个 market event 驱动 UI 刷新
 
 ## 7. 退化策略
 
@@ -136,6 +148,8 @@ bool market_service_get_candles(
 ## 8. 验收用例
 
 - 切换交易对后 service 立即切换选择状态
+- 在 Settings 修改默认 interval 后，service 立即持久化并切换当前选择
+- 在 Settings 切换 Binance 价格颜色后，Trading 页立即刷新 price digits，但不触发额外网络刷新
 - 电池模式下 service 自动降级
 - 页面返回前台时可先看到缓存，再等待拉新
 

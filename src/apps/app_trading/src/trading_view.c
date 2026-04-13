@@ -65,7 +65,6 @@ static void apply_segment_state(lv_obj_t *btn, lv_obj_t *label, bool selected)
 lv_obj_t *trading_view_create(trading_view_t *view, lv_obj_t *parent)
 {
     static const lv_coord_t pair_button_x[MARKET_PAIR_COUNT] = {0, 82, 164};
-    static const lv_coord_t interval_button_x[MARKET_INTERVAL_COUNT] = {18, 98, 178};
     uint32_t i = 0;
 
     if (view == NULL) {
@@ -123,8 +122,8 @@ lv_obj_t *trading_view_create(trading_view_t *view, lv_obj_t *parent)
 
     view->chart_panel = lv_obj_create(view->root);
     lv_obj_remove_style_all(view->chart_panel);
-    lv_obj_set_size(view->chart_panel, 350, 148);
-    lv_obj_set_pos(view->chart_panel, 276, 12);
+    lv_obj_set_size(view->chart_panel, 350, 156);
+    lv_obj_set_pos(view->chart_panel, 276, 8);
     lv_obj_set_style_radius(view->chart_panel, 18, 0);
     lv_obj_set_style_bg_color(view->chart_panel, lv_color_hex(TRADING_PANEL), 0);
     lv_obj_set_style_bg_opa(view->chart_panel, LV_OPA_COVER, 0);
@@ -133,16 +132,8 @@ lv_obj_t *trading_view_create(trading_view_t *view, lv_obj_t *parent)
     lv_obj_clear_flag(view->chart_panel, LV_OBJ_FLAG_SCROLLABLE);
 
     trading_chart_create(&view->chart, view->chart_panel);
-    lv_obj_set_size(view->chart.root, 338, 100);
+    lv_obj_set_size(view->chart.root, 338, 140);
     lv_obj_set_pos(view->chart.root, 6, 8);
-
-    for (i = 0; i < MARKET_INTERVAL_COUNT; ++i) {
-        view->interval_buttons[i] =
-            create_segment_button(view->chart_panel, market_interval_label((market_interval_id_t)i),
-                                  &view->interval_labels[i]);
-        lv_obj_set_size(view->interval_buttons[i], 68, 28);
-        lv_obj_set_pos(view->interval_buttons[i], interval_button_x[i], 116);
-    }
 
     return view->root;
 }
@@ -166,11 +157,6 @@ void trading_view_apply(trading_view_t *view, const trading_present_model_t *mod
 
     for (i = 0; i < MARKET_PAIR_COUNT; ++i) {
         apply_segment_state(view->pair_buttons[i], view->pair_labels[i], model->pair_selected[i]);
-    }
-
-    for (i = 0; i < MARKET_INTERVAL_COUNT; ++i) {
-        apply_segment_state(view->interval_buttons[i], view->interval_labels[i],
-                            model->interval_selected[i]);
     }
 
     trading_chart_apply(&view->chart, model);

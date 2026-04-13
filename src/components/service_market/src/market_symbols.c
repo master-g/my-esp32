@@ -62,6 +62,8 @@ bool market_source_pair_config(market_source_t source, market_pair_id_t pair,
 const char *market_interval_symbol(market_interval_id_t interval)
 {
     switch (interval) {
+    case MARKET_INTERVAL_5M:
+        return "5m";
     case MARKET_INTERVAL_4H:
         return "4h";
     case MARKET_INTERVAL_1D:

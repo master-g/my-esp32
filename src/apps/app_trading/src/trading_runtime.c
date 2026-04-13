@@ -5,6 +5,39 @@
 #include "service_market.h"
 #include "trading_presenter.h"
 
+static void update_price_tick(trading_runtime_t *runtime, const market_snapshot_t *snapshot)
+{
+    market_pair_id_t pair;
+
+    if (runtime == NULL || snapshot == NULL) {
+        return;
+    }
+
+    if (snapshot->state != TRADING_DATA_LIVE && snapshot->state != TRADING_DATA_STALE) {
+        return;
+    }
+
+    pair = snapshot->selection.pair;
+    if (pair >= MARKET_PAIR_COUNT) {
+        return;
+    }
+
+    if (!runtime->last_price_valid[pair]) {
+        runtime->last_price_scaled[pair] = snapshot->last_price_scaled;
+        runtime->last_price_valid[pair] = true;
+        runtime->last_price_tick[pair] = TRADING_PRICE_TICK_NONE;
+        return;
+    }
+
+    if (snapshot->last_price_scaled > runtime->last_price_scaled[pair]) {
+        runtime->last_price_tick[pair] = TRADING_PRICE_TICK_UP;
+    } else if (snapshot->last_price_scaled < runtime->last_price_scaled[pair]) {
+        runtime->last_price_tick[pair] = TRADING_PRICE_TICK_DOWN;
+    }
+
+    runtime->last_price_scaled[pair] = snapshot->last_price_scaled;
+}
+
 static void apply_current_snapshot(trading_runtime_t *runtime)
 {
     market_snapshot_t snapshot;
@@ -16,9 +49,11 @@ static void apply_current_snapshot(trading_runtime_t *runtime)
     }
 
     market_service_get_snapshot(&snapshot);
+    update_price_tick(runtime, &snapshot);
     (void)market_service_get_candles(snapshot.selection.pair, snapshot.selection.interval,
                                      &candles);
-    trading_presenter_build(&model, &snapshot, candles.count > 0 ? &candles : NULL);
+    trading_presenter_build(&model, &snapshot, candles.count > 0 ? &candles : NULL,
+                            runtime->last_price_tick[snapshot.selection.pair]);
     trading_view_apply(&runtime->view, &model);
 }
 
@@ -35,25 +70,6 @@ static void pair_btn_cb(lv_event_t *event)
     for (i = 0; i < MARKET_PAIR_COUNT; ++i) {
         if (runtime->view.pair_buttons[i] == target) {
             market_service_select_pair((market_pair_id_t)i);
-            apply_current_snapshot(runtime);
-            return;
-        }
-    }
-}
-
-static void interval_btn_cb(lv_event_t *event)
-{
-    trading_runtime_t *runtime = lv_event_get_user_data(event);
-    lv_obj_t *target = lv_event_get_target(event);
-    uint32_t i = 0;
-
-    if (runtime == NULL) {
-        return;
-    }
-
-    for (i = 0; i < MARKET_INTERVAL_COUNT; ++i) {
-        if (runtime->view.interval_buttons[i] == target) {
-            market_service_select_interval((market_interval_id_t)i);
             apply_current_snapshot(runtime);
             return;
         }
@@ -82,10 +98,6 @@ lv_obj_t *trading_runtime_create_root(trading_runtime_t *runtime, lv_obj_t *pare
     trading_view_create(&runtime->view, parent);
     for (i = 0; i < MARKET_PAIR_COUNT; ++i) {
         lv_obj_add_event_cb(runtime->view.pair_buttons[i], pair_btn_cb, LV_EVENT_CLICKED, runtime);
-    }
-    for (i = 0; i < MARKET_INTERVAL_COUNT; ++i) {
-        lv_obj_add_event_cb(runtime->view.interval_buttons[i], interval_btn_cb, LV_EVENT_CLICKED,
-                            runtime);
     }
 
     apply_current_snapshot(runtime);

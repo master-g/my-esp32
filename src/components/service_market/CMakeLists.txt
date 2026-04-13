@@ -15,6 +15,7 @@ idf_component_register(
         cjson
         mbedtls
         net_manager
+        nvs_flash
         power_policy
         esp_timer
         esp_websocket_client

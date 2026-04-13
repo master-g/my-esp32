@@ -17,6 +17,7 @@
 #include "market_feed.h"
 #include "market_stream_binance.h"
 #include "net_manager.h"
+#include "nvs.h"
 #include "power_policy.h"
 
 #define MARKET_SERVICE_QUEUE_LEN 16
@@ -24,14 +25,18 @@
 #define MARKET_SUMMARY_STALE_US (30LL * 1000 * 1000)
 #define MARKET_SUMMARY_REALTIME_US (5LL * 1000 * 1000)
 #define MARKET_SUMMARY_INTERACTIVE_US (20LL * 1000 * 1000)
-#define MARKET_CHART_REALTIME_US (60LL * 1000 * 1000)
-#define MARKET_CHART_INTERACTIVE_US (120LL * 1000 * 1000)
+#define MARKET_CHART_REALTIME_US (15LL * 1000 * 1000)
+#define MARKET_CHART_INTERACTIVE_US (45LL * 1000 * 1000)
 #define MARKET_PRIMARY_RETRY_US (60LL * 1000 * 1000)
 #define MARKET_STREAM_RETRY_US (15LL * 1000 * 1000)
+#define MARKET_NVS_NAMESPACE "market"
+#define MARKET_NVS_KEY_DEFAULT_INTERVAL "chart_interval"
+#define MARKET_NVS_KEY_PRICE_COLOR "price_color"
 
 typedef enum {
     MARKET_CMD_REFRESH_SUMMARY = 1,
     MARKET_CMD_REFRESH_CHART,
+    MARKET_CMD_SYNC_STREAM,
     MARKET_CMD_STREAM_CONNECTED,
     MARKET_CMD_STREAM_DISCONNECTED,
     MARKET_CMD_STREAM_SUMMARY,
@@ -46,6 +51,7 @@ typedef struct {
     market_candle_t candle;
     esp_err_t error;
     int status_code;
+    bool clear_stream_backoff;
 } market_command_t;
 
 typedef struct {
@@ -72,9 +78,12 @@ typedef struct {
 
 static const char *TAG = "market_service";
 static SemaphoreHandle_t s_mutex;
+static SemaphoreHandle_t s_pref_mutex;
 static QueueHandle_t s_command_queue;
 static const market_feed_iface_t *s_feeds[MARKET_SOURCE_COUNT];
 static market_selection_t s_selection;
+static market_interval_id_t s_default_interval;
+static bool s_binance_price_colors;
 static refresh_mode_t s_refresh_mode;
 static market_transport_hint_t s_transport_hint;
 static market_source_t s_active_source;
@@ -97,7 +106,7 @@ static bool market_pair_is_valid(market_pair_id_t pair)
 
 static bool market_interval_is_valid(market_interval_id_t interval)
 {
-    return interval >= MARKET_INTERVAL_1H && interval <= MARKET_INTERVAL_1D;
+    return interval >= MARKET_INTERVAL_5M && interval <= MARKET_INTERVAL_1D;
 }
 
 const char *market_pair_label(market_pair_id_t pair)
@@ -116,6 +125,8 @@ const char *market_pair_label(market_pair_id_t pair)
 const char *market_interval_label(market_interval_id_t interval)
 {
     switch (interval) {
+    case MARKET_INTERVAL_5M:
+        return "5M";
     case MARKET_INTERVAL_4H:
         return "4H";
     case MARKET_INTERVAL_1D:
@@ -164,6 +175,95 @@ static uint32_t current_epoch_s(void)
     }
 
     return (uint32_t)now;
+}
+
+static esp_err_t load_default_interval_from_nvs(void)
+{
+    nvs_handle_t handle = 0;
+    uint8_t stored_interval = (uint8_t)MARKET_INTERVAL_5M;
+    esp_err_t ret = nvs_open(MARKET_NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+    ESP_RETURN_ON_ERROR(ret, TAG, "failed to open market namespace");
+
+    ret = nvs_get_u8(handle, MARKET_NVS_KEY_DEFAULT_INTERVAL, &stored_interval);
+    if (ret == ESP_ERR_NVS_NOT_FOUND ||
+        !market_interval_is_valid((market_interval_id_t)stored_interval)) {
+        stored_interval = (uint8_t)MARKET_INTERVAL_5M;
+        ESP_GOTO_ON_ERROR(nvs_set_u8(handle, MARKET_NVS_KEY_DEFAULT_INTERVAL, stored_interval),
+                          fail, TAG, "failed to seed market interval");
+        ESP_GOTO_ON_ERROR(nvs_commit(handle), fail, TAG, "failed to commit market defaults");
+    } else {
+        ESP_GOTO_ON_ERROR(ret, fail, TAG, "failed to read market interval");
+    }
+
+    s_default_interval = (market_interval_id_t)stored_interval;
+    nvs_close(handle);
+    return ESP_OK;
+
+fail:
+    nvs_close(handle);
+    return ret;
+}
+
+static esp_err_t save_default_interval_to_nvs(market_interval_id_t interval)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(MARKET_NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+    ESP_RETURN_ON_ERROR(ret, TAG, "failed to open market namespace");
+    ESP_GOTO_ON_ERROR(nvs_set_u8(handle, MARKET_NVS_KEY_DEFAULT_INTERVAL, (uint8_t)interval), fail,
+                      TAG, "failed to save market interval");
+    ESP_GOTO_ON_ERROR(nvs_commit(handle), fail, TAG, "failed to commit market interval");
+    nvs_close(handle);
+    return ESP_OK;
+
+fail:
+    nvs_close(handle);
+    return ret;
+}
+
+static esp_err_t load_price_color_from_nvs(void)
+{
+    nvs_handle_t handle = 0;
+    uint8_t stored_value = 0;
+    esp_err_t ret = nvs_open(MARKET_NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+    ESP_RETURN_ON_ERROR(ret, TAG, "failed to open market namespace");
+
+    ret = nvs_get_u8(handle, MARKET_NVS_KEY_PRICE_COLOR, &stored_value);
+    if (ret == ESP_ERR_NVS_NOT_FOUND || stored_value > 1U) {
+        stored_value = 0;
+        ESP_GOTO_ON_ERROR(nvs_set_u8(handle, MARKET_NVS_KEY_PRICE_COLOR, stored_value), fail, TAG,
+                          "failed to seed market price colors");
+        ESP_GOTO_ON_ERROR(nvs_commit(handle), fail, TAG, "failed to commit market price colors");
+    } else {
+        ESP_GOTO_ON_ERROR(ret, fail, TAG, "failed to read market price colors");
+    }
+
+    s_binance_price_colors = (stored_value != 0U);
+    nvs_close(handle);
+    return ESP_OK;
+
+fail:
+    nvs_close(handle);
+    return ret;
+}
+
+static esp_err_t save_price_color_to_nvs(bool enabled)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(MARKET_NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+    ESP_RETURN_ON_ERROR(ret, TAG, "failed to open market namespace");
+    ESP_GOTO_ON_ERROR(nvs_set_u8(handle, MARKET_NVS_KEY_PRICE_COLOR, enabled ? 1U : 0U), fail, TAG,
+                      "failed to save market price colors");
+    ESP_GOTO_ON_ERROR(nvs_commit(handle), fail, TAG, "failed to commit market price colors");
+    nvs_close(handle);
+    return ESP_OK;
+
+fail:
+    nvs_close(handle);
+    return ret;
 }
 
 static void format_price_text(char *out, size_t out_size, market_pair_id_t pair, int32_t scaled)
@@ -432,6 +532,16 @@ static bool queue_command(const market_command_t *command)
     return xQueueSend(s_command_queue, command, 0) == pdTRUE;
 }
 
+static bool queue_stream_sync(bool clear_backoff)
+{
+    const market_command_t command = {
+        .type = MARKET_CMD_SYNC_STREAM,
+        .clear_stream_backoff = clear_backoff,
+    };
+
+    return queue_command(&command);
+}
+
 static void market_stream_connected_cb(market_pair_id_t pair, market_interval_id_t interval,
                                        void *context)
 {
@@ -466,7 +576,7 @@ static void market_stream_summary_cb(market_pair_id_t pair, const market_feed_su
     market_command_t command = {
         .type = MARKET_CMD_STREAM_SUMMARY,
         .pair = pair,
-        .interval = MARKET_INTERVAL_1H,
+        .interval = MARKET_INTERVAL_5M,
     };
 
     (void)context;
@@ -501,7 +611,7 @@ static bool queue_summary_refresh(market_pair_id_t pair, bool force)
     market_command_t command = {
         .type = MARKET_CMD_REFRESH_SUMMARY,
         .pair = pair,
-        .interval = MARKET_INTERVAL_1H,
+        .interval = MARKET_INTERVAL_5M,
     };
     bool should_publish = false;
     int64_t now_us = esp_timer_get_time();
@@ -772,6 +882,11 @@ static void market_service_task(void *arg)
             continue;
         }
 
+        if (command.type == MARKET_CMD_SYNC_STREAM) {
+            sync_stream_connection(command.clear_stream_backoff);
+            continue;
+        }
+
         if (!net_manager_is_connected()) {
             continue;
         }
@@ -922,15 +1037,15 @@ static void market_service_event_handler(const app_event_t *event, void *context
         if (refresh_mode_allows_network(policy.market_mode)) {
             queue_selected_refreshes(true);
         }
-        sync_stream_connection(true);
+        (void)queue_stream_sync(true);
         break;
     case APP_EVENT_NET_CHANGED:
         publish_market_event();
         queue_selected_refreshes(true);
-        sync_stream_connection(true);
+        (void)queue_stream_sync(true);
         break;
     case APP_EVENT_TICK_1S:
-        sync_stream_connection(false);
+        (void)queue_stream_sync(false);
         queue_selected_refreshes(false);
         break;
     default:
@@ -985,6 +1100,9 @@ esp_err_t market_service_init(void)
 
     s_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_mutex != NULL, ESP_ERR_NO_MEM, TAG, "market mutex alloc failed");
+    s_pref_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_pref_mutex != NULL, ESP_ERR_NO_MEM, TAG,
+                        "market pref mutex alloc failed");
 
     s_command_queue = xQueueCreate(MARKET_SERVICE_QUEUE_LEN, sizeof(market_command_t));
     ESP_RETURN_ON_FALSE(s_command_queue != NULL, ESP_ERR_NO_MEM, TAG, "market queue alloc failed");
@@ -1001,6 +1119,8 @@ esp_err_t market_service_init(void)
     ESP_RETURN_ON_FALSE(s_feeds[MARKET_SOURCE_GATE] != NULL &&
                             s_feeds[MARKET_SOURCE_BINANCE] != NULL,
                         ESP_ERR_INVALID_STATE, TAG, "market feeds missing");
+    ESP_RETURN_ON_ERROR(load_default_interval_from_nvs(), TAG, "market preference load failed");
+    ESP_RETURN_ON_ERROR(load_price_color_from_nvs(), TAG, "market color preference load failed");
 
     s_active_source = MARKET_SOURCE_GATE;
     s_transport_hint = s_feeds[MARKET_SOURCE_GATE]->transport_hint();
@@ -1010,7 +1130,7 @@ esp_err_t market_service_init(void)
     s_primary_retry_after_us = 0;
     s_stream_retry_after_us = 0;
     s_selection.pair = MARKET_PAIR_BTC_USDT;
-    s_selection.interval = MARKET_INTERVAL_1H;
+    s_selection.interval = s_default_interval;
     power_policy_get_output(&policy);
     s_refresh_mode = policy.market_mode;
 
@@ -1048,31 +1168,95 @@ void market_service_select_pair(market_pair_id_t pair)
 
     publish_market_event();
     queue_selected_refreshes(true);
-    sync_stream_connection(true);
+    (void)queue_stream_sync(true);
 }
 
-void market_service_select_interval(market_interval_id_t interval)
+void market_service_get_preferences(market_preferences_t *out)
 {
-    bool changed = false;
+    if (out == NULL) {
+        return;
+    }
 
-    if (!market_interval_is_valid(interval)) {
+    if (s_mutex == NULL) {
+        out->default_interval = MARKET_INTERVAL_5M;
+        out->binance_price_colors = false;
         return;
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_selection.interval != interval) {
-        s_selection.interval = interval;
-        changed = true;
+    out->default_interval = s_default_interval;
+    out->binance_price_colors = s_binance_price_colors;
+    xSemaphoreGive(s_mutex);
+}
+
+esp_err_t market_service_set_default_interval(market_interval_id_t interval)
+{
+    esp_err_t err;
+
+    if (!market_interval_is_valid(interval)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_mutex == NULL || s_pref_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_pref_mutex, portMAX_DELAY);
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_default_interval == interval && s_selection.interval == interval) {
+        xSemaphoreGive(s_mutex);
+        xSemaphoreGive(s_pref_mutex);
+        return ESP_OK;
     }
     xSemaphoreGive(s_mutex);
 
-    if (!changed) {
-        return;
+    err = save_default_interval_to_nvs(interval);
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_pref_mutex);
+        return err;
     }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_default_interval = interval;
+    s_selection.interval = interval;
+    xSemaphoreGive(s_mutex);
+    xSemaphoreGive(s_pref_mutex);
 
     publish_market_event();
     queue_selected_refreshes(true);
-    sync_stream_connection(true);
+    (void)queue_stream_sync(true);
+    return ESP_OK;
+}
+
+esp_err_t market_service_set_binance_price_colors(bool enabled)
+{
+    esp_err_t err;
+
+    if (s_mutex == NULL || s_pref_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_pref_mutex, portMAX_DELAY);
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_binance_price_colors == enabled) {
+        xSemaphoreGive(s_mutex);
+        xSemaphoreGive(s_pref_mutex);
+        return ESP_OK;
+    }
+    xSemaphoreGive(s_mutex);
+
+    err = save_price_color_to_nvs(enabled);
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_pref_mutex);
+        return err;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_binance_price_colors = enabled;
+    xSemaphoreGive(s_mutex);
+    xSemaphoreGive(s_pref_mutex);
+
+    publish_market_event();
+    return ESP_OK;
 }
 
 void market_service_get_snapshot(market_snapshot_t *out)
@@ -1094,6 +1278,7 @@ void market_service_get_snapshot(market_snapshot_t *out)
     out->transport_hint = s_transport_hint;
     out->active_source = s_active_source;
     out->fallback_active = s_fallback_active;
+    out->binance_price_colors = s_binance_price_colors;
     out->source_error_count = s_source_error_count;
     xSemaphoreGive(s_mutex);
 

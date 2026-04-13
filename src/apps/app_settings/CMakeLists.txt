@@ -7,6 +7,7 @@ idf_component_register(
         core_app_manager
         esp_wifi
         lvgl__lvgl
+        service_market
         service_settings
         ui_theme
         ui_fonts
