@@ -1,0 +1,429 @@
+# ESP32 Claude Sprite 改进计划（审计版）
+
+## Context
+
+对照 Notchi 源码和当前仓库实现审计后，可以确认这条路线**可行**，但原计划里有几处前提写得过于乐观，尤其是 host 侧情感分析入口、flash 预算、验证手段，以及 Phase 2 的动画架构。
+
+本版计划以当前代码和素材仓现状为准：`make build` 可通过，`cargo test --manifest-path tools/esp32dash/Cargo.toml --quiet` 可通过；Notchi 的 `Assets.xcassets`、`GrassIsland.imageset` 和 compacting / emotion 相关 sprite sheet 也都已经在 `docs/research/notchi/notchi/notchi/Assets.xcassets/` 下可用。
+
+## 审计结论
+
+| 项目 | 结论 | 审计说明 |
+|---|---|---|
+| Compacting 状态链路 | **前提成立，但范围更小** | Host 已产生 `Compacting`，`Snapshot.status` 已经通过 `claude.update` 发到设备，firmware 端 `device_link.c` 也已解析 `compacting`。真正缺的是 Home presenter 不要再把它并进 WORKING，以及补一套 compacting sprite。 |
+| Emotion 系统 | **可做，但不是“直接接线”** | 当前 agent 没有独立配置层；`normalizer.rs` 是纯同步映射；hook ingest 只保留了 `prompt_preview`，完整 prompt 在进入 agent 前就被裁断了。Phase 1 需要先补 host-only prompt 传递和配置来源。 |
+| 素材可用性 | **前提成立** | 当前素材目录里已经有 `compacting_happy`、`waiting_sob`、`working_sob`、`GrassIsland` 等上游资源，不需要先去外部拉素材。 |
+| Flash 预算 | **原表偏乐观，需要改写** | 当前 `build/esp32_dashboard.bin` 为 **2,493,184 B**，app 分区为 **4,194,304 B**，剩余约 **1,701,120 B**。不是原计划里“当前固件约 2MB、还剩约 2MB”。 |
+| 验证手段 | **需要补 smoke-test harness** | 现在 `esp32dash chibi` 只支持 `idle/working/waiting/sleeping` 四种状态，也没有 emotion 参数。Phase 0 和 Phase 1 最好顺手补上 `compacting` 和 `--emotion`，这样调试快得多。 |
+| Phase 2 动画方案 | **原方案不够平滑** | 现有 sprite timer 只按 2-6 FPS 驱动帧切换。如果 bob / sway 直接挂在同一个 timer 上，运动采样也只有 2-6 FPS，会很顿。Phase 2 应该拆出一个更高频的 motion timer，或改成统一高频 tick 后再按状态门控换帧。 |
+
+## 实施原则
+
+1. Host 侧凡是涉及完整 prompt 的数据，都只在内存里短暂停留，不写入 `state.json`，也不通过 serial 发给 firmware。
+2. 远端 emotion provider 默认关闭；如果要把 prompt 发给云端模型，必须是显式 opt-in。
+3. 每个 phase 结束都要重新看 app bin 大小。可裁剪的优先级从低到高依次是：草地背景、额外 emotion 变体、sway、tremble。
+4. `home_view.c` 是本次改动最密集的文件。会碰它的 phase 最好成组推进，减少来回重构。
+
+## 基线与修正点
+
+### 当前已经具备的基础
+
+- `tools/esp32dash/src/normalizer.rs` 已把 `PreCompact` 映射成 `RunStatus::Compacting`
+- `tools/esp32dash/src/device.rs` 发送 `claude.update` 时直接序列化整个 `Snapshot`
+- `src/components/device_link/src/device_link.c` 已把 `"compacting"` 解析成 `CLAUDE_RUN_COMPACTING`
+- `src/components/service_claude/include/service_claude.h` 已定义 `CLAUDE_RUN_COMPACTING`
+- `tools/sprite_convert.py` 已经接在 Notchi 的 `Assets.xcassets` 上，路径有效
+
+### 原计划里需要改写的地方
+
+1. `normalizer.rs` 不适合直接做异步 LLM 调用。它现在是纯函数，应该保持纯。
+2. 不能只靠 `prompt_preview` 做情感分析。它会被截成单行、96 字节、并经过字符集清洗，信息损失太大。
+3. `ANTHROPIC_AUTH_KEY` 这个环境变量名不对。Notchi 走的是 `ANTHROPIC_AUTH_TOKEN`，并支持 `ANTHROPIC_BASE_URL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`。
+4. “Ollama 本地模型” 这一条不能写成直接可替换的前提。这里真正需要的是一个**兼容 Anthropic Messages API** 的 endpoint；如果是本地模型，要么自身兼容，要么前面加一个 adapter / proxy。
+5. `sprite_frames.h` 现在假定所有状态都是 6 帧。只要引入 5 帧的 compacting，就要把生成逻辑改成“每个资源各自声明帧数”，不能再共用一个 `SPRITE_FRAMES_PER_STATE`。
+
+## Revised plan
+
+### Phase 0: Compacting 独立状态
+
+这是最适合先落地的 phase。Host 和 serial protocol 已经把状态传过来了，真正要做的是 firmware 不再吞掉它，并补一套 compacting sprite。
+
+**新增 flash**：`64 * 64 * 4 * 5 = 81,920 B`，约 **80 KiB**
+
+**修改点**
+
+1. `src/apps/app_home/src/home_presenter.h`
+   - `sprite_state_t` 新增 `SPRITE_STATE_COMPACTING`
+2. `src/apps/app_home/src/home_presenter.c`
+   - `map_run_state()` 的 `CLAUDE_RUN_COMPACTING` 改为返回 `SPRITE_STATE_COMPACTING`
+3. `src/apps/app_home/src/home_view.c`
+   - `s_sprite_anims` 增加 compacting 项
+   - compacting 周期设为 `167ms`，保持 6 FPS
+4. `src/apps/app_home/src/generated/sprite_frames.h`
+   - 为 compacting 单独声明帧数宏和 extern
+5. `tools/sprite_convert.py`
+   - 增加 `("compacting", "compacting_neutral", 5)`
+   - 头文件生成逻辑改成 per-asset frame count
+6. `src/apps/app_home/CMakeLists.txt`
+   - 增加 `src/generated/sprite_compacting.c`
+7. `tools/esp32dash/src/main.rs`（推荐一并做）
+   - `ChibiState` 增加 `Compacting`
+   - `chibi demo` 增加 compacting 样例，便于直连烟测
+
+**验证**
+
+```bash
+cargo run --manifest-path tools/esp32dash/Cargo.toml -- chibi test --state compacting --bubble "Compacting..."
+make build
+```
+
+如果不改 `chibi` harness，也可以靠真实 `PreCompact` 事件验证，但回归效率会差很多。
+
+### Phase 1: Emotion 系统全链路
+
+这个 phase 依然值得做，但要先补 host 基础设施。建议拆成 1A-1F。
+
+#### 1A: Host 配置来源
+
+这里不建议只做一个孤立的 `~/.config/esp32dash/config.toml`，否则会和 Claude 本身的 provider 配置分叉。更稳妥的顺序是：
+
+1. `ESP32DASH_CONFIG` 指向显式配置文件（方便测试和 launchd）
+2. `~/.config/esp32dash/config.toml` / `$XDG_CONFIG_HOME/esp32dash/config.toml` 覆盖项
+3. `~/.claude/settings.json` 的 `env` 字段兜底，兼容 Notchi 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`
+
+**配置建议**
+
+```toml
+[emotion]
+enabled = false
+api_base_url = "https://api.anthropic.com"
+model = "claude-haiku-4-5-20251001"
+api_key = ""
+timeout_secs = 3
+max_tokens = 50
+```
+
+`enabled` 默认 false。没配置、没 token、解析失败、超时、HTTP 非 200、返回 JSON 不合法时，全部回退到 `neutral + 0.0`，不重试。
+
+**修改点**
+
+1. `tools/esp32dash/src/config.rs`（new）
+   - `AppConfig`
+   - `EmotionConfig`
+   - `load()`，支持显式文件、XDG、Claude settings fallback
+2. `tools/esp32dash/Cargo.toml`
+   - 增加 `toml`
+3. `tools/esp32dash/src/agent.rs`
+   - `Config::from_env()` 接入 `AppConfig`
+4. `tools/esp32dash/src/main.rs`
+   - `agent run` 启动时加载配置
+
+#### 1B: 完整 prompt 传递与隐私边界
+
+这一步是原计划缺得最明显的部分。当前 `sanitize_raw_event()` 只保留 `prompt_preview`，完整 prompt 进不了 agent。
+
+推荐做法：
+
+1. `RawHookInput.prompt` 继续只在本机使用
+2. `LocalHookEvent` 增加一个 **host-only** 的 `prompt_raw: Option<String>`
+3. CLI ingest 把 `prompt_raw` 通过本地 HTTP 发给 agent
+4. `PersistedState` 仍然只保存 `Snapshot`，不落盘 raw prompt
+
+这样 agent 里可以做完整分类，但设备侧和持久化状态都看不到原始 prompt。
+
+**修改点**
+
+1. `tools/esp32dash/src/model.rs`
+   - `LocalHookEvent` 新增 `prompt_raw: Option<String>`
+2. `tools/esp32dash/src/main.rs`
+   - `sanitize_raw_event()` 同时保留 `prompt_preview` 和 `prompt_raw`
+3. `tools/esp32dash/src/text_sanitize.rs`
+   - 保持现有展示清洗逻辑，不把它混进 emotion 分析路径
+
+#### 1C: Emotion analyzer 与 agent 集成
+
+异步 LLM 请求应该挂在 `AppState::process_event()` 附近，而不是 `normalizer.rs`。
+
+推荐流程：
+
+1. 仅在 `UserPromptSubmit` 且 `prompt_raw` 存在时调用 analyzer
+2. 按 `session_key_for(event)` 找到 session 对应的 `EmotionState`
+3. `record_emotion()` 后，把当前判定结果写入将要发布的 `Snapshot.emotion`
+4. 60 秒周期衰减同样由 agent 内部 task 驱动
+
+`EmotionState` 建议只存在内存里，不写入 `state.json`。agent 重启后回到 neutral 是可以接受的，也更安全。
+
+**修改点**
+
+1. `tools/esp32dash/src/emotion.rs`（new）
+   - `Emotion` enum：`neutral/happy/sad/sob`
+   - `EmotionAnalyzer`
+   - 调用兼容 Anthropic Messages API 的 `POST {base}/v1/messages`
+   - 剥 markdown code fence，再解 JSON
+2. `tools/esp32dash/src/emotion_state.rs`（new）
+   - `happy_score`
+   - `sad_score`
+   - `record_emotion()`
+   - `decay_all()`
+   - `current_emotion()`
+3. `tools/esp32dash/src/agent.rs`
+   - 增加 `HashMap<String, EmotionState>`
+   - 启动 60s decay task
+   - `SessionEnd`、session prune、liveness lost 时清理对应 emotion state
+4. `tools/esp32dash/src/model.rs`
+   - `Snapshot` 新增 `#[serde(default)] emotion: String`
+   - `Snapshot::empty()` 默认 `"neutral"`
+5. `tools/esp32dash/src/normalizer.rs`
+   - 保持纯函数
+   - `materially_equal()` 必须把 `emotion` 纳入比较，否则 emotion 变化不会推送到设备
+6. `tools/esp32dash/src/main.rs`
+   - `build_test_snapshot()` 和 `chibi` 测试路径补 emotion
+
+#### 1D: Serial protocol 扩展
+
+这一步风险不高，因为 host 发设备快照本来就是 `serde_json::to_value(snapshot)`。
+
+**修改点**
+
+1. `src/components/service_claude/include/service_claude.h`
+   - `claude_snapshot_t` 新增 `char emotion[16]`
+2. `src/components/device_link/src/device_link.c`
+   - `parse_claude_update()` 增加 `copy_json_string(payload, "emotion", ...)`
+3. `src/components/service_home/include/service_home.h`
+   - `home_snapshot_t` 新增 `char claude_emotion[16]`
+4. `src/components/service_home/src/service_home.c`
+   - 拷贝 `claude_snap.emotion`
+
+**向后兼容**
+
+- 老 firmware：忽略 host 多出来的 JSON 字段
+- 老 host：不发 `emotion`，firmware 读到空串后按 neutral 处理
+- 老 `state.json`：靠 `#[serde(default)] emotion` 继续可读
+
+#### 1E: Firmware 情绪枚举与 sprite 选择
+
+这里不只是 `home_presenter`，`home_view` 自身的状态缓存也要扩。
+
+**修改点**
+
+1. `src/apps/app_home/src/home_presenter.h`
+   - 新增 `sprite_emotion_t`
+   - `home_present_model_t` 新增 `sprite_emotion`
+2. `src/apps/app_home/src/home_presenter.c`
+   - `emotion_from_text()`
+   - 缺失或未知值统一映射 `NEUTRAL`
+3. `src/apps/app_home/src/home_view.h`
+   - `home_view_t` 增加 `sprite_emotion`
+4. `src/apps/app_home/src/home_view.c`
+   - `s_sprite_anims` 改成 `[SPRITE_STATE_COUNT][SPRITE_EMOTION_COUNT]`
+   - `refresh_sprite()` 比较 state + emotion，而不是只比较 state
+   - fallback 链建议做成：`exact -> sad (仅 sob) -> neutral`
+
+#### 1F: Sprite 转换与 smoke test
+
+最小可交付矩阵建议保留原计划的 8 个高可见度变体：
+
+| Task | 新增 emotion |
+|---|---|
+| idle | happy / sad / sob |
+| working | happy / sad |
+| waiting | happy / sad |
+| sleeping | happy |
+
+这 8 个资源新增 **786,432 B**，约 **768 KiB**。如果把 Phase 0 的 compacting neutral 算进去，Phase 0 + Phase 1 最小集累计是 **868,352 B**。
+
+上游素材里还已有这些低成本扩展项：
+
+- `compacting_happy`
+- `working_sob`
+- `waiting_sob`
+
+它们适合作为 Phase 1.5；在 Phase 1 最小链路跑通后，再根据实际剩余空间决定要不要一起带上。
+
+**修改点**
+
+1. `tools/sprite_convert.py`
+   - 扩展 `SPRITES`
+   - 允许不同资源声明不同帧数
+2. `src/apps/app_home/CMakeLists.txt`
+   - 编入所有新增生成文件
+3. `tools/esp32dash/src/main.rs`
+   - `chibi test --emotion happy|sad|sob|neutral`
+   - `chibi demo` 增加几组 emotion case
+
+**验证**
+
+```bash
+cargo test --manifest-path tools/esp32dash/Cargo.toml --quiet
+cargo run --manifest-path tools/esp32dash/Cargo.toml -- chibi test --state working --emotion happy --bubble "Nice!"
+cargo run --manifest-path tools/esp32dash/Cargo.toml -- chibi test --state waiting --emotion sad --bubble "Need help"
+make build
+```
+
+### Phase 2: 辅助动画
+
+原计划里“复用现有 sprite timer，不引入新 timer”这件事不建议照做。当前状态帧率只有 2-6 FPS，把 bob / sway 挂在同一个 timer 上，观感会像逐帧跳，不像 Notchi。
+
+更稳的结构是：
+
+- **frame timer**：继续负责 sprite sheet 换帧，频率保持状态 FPS
+- **motion timer**：新增一个 33-50ms 的 LVGL timer，只做 transform / position 更新
+
+这样 Bob、Sway、Tremble 可以平滑一些，且不需要把 sprite sheet 自己也提到高帧率。
+
+#### 2A: Bob
+
+**实现建议**
+
+1. `home_view_t` 增加：
+   - `lv_timer_t *motion_timer`
+   - `uint32_t motion_tick`
+   - `lv_coord_t sprite_base_x`
+   - `lv_coord_t sprite_base_y`
+2. `sprite_anim_def_t` 增加：
+   - `bob_period_ms`
+   - `bob_amplitude_px_x10`
+3. `motion_timer_cb` 用 sine lookup table 更新 `lv_obj_set_y()`
+
+**参数建议**
+
+- idle：1.5s，1.5-2.0px
+- working：0.4s，0.5-1.0px
+- waiting：1.5s，1.0px
+- sleeping / compacting：0
+- sad：幅度减半
+- sob：关闭 bob
+
+#### 2B: Sway
+
+**实现建议**
+
+1. `lv_obj_set_style_transform_pivot_x/y()` 把锚点放到底部中心
+2. `lv_obj_set_style_transform_rotation()` 做旋转
+3. 旋转更新也挂在 `motion_timer_cb`
+
+**参数建议**
+
+- neutral：0.5°
+- happy：1.0°
+- sad：0.25°
+- sleeping / compacting：0°
+
+#### 2C: Tremble
+
+sob 的 tremble 依赖高频 motion tick，放在这一版结构里反而更容易做。
+
+**参数建议**
+
+- 2Hz 左右
+- 0.2-0.3px 横向抖动
+- 只在 `SOB` 时开启
+
+**验证**
+
+1. `home_view_resume()` / `home_view_suspend()` 同时管理 frame timer 和 motion timer
+2. 实机观察是否出现 transform 导致的 redraw 抖动
+3. 如果 CPU 压力超预期，优先砍 sway，保留 bob
+
+### Phase 3: 草地背景
+
+这部分独立性高，但建议在 Phase 1 之后再看一次 bin 大小再合入。
+
+Notchi 用的是 512x512 草地 tile；LVGL 这里没必要做运行时平铺，直接离线生成一张 `640x172` 的静态背景条图更省事，也更稳。
+
+**新增 flash**：`640 * 172 * 2 = 220,160 B`，约 **215 KiB**（RGB565）
+
+**实现建议**
+
+1. 新建 `tools/grass_convert.py`
+   - 读取 `GrassIsland.imageset/grass.png`
+   - 离线平铺 / 裁剪成 640x172
+   - 输出 RGB565 C 数组
+2. `src/apps/app_home/src/home_view.c`
+   - 在 `home_view_create()` 里先创建背景 image widget
+   - sprite / bubble / 状态栏叠在它上面
+3. `src/apps/app_home/CMakeLists.txt`
+   - 编译背景资源
+
+**验证**
+
+```bash
+make build
+```
+
+如果 Phase 1 后 headroom 已经偏紧，草地背景是第一优先级的裁剪项。
+
+## 依赖与推荐顺序
+
+推荐顺序如下：
+
+```text
+Phase 0 (Compacting)
+  -> Phase 1A (Config source)
+  -> Phase 1B (Full prompt path)
+  -> Phase 1C (Analyzer + EmotionState)
+  -> Phase 1D/1E/1F (Protocol + Firmware + Assets + Smoke test)
+  -> Phase 2 (Motion)
+  -> Phase 3 (Grass background)
+```
+
+说明：
+
+- Phase 2 从概念上能独立，但它和 1E 会同时重写 `home_view.c/h`。放到 1E 之后更省返工。
+- Phase 3 代码上独立，预算上不独立。最好等 Phase 1 后先看一次最终 bin 大小。
+
+## 降级行为
+
+| 场景 | 行为 |
+|---|---|
+| emotion 未启用 | 直接返回 `neutral + 0.0` |
+| 找不到配置 / token | 同上 |
+| 远端超时 / 非 200 / JSON 解析失败 | 同上，不重试 |
+| `emotion` 字段为空或未知 | firmware 按 neutral 显示 |
+| emotion asset 缺失 | `exact -> sad (仅 sob) -> neutral` fallback |
+| agent 重启 | emotion state 清空，所有 session 回到 neutral |
+
+## Flash 预算（按当前构建产物重算）
+
+| 项目 | 大小 |
+|---|---|
+| 当前 `build/esp32_dashboard.bin` | **2,493,184 B** |
+| app 分区 (`partitions.csv`) | **4,194,304 B** |
+| 当前剩余空间 | **1,701,120 B** |
+| Phase 0 | **81,920 B** |
+| Phase 1 最小集（8 个 emotion 变体） | **786,432 B** |
+| Phase 0 + Phase 1 最小集累计 | **868,352 B** |
+| Phase 3 草地图（RGB565） | **220,160 B** |
+| Phase 0 + 1 + 3 累计 | **1,088,512 B** |
+| 全部上游 sprite 额外变体 + 草地图 | **1,367,040 B** |
+
+按当前 bin 大小估算：
+
+- 做完 **Phase 0 + Phase 1 最小集 + Phase 3** 后，还剩约 **612,608 B**
+- 如果把当前上游已有的额外 sprite 全都一起带上，再加草地图，还剩约 **334,080 B**
+
+所以这条路线**能装下**，但余量没有原计划写得那么松。后续每个 phase 都要重新看一次 bin。
+
+## 关键文件清单
+
+| 文件 | 备注 |
+|---|---|
+| `src/apps/app_home/src/home_presenter.h` | 增加 sprite state / emotion enum |
+| `src/apps/app_home/src/home_presenter.c` | state / emotion 映射 |
+| `src/apps/app_home/src/home_view.h` | 视图缓存字段、motion timer |
+| `src/apps/app_home/src/home_view.c` | sprite 选择、动画、背景 |
+| `src/components/service_home/include/service_home.h` | 透传 emotion |
+| `src/components/service_home/src/service_home.c` | 透传 emotion |
+| `src/components/service_claude/include/service_claude.h` | snapshot schema 扩展 |
+| `src/components/device_link/src/device_link.c` | `claude.update` 解析 emotion |
+| `tools/esp32dash/src/config.rs` | host 配置加载 |
+| `tools/esp32dash/src/emotion.rs` | analyzer |
+| `tools/esp32dash/src/emotion_state.rs` | 累积衰减模型 |
+| `tools/esp32dash/src/model.rs` | `LocalHookEvent` / `Snapshot` schema |
+| `tools/esp32dash/src/agent.rs` | emotion state 生命周期、异步调用 |
+| `tools/esp32dash/src/main.rs` | ingest、`chibi` smoke test |
+| `tools/esp32dash/src/normalizer.rs` | 保持纯函数，但更新 `materially_equal()` |
+| `tools/esp32dash/Cargo.toml` | `toml` 依赖 |
+| `tools/sprite_convert.py` | sprite 生成逻辑 |
+| `tools/grass_convert.py` | 草地背景生成脚本 |
+| `src/apps/app_home/CMakeLists.txt` | 新增生成资源文件 |
