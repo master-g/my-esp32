@@ -112,18 +112,42 @@ static void update_text_from_epoch(uint32_t epoch_s)
     strftime(s_snapshot.weekday_text, sizeof(s_snapshot.weekday_text), "%a", &tm_value);
 }
 
-void time_service_refresh_now(void)
+static bool time_service_is_valid_locked(void) { return s_rtc_valid || s_ntp_synced; }
+
+static void time_service_refresh_now_locked(void)
 {
     time_t now = time(NULL);
 
     s_snapshot.rtc_valid = s_rtc_valid;
     s_snapshot.ntp_synced = s_ntp_synced;
 
-    if (time_service_is_valid() && now > 1700000000) {
+    if (time_service_is_valid_locked() && now > 1700000000) {
         update_text_from_epoch((uint32_t)now);
     } else {
         set_placeholder();
     }
+}
+
+static void time_service_get_sync_flags(bool *rtc_valid, bool *ntp_synced, bool *sync_in_progress)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (rtc_valid != NULL) {
+        *rtc_valid = s_rtc_valid;
+    }
+    if (ntp_synced != NULL) {
+        *ntp_synced = s_ntp_synced;
+    }
+    if (sync_in_progress != NULL) {
+        *sync_in_progress = s_sync_in_progress;
+    }
+    xSemaphoreGive(s_mutex);
+}
+
+void time_service_refresh_now(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    time_service_refresh_now_locked();
+    xSemaphoreGive(s_mutex);
 }
 
 void time_service_get_current_text(char *time_text, size_t time_text_size, uint32_t *epoch_s_out)
@@ -156,19 +180,26 @@ static esp_err_t restore_from_rtc(void)
 {
     uint32_t epoch_s = 0;
     struct timeval tv = {0};
+    char time_text[sizeof(s_snapshot.time_text)] = {0};
     esp_err_t err = bsp_rtc_read_epoch(&epoch_s);
 
     if (err != ESP_OK) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_rtc_valid = false;
+        time_service_refresh_now_locked();
+        xSemaphoreGive(s_mutex);
         ESP_LOGW(TAG, "RTC restore unavailable: %s", esp_err_to_name(err));
         return ESP_OK;
     }
 
     tv.tv_sec = epoch_s;
     settimeofday(&tv, NULL);
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_rtc_valid = true;
-    update_text_from_epoch(epoch_s);
-    ESP_LOGI(TAG, "RTC restore complete: epoch=%" PRIu32 " time=%s", epoch_s, s_snapshot.time_text);
+    time_service_refresh_now_locked();
+    snprintf(time_text, sizeof(time_text), "%s", s_snapshot.time_text);
+    xSemaphoreGive(s_mutex);
+    ESP_LOGI(TAG, "RTC restore complete: epoch=%" PRIu32 " time=%s", epoch_s, time_text);
     return ESP_OK;
 }
 
@@ -214,11 +245,19 @@ static esp_err_t do_sntp_sync(void)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    s_ntp_synced = true;
-    update_text_from_epoch((uint32_t)now);
-    if (bsp_rtc_write_epoch((uint32_t)now) == ESP_OK) {
-        s_rtc_valid = true;
-        ESP_LOGI(TAG, "RTC writeback complete: epoch=%" PRIu32, (uint32_t)now);
+    {
+        bool rtc_write_ok = bsp_rtc_write_epoch((uint32_t)now) == ESP_OK;
+
+        if (rtc_write_ok) {
+            ESP_LOGI(TAG, "RTC writeback complete: epoch=%" PRIu32, (uint32_t)now);
+        }
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        s_ntp_synced = true;
+        if (rtc_write_ok) {
+            s_rtc_valid = true;
+        }
+        time_service_refresh_now_locked();
+        xSemaphoreGive(s_mutex);
     }
     esp_netif_sntp_deinit();
     ESP_LOGI(TAG, "SNTP sync complete using %s", s_ntp_servers[0]);
@@ -241,13 +280,17 @@ static void time_service_task(void *arg)
         if (!net_manager_is_connected()) {
             continue;
         }
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         if (s_sync_in_progress) {
+            xSemaphoreGive(s_mutex);
             continue;
         }
-
         s_sync_in_progress = true;
+        xSemaphoreGive(s_mutex);
         do_sntp_sync();
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_sync_in_progress = false;
+        xSemaphoreGive(s_mutex);
     }
 }
 
@@ -258,9 +301,15 @@ static void time_service_event_handler(const app_event_t *event, void *context)
         return;
     }
 
-    if (event->type == APP_EVENT_NET_CHANGED && net_manager_is_connected() && !s_ntp_synced &&
-        !s_sync_in_progress) {
-        time_service_sync_ntp();
+    {
+        bool ntp_synced = false;
+        bool sync_in_progress = false;
+
+        time_service_get_sync_flags(NULL, &ntp_synced, &sync_in_progress);
+        if (event->type == APP_EVENT_NET_CHANGED && net_manager_is_connected() && !ntp_synced &&
+            !sync_in_progress) {
+            time_service_sync_ntp();
+        }
     }
 }
 
@@ -301,8 +350,13 @@ esp_err_t time_service_start(void)
     }
     s_started = true;
 
-    if (net_manager_is_connected() && !s_ntp_synced) {
-        time_service_sync_ntp();
+    {
+        bool ntp_synced = false;
+
+        time_service_get_sync_flags(NULL, &ntp_synced, NULL);
+        if (net_manager_is_connected() && !ntp_synced) {
+            time_service_sync_ntp();
+        }
     }
     return ESP_OK;
 }
@@ -314,8 +368,13 @@ esp_err_t time_service_sync_ntp(void)
     ESP_RETURN_ON_FALSE(s_started, ESP_ERR_INVALID_STATE, TAG, "time service not started");
     ESP_RETURN_ON_FALSE(net_manager_is_connected(), ESP_ERR_INVALID_STATE, TAG,
                         "network not connected");
-    if (s_sync_in_progress) {
-        return ESP_OK;
+    {
+        bool sync_in_progress = false;
+
+        time_service_get_sync_flags(NULL, NULL, &sync_in_progress);
+        if (sync_in_progress) {
+            return ESP_OK;
+        }
     }
 
     return (xQueueSend(s_command_queue, &cmd, 0) == pdTRUE) ? ESP_OK : ESP_ERR_TIMEOUT;
@@ -328,14 +387,32 @@ void time_service_get_snapshot(time_snapshot_t *out)
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    time_service_refresh_now();
+    time_service_refresh_now_locked();
     *out = s_snapshot;
     xSemaphoreGive(s_mutex);
 }
 
-const char *time_service_get_timezone_name(void) { return s_timezone_name; }
+void time_service_get_timezone_name(char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return;
+    }
 
-const char *time_service_get_timezone_tz(void) { return s_timezone; }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    snprintf(out, out_size, "%s", s_timezone_name);
+    xSemaphoreGive(s_mutex);
+}
+
+void time_service_get_timezone_tz(char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    snprintf(out, out_size, "%s", s_timezone);
+    xSemaphoreGive(s_mutex);
+}
 
 esp_err_t time_service_apply_timezone_config(const char *timezone_name, const char *timezone_tz)
 {
@@ -347,11 +424,21 @@ esp_err_t time_service_apply_timezone_config(const char *timezone_name, const ch
         return ESP_ERR_INVALID_ARG;
     }
 
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     snprintf(s_timezone, sizeof(s_timezone), "%s", timezone_tz);
     snprintf(s_timezone_name, sizeof(s_timezone_name), "%s", timezone_name);
     apply_timezone(s_timezone);
-    time_service_refresh_now();
+    time_service_refresh_now_locked();
+    xSemaphoreGive(s_mutex);
     return ESP_OK;
 }
 
-bool time_service_is_valid(void) { return s_rtc_valid || s_ntp_synced; }
+bool time_service_is_valid(void)
+{
+    bool valid = false;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    valid = time_service_is_valid_locked();
+    xSemaphoreGive(s_mutex);
+    return valid;
+}

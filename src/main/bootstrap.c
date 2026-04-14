@@ -6,7 +6,6 @@
 #include "app_home.h"
 #include "app_manager.h"
 #include "app_settings.h"
-#include "app_satoshi_slot.h"
 #include "app_trading.h"
 #include "bsp_board.h"
 #include "bsp_board_config.h"
@@ -22,7 +21,6 @@
 #include "power_policy.h"
 #include "power_runtime.h"
 #include "service_claude.h"
-#include "service_bitcoin.h"
 #include "service_home.h"
 #include "service_market.h"
 #include "service_settings.h"
@@ -86,7 +84,6 @@ static esp_err_t register_apps(void)
     const app_descriptor_t *descriptors[] = {
         app_home_get_descriptor(),
         app_trading_get_descriptor(),
-        app_satoshi_slot_get_descriptor(),
         app_settings_get_descriptor(),
     };
     size_t i = 0;
@@ -121,7 +118,6 @@ esp_err_t bootstrap_start(void)
     ESP_RETURN_ON_ERROR(weather_service_init(), TAG, "weather service init failed");
     ESP_RETURN_ON_ERROR(claude_service_init(), TAG, "claude service init failed");
     ESP_RETURN_ON_ERROR(market_service_init(), TAG, "market service init failed");
-    ESP_RETURN_ON_ERROR(bitcoin_service_init(), TAG, "bitcoin service init failed");
     ESP_RETURN_ON_ERROR(home_service_init(), TAG, "home service init failed");
     ESP_RETURN_ON_ERROR(settings_service_init(), TAG, "settings service init failed");
     ESP_RETURN_ON_ERROR(net_manager_start(), TAG, "net manager start failed");

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "src/app_home.c"
         "src/home_approval.c"
+        "src/home_prompt.c"
         "src/home_presenter.c"
         "src/home_runtime.c"
         "src/home_screensaver.c"

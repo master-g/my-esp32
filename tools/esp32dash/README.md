@@ -95,6 +95,10 @@ The hook config added by `install-hooks` covers:
 - `PostCompact`
 - `PermissionRequest`
 
+On the device, true `PermissionRequest` events keep the actionable `Accept / Decline / YOLO`
+overlay. `AskUserQuestion` and `Elicitation` waits use a separate read-only prompt overlay
+that shows the question and points the user back to the terminal.
+
 ## launchd
 
 Install once from a stable executable path:
@@ -106,6 +110,7 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 ```
 
 The command writes `~/Library/LaunchAgents/com.local.esp32dash.plist` and starts the new agent.
+Run it as your logged-in macOS user, not with `sudo`: this is a per-user `LaunchAgent`, and `sudo` will incorrectly target root's unsupported `gui/0` domain.
 
 For quick local testing you can still use `cargo run -- install-launchd`, but the plist will point at the current build artifact under `target/`, so `cargo clean` or moving the repo will break the service.
 
@@ -116,7 +121,7 @@ Protocol frames share the same serial line as normal ESP-IDF logs. Only lines st
 Device hello:
 
 ```json
-@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved","screen.capture.start"]}
+@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved","claude.prompt.request","claude.prompt.dismiss","screen.capture.start"]}
 ```
 
 Host request:
@@ -165,6 +170,18 @@ Host approval dismiss:
 
 ```json
 @esp32dash {"type":"event","method":"claude.approval.dismiss","payload":{"id":"approval-1"}}
+```
+
+Host read-only prompt request:
+
+```json
+@esp32dash {"type":"event","method":"claude.prompt.request","payload":{"id":"prompt-1","kind":"question_prompt","title":"Plan ready","question":"Execute now or revise?","options_text":"1. Execute - Run the plan  2. More prompt - Edit in terminal"}}
+```
+
+Host read-only prompt dismiss:
+
+```json
+@esp32dash {"type":"event","method":"claude.prompt.dismiss","payload":{"id":"prompt-1"}}
 ```
 
 Host screenshot capture start:

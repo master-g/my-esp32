@@ -19,11 +19,22 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
         "PreToolUse" => {
             if event.tool_name.as_deref() == Some("AskUserQuestion") {
                 status = RunStatus::WaitingForInput;
+                unread = true;
+                attention = Attention::High;
+                (
+                    "Awaiting input".to_string(),
+                    event
+                        .waiting_prompt
+                        .as_ref()
+                        .map(|prompt| prompt.question.clone())
+                        .unwrap_or_else(|| "Question pending in terminal".to_string()),
+                )
+            } else {
+                (
+                    "Running tool".to_string(),
+                    event.tool_name.as_deref().unwrap_or("Tool execution started").to_string(),
+                )
             }
-            (
-                "Running tool".to_string(),
-                event.tool_name.as_deref().unwrap_or("Tool execution started").to_string(),
-            )
         }
         "PostToolUse" => (
             "Tool finished".to_string(),
@@ -68,12 +79,21 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
             attention = Attention::High;
             (
                 "Awaiting input".to_string(),
-                event.message.clone().unwrap_or_else(|| "MCP server requested input".to_string()),
+                event
+                    .waiting_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.question.clone())
+                    .or_else(|| event.message.clone())
+                    .unwrap_or_else(|| "MCP server requested input".to_string()),
             )
         }
         "ElicitationResult" => (
             "Input received".to_string(),
-            event.message.clone().unwrap_or_else(|| "Continuing after user input".to_string()),
+            event
+                .message
+                .clone()
+                .or_else(|| event.waiting_prompt.as_ref().map(|prompt| prompt.title.clone()))
+                .unwrap_or_else(|| "Continuing after user input".to_string()),
         ),
         "SubagentStart" => (
             "Subagent running".to_string(),
@@ -240,7 +260,10 @@ mod tests {
     use crate::model::Snapshot;
 
     use super::{apply_notification_status, build_workspace, materially_equal, normalize};
-    use crate::{model::LocalHookEvent, text_sanitize::sanitize_prompt_preview};
+    use crate::{
+        model::{LocalHookEvent, WaitingPrompt, WaitingPromptKind, WaitingPromptOption},
+        text_sanitize::sanitize_prompt_preview,
+    };
 
     #[test]
     fn prompt_preview_is_single_line_and_truncated() {
@@ -265,6 +288,7 @@ mod tests {
             tool_name: Some("exec_command".into()),
             tool_use_id: Some("tool-1".into()),
             permission_mode: "default".into(),
+            waiting_prompt: None,
             recv_ts: 10,
             claude_pid: None,
         };
@@ -287,6 +311,7 @@ mod tests {
             tool_name: None,
             tool_use_id: None,
             permission_mode: "default".into(),
+            waiting_prompt: None,
             recv_ts: 10,
             claude_pid: None,
         };
@@ -313,6 +338,7 @@ mod tests {
             tool_name: None,
             tool_use_id: None,
             permission_mode: "default".into(),
+            waiting_prompt: None,
             recv_ts: 10,
             claude_pid: None,
         }
@@ -344,8 +370,20 @@ mod tests {
         let current = Snapshot::empty(1);
         let mut event = make_event("PreToolUse");
         event.tool_name = Some("AskUserQuestion".into());
+        event.waiting_prompt = Some(WaitingPrompt {
+            kind: WaitingPromptKind::AskUserQuestion,
+            title: "Question".into(),
+            question: "Pick one".into(),
+            options: vec![WaitingPromptOption {
+                label: "1. Execute".into(),
+                description: Some("Run the plan now".into()),
+            }],
+        });
         let snapshot = normalize(&event, &current);
         assert_eq!(snapshot.status, "waiting_for_input");
+        assert_eq!(snapshot.title, "Awaiting input");
+        assert_eq!(snapshot.detail, "Pick one");
+        assert!(snapshot.unread);
     }
 
     #[test]

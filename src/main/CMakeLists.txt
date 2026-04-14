@@ -7,7 +7,6 @@ idf_component_register(
     REQUIRES
         app_settings
         app_home
-        app_satoshi_slot
         app_trading
         bsp_board
         core_app_manager

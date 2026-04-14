@@ -13,7 +13,7 @@ This repository now tracks both the host-side tooling and the initial ESP-IDF fi
 - `src/components/`
   Firmware core modules, BSP contracts, services, and policies.
 - `src/apps/`
-  Four fixed app slots: `Home`, `Notify`, `Trading`, `Satoshi Slot`.
+  Current app surfaces: `Home`, `Trading`, `Settings`.
 - `tools/esp32dash/`
   Rust host companion CLI and local agent for Claude hook ingestion, USB serial config management, and device control.
 
@@ -92,7 +92,7 @@ The flash wrapper also does a small preflight check and will fail early if the s
 
 ## Secure Storage Note
 
-`Satoshi Slot` normal mode now relies on encrypted NVS instead of requiring flash encryption.
+Persisted device settings rely on encrypted NVS.
 
 The default firmware config enables ESP32-S3 HMAC-based NVS encryption with eFuse HMAC key slot `0`. On first boot, ESP-IDF may generate and burn that HMAC key if the slot is empty. This is a one-way per-device change, but it does not require flash encryption to be enabled.
 
@@ -110,13 +110,13 @@ The firmware side currently provides:
 - Wi-Fi credential load + reconnect flow in `net_manager`
 - RTC restore + SNTP sync in `service_time`
 - a `home_service` aggregation layer consumed by `app_home`
-- four registered app slots with LVGL roots
+- three registered app surfaces with LVGL roots
 - board configuration constants pinned to the Waveshare examples
 - first-round device validation for `app_home`
 
 What is intentionally not wired yet:
 
 - real weather / market transports, plus the firmware-side `esp32dash` serial transport
-- production-ready `Notify` / `Trading` / `Satoshi Slot` UI
+- polished `Home` / `Trading` / `Settings` UI work
 - end-to-end backlight / dim / sleep control validation
 - IMU-backed auto rotation / auto wake behavior

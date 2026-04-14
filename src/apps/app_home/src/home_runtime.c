@@ -236,6 +236,7 @@ lv_obj_t *home_runtime_create_root(home_runtime_t *runtime, lv_obj_t *parent)
     home_screensaver_create(&runtime->screensaver, runtime->view.root, screensaver_touch_exit_cb,
                             runtime);
     home_approval_create(&runtime->approval, runtime->view.root);
+    home_prompt_create(&runtime->prompt, runtime->view.root);
     if (runtime->view.settings_item != NULL) {
         lv_obj_add_event_cb(runtime->view.settings_item, settings_btn_cb, LV_EVENT_CLICKED,
                             runtime);
@@ -324,6 +325,8 @@ void home_runtime_handle_event(home_runtime_t *runtime, const app_event_t *event
         exit_screensaver(runtime);
         home_approval_on_connection_changed(&runtime->approval, runtime->was_connected,
                                             snapshot.claude_connected);
+        home_prompt_on_connection_changed(&runtime->prompt, runtime->was_connected,
+                                          snapshot.claude_connected);
         runtime->was_connected = snapshot.claude_connected;
         if (snapshot.claude_unread) {
             claude_snapshot_t claude_snapshot;
@@ -338,10 +341,20 @@ void home_runtime_handle_event(home_runtime_t *runtime, const app_event_t *event
     case APP_EVENT_PERMISSION_REQUEST:
         home_screensaver_poke_activity(&runtime->screensaver);
         exit_screensaver(runtime);
+        home_prompt_hide(&runtime->prompt);
         home_approval_show_pending(&runtime->approval);
         break;
     case APP_EVENT_PERMISSION_DISMISS:
         home_approval_hide(&runtime->approval);
+        break;
+    case APP_EVENT_PROMPT_REQUEST:
+        home_screensaver_poke_activity(&runtime->screensaver);
+        exit_screensaver(runtime);
+        home_approval_hide(&runtime->approval);
+        home_prompt_show_pending(&runtime->prompt);
+        break;
+    case APP_EVENT_PROMPT_DISMISS:
+        home_prompt_hide(&runtime->prompt);
         break;
     default:
         break;

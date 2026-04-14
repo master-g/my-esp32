@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -21,6 +23,42 @@ pub struct RawHookInput {
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub tool_input: Option<Value>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingPromptKind {
+    AskUserQuestion,
+    Elicitation,
+}
+
+impl WaitingPromptKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AskUserQuestion => "question_prompt",
+            Self::Elicitation => "elicitation_prompt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaitingPromptOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaitingPrompt {
+    pub kind: WaitingPromptKind,
+    pub title: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<WaitingPromptOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +71,8 @@ pub struct LocalHookEvent {
     pub tool_name: Option<String>,
     pub tool_use_id: Option<String>,
     pub permission_mode: String,
+    #[serde(default)]
+    pub waiting_prompt: Option<WaitingPrompt>,
     pub recv_ts: u64,
     #[serde(default)]
     pub claude_pid: Option<u32>,
@@ -125,7 +165,7 @@ impl Snapshot {
             status: RunStatus::Unknown.as_str().to_string(),
             title: "No data yet".to_string(),
             workspace: String::new(),
-            detail: "Agent has not received any Claude event yet".to_string(),
+            detail: "".to_string(),
             permission_mode: "default".to_string(),
             ts,
             unread: false,

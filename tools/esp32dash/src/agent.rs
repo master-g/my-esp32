@@ -26,7 +26,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    approvals::{ApprovalRequest, ApprovalStore},
+    approvals::{ApprovalRequest, ApprovalStore, DeviceApproval, DismissedApproval},
     compat,
     device::{DeviceConfig, DeviceEvent, DeviceManager, SessionFactory, UnixSerialFactory},
     model::{
@@ -34,9 +34,10 @@ use crate::{
         PersistedSessionState, PersistedState, RpcRequest, RunStatus, Snapshot,
     },
     normalizer::{apply_notification_status, materially_equal, normalize},
+    prompts::{DevicePrompt, DismissedPrompt, PromptStore},
     text_sanitize::{
-        sanitize_approval_summary, sanitize_permission_mode, sanitize_tool_name,
-        sanitize_transport_id,
+        sanitize_approval_summary, sanitize_permission_mode, sanitize_snapshot_detail,
+        sanitize_tool_name, sanitize_transport_id,
     },
 };
 
@@ -122,6 +123,7 @@ pub struct AppState {
     pending_generation: Arc<AtomicU64>,
     device_manager: DeviceManager,
     pub approvals: ApprovalStore,
+    pub prompts: PromptStore,
 }
 
 pub async fn run(config: Config) -> Result<()> {
@@ -160,6 +162,7 @@ pub async fn run(config: Config) -> Result<()> {
 
 impl AppState {
     pub async fn ingest(self: &Arc<Self>, event: LocalHookEvent) {
+        self.maybe_dismiss_prompts_for_event(&event).await;
         self.maybe_dismiss_approvals_for_event(&event).await;
         match event.hook_event_name.as_str() {
             "PreToolUse" => self.handle_pre_tool(event).await,
@@ -169,6 +172,7 @@ impl AppState {
                 self.process_event(event).await;
             }
         }
+        self.sync_device_approvals().await;
     }
 
     async fn handle_pre_tool(self: &Arc<Self>, event: LocalHookEvent) {
@@ -228,6 +232,7 @@ impl AppState {
 
         if let Some(event) = pending {
             self.process_event(event).await;
+            self.sync_device_approvals().await;
         }
     }
 
@@ -239,6 +244,7 @@ impl AppState {
 
         if let Some(event) = pending {
             self.process_event(event).await;
+            self.sync_device_approvals().await;
         }
     }
 
@@ -248,22 +254,53 @@ impl AppState {
         }
 
         let dismissed = self.approvals.dismiss_matching(event).await;
-        for approval_id in dismissed {
+        for approval in dismissed {
             info!(
-                approval_id,
+                approval_id = approval.id,
                 session_id = event.session_id,
                 hook_event = event.hook_event_name,
-                "host cleared pending approval, dismissing device overlay"
+                "host cleared pending approval"
             );
-            if let Err(err) = self.device_manager.send_protocol_event(
-                "claude.approval.dismiss",
-                serde_json::json!({ "id": approval_id }),
-            ) {
+            if !approval.was_visible_on_device {
+                continue;
+            }
+
+            if let Err(err) = self.send_device_dismiss(&approval) {
                 warn!(
+                    approval_id = approval.id,
                     session_id = event.session_id,
                     hook_event = event.hook_event_name,
                     error = %err,
                     "failed to push approval dismiss event to device"
+                );
+            }
+        }
+    }
+
+    async fn maybe_dismiss_prompts_for_event(self: &Arc<Self>, event: &LocalHookEvent) {
+        if !event_clears_pending_prompt(event) {
+            return;
+        }
+
+        let dismissed = self.prompts.dismiss_matching(event).await;
+        for prompt in dismissed {
+            info!(
+                prompt_id = prompt.id,
+                session_id = event.session_id,
+                hook_event = event.hook_event_name,
+                "host cleared pending prompt"
+            );
+            if !prompt.was_visible_on_device {
+                continue;
+            }
+
+            if let Err(err) = self.send_device_prompt_dismiss(&prompt) {
+                warn!(
+                    prompt_id = prompt.id,
+                    session_id = event.session_id,
+                    hook_event = event.hook_event_name,
+                    error = %err,
+                    "failed to push prompt dismiss event to device"
                 );
             }
         }
@@ -285,6 +322,27 @@ impl AppState {
         if let Some(snapshot) = snapshot_to_send {
             self.device_manager.send_snapshot(snapshot);
         }
+
+        self.maybe_submit_prompt_for_event(&event).await;
+    }
+
+    async fn maybe_submit_prompt_for_event(&self, event: &LocalHookEvent) {
+        let Some(prompt) = event.waiting_prompt.clone() else {
+            return;
+        };
+
+        let id = build_prompt_id(event, &prompt);
+        let transport_id = sanitize_transport_id(&id);
+        self.prompts
+            .submit(
+                id.clone(),
+                transport_id,
+                prompt,
+                event.session_id.clone(),
+                event.tool_use_id.clone(),
+            )
+            .await;
+        info!(prompt_id = id, session_id = event.session_id, "queued waiting prompt");
     }
 
     async fn reconcile_sessions(self: &Arc<Self>) {
@@ -328,6 +386,8 @@ impl AppState {
                 warn!(error = %err, "failed to send claude heartbeat to device");
             }
         }
+
+        self.sync_device_approvals().await;
     }
 
     async fn snapshot(&self) -> Snapshot {
@@ -336,6 +396,119 @@ impl AppState {
 
     fn serial_status(&self) -> crate::model::SerialConnectionStatus {
         self.device_manager.status()
+    }
+
+    async fn sync_device_approvals(self: &Arc<Self>) {
+        if !self.serial_status().connected {
+            self.approvals.note_device_disconnected().await;
+            self.prompts.note_device_disconnected().await;
+            return;
+        }
+
+        if let Some(expired) = self.approvals.take_expired_visible_for_device().await {
+            info!(
+                approval_id = expired.id,
+                "approval timed out before device response, dismissing device overlay"
+            );
+            if let Err(err) = self.send_device_dismiss(&expired) {
+                warn!(
+                    approval_id = expired.id,
+                    error = %err,
+                    "failed to dismiss timed-out approval on device"
+                );
+                return;
+            }
+        }
+
+        if self.approvals.has_device_backlog().await {
+            if let Some(prompt) = self.prompts.requeue_visible_for_device().await {
+                if let Err(err) = self.send_device_prompt_dismiss(&prompt) {
+                    warn!(
+                        prompt_id = prompt.id,
+                        error = %err,
+                        "failed to dismiss prompt while approval preempted device overlay"
+                    );
+                    return;
+                }
+            }
+
+            let Some(approval) = self.approvals.claim_next_for_device().await else {
+                return;
+            };
+
+            if let Err(err) = self.send_device_approval_request(&approval) {
+                warn!(
+                    approval_id = approval.id,
+                    error = %err,
+                    "failed to forward queued approval to device"
+                );
+                return;
+            }
+
+            info!(
+                approval_id = approval.id,
+                tool = approval.tool_name,
+                "forwarded queued approval to device"
+            );
+            return;
+        }
+
+        let Some(prompt) = self.prompts.claim_next_for_device().await else {
+            return;
+        };
+
+        if let Err(err) = self.send_device_prompt_request(&prompt) {
+            warn!(
+                prompt_id = prompt.id,
+                error = %err,
+                "failed to forward queued prompt to device"
+            );
+            return;
+        }
+
+        info!(
+            prompt_id = prompt.id,
+            prompt_kind = prompt.prompt.kind.as_str(),
+            "forwarded queued prompt to device"
+        );
+    }
+
+    fn send_device_approval_request(&self, approval: &DeviceApproval) -> Result<()> {
+        self.device_manager.send_protocol_event(
+            "claude.approval.request",
+            serde_json::json!({
+                "id": approval.transport_id,
+                "tool_name": approval.tool_name,
+                "description": approval.tool_input_summary,
+            }),
+        )
+    }
+
+    fn send_device_dismiss(&self, approval: &DismissedApproval) -> Result<()> {
+        self.device_manager.send_protocol_event(
+            "claude.approval.dismiss",
+            serde_json::json!({ "id": approval.transport_id }),
+        )
+    }
+
+    fn send_device_prompt_request(&self, prompt: &DevicePrompt) -> Result<()> {
+        self.device_manager.send_protocol_event(
+            "claude.prompt.request",
+            serde_json::json!({
+                "id": prompt.transport_id,
+                "kind": prompt.prompt.kind.as_str(),
+                "title": prompt.prompt.title,
+                "question": prompt.prompt.question,
+                "options_text": format_prompt_options_text(&prompt.prompt),
+            }),
+        )
+    }
+
+    fn send_device_prompt_dismiss(&self, prompt: &DismissedPrompt) -> Result<()> {
+        self.device_manager.send_protocol_event(
+            "claude.prompt.dismiss",
+            serde_json::json!({ "id": prompt.transport_id }),
+        )
     }
 }
 
@@ -539,6 +712,43 @@ fn event_clears_pending_approval(event: &LocalHookEvent) -> bool {
         && event.hook_event_name != "Notification"
 }
 
+fn event_clears_pending_prompt(event: &LocalHookEvent) -> bool {
+    !event.session_id.is_empty() && event.hook_event_name != "Notification"
+}
+
+fn build_prompt_id(event: &LocalHookEvent, prompt: &crate::model::WaitingPrompt) -> String {
+    let session_key = session_key_for(event);
+    match prompt.kind {
+        crate::model::WaitingPromptKind::AskUserQuestion => {
+            let tool_part = event
+                .tool_use_id
+                .as_deref()
+                .or(event.tool_name.as_deref())
+                .unwrap_or(prompt.question.as_str());
+            format!("{}-{session_key}-{tool_part}", prompt.kind.as_str())
+        }
+        crate::model::WaitingPromptKind::Elicitation => {
+            format!("{}-{session_key}-{}-{}", prompt.kind.as_str(), prompt.title, prompt.question)
+        }
+    }
+}
+
+fn format_prompt_options_text(prompt: &crate::model::WaitingPrompt) -> String {
+    let text = prompt
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| match option.description.as_deref() {
+            Some(description) if !description.is_empty() => {
+                format!("{}. {} - {}", index + 1, option.label, description)
+            }
+            _ => format!("{}. {}", index + 1, option.label),
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+    sanitize_snapshot_detail(&text)
+}
+
 async fn post_event(
     State(state): State<AppState>,
     Json(event): Json<LocalHookEvent>,
@@ -625,19 +835,10 @@ async fn post_approval(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
     };
-    let id = state.approvals.submit(body.id, request.clone()).await;
-    info!(approval_id = id, tool = tool_name, "approval submitted, forwarding to device");
-
-    if let Err(err) = state.device_manager.send_protocol_event(
-        "claude.approval.request",
-        serde_json::json!({
-            "id": transport_id,
-            "tool_name": request.tool_name,
-            "description": request.tool_input_summary,
-        }),
-    ) {
-        warn!(approval_id = id, error = %err, "failed to forward approval request to device");
-    }
+    let state = Arc::new(state);
+    let id = state.approvals.submit(body.id, transport_id, request.clone()).await;
+    info!(approval_id = id, tool = tool_name, "approval submitted");
+    state.sync_device_approvals().await;
 
     (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": id })))
 }
@@ -706,6 +907,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
         .unwrap_or_else(|| Snapshot::empty(now_epoch()));
     let initial_sessions = restored_sessions(persisted.as_ref(), &initial_snapshot);
     let approvals = ApprovalStore::new();
+    let prompts = PromptStore::new();
     let (device_event_tx, mut device_event_rx) = mpsc::unbounded_channel();
     let device_manager = DeviceManager::start(
         config.device.clone(),
@@ -714,7 +916,17 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
         device_event_tx,
     );
 
-    let approvals_for_device = approvals.clone();
+    let app_state = AppState {
+        config,
+        state: Arc::new(Mutex::new(AgentState::new(initial_snapshot, initial_sessions))),
+        pending_generation: Arc::new(AtomicU64::new(0)),
+        device_manager,
+        approvals,
+        prompts,
+    };
+
+    let approvals_for_device = app_state.approvals.clone();
+    let approval_sync_state = Arc::new(app_state.clone());
     tokio::spawn(async move {
         while let Some(event) = device_event_rx.recv().await {
             match event {
@@ -722,8 +934,9 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
                     id,
                     decision,
                 } => {
-                    if approvals_for_device.resolve(&id, decision).await {
-                        info!(approval_id = id, ?decision, "device resolved approval");
+                    if let Some(approval_id) = approvals_for_device.resolve(&id, decision).await {
+                        info!(approval_id, ?decision, "device resolved approval");
+                        approval_sync_state.sync_device_approvals().await;
                     } else {
                         warn!(
                             approval_id = id,
@@ -736,13 +949,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
         }
     });
 
-    AppState {
-        config,
-        state: Arc::new(Mutex::new(AgentState::new(initial_snapshot, initial_sessions))),
-        pending_generation: Arc::new(AtomicU64::new(0)),
-        device_manager,
-        approvals,
-    }
+    app_state
 }
 
 fn restored_sessions(
@@ -803,7 +1010,10 @@ mod tests {
     use std::{
         collections::BTreeMap,
         process,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering as AtomicOrdering},
+        },
         time::SystemTime,
     };
 
@@ -813,7 +1023,10 @@ mod tests {
     use super::*;
     use crate::{
         device::DeviceSession,
-        model::{Attention, PersistedSessionState, WireFrame},
+        model::{
+            Attention, PersistedSessionState, WaitingPrompt, WaitingPromptKind,
+            WaitingPromptOption, WireFrame,
+        },
     };
 
     #[derive(Clone)]
@@ -853,6 +1066,138 @@ mod tests {
         fn write_frame(&mut self, frame: &WireFrame) -> Result<()> {
             self.writes.lock().expect("writes mutex poisoned").push(frame.clone());
             Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct PanicAfterHelloFactory {
+        crashed: Arc<AtomicBool>,
+    }
+
+    impl SessionFactory for PanicAfterHelloFactory {
+        fn connect(&self, _port: &str, _baud: u32) -> Result<Box<dyn DeviceSession>> {
+            Ok(Box::new(PanicAfterHelloSession {
+                sent_hello: false,
+                crashed: self.crashed.clone(),
+            }))
+        }
+    }
+
+    struct PanicAfterHelloSession {
+        sent_hello: bool,
+        crashed: Arc<AtomicBool>,
+    }
+
+    impl DeviceSession for PanicAfterHelloSession {
+        fn read_frame(&mut self, _timeout: Duration) -> Result<Option<WireFrame>> {
+            if !self.sent_hello {
+                self.sent_hello = true;
+                return Ok(Some(WireFrame::Hello {
+                    protocol_version: 1,
+                    device_id: "esp32-dashboard".into(),
+                    product: "waveshare".into(),
+                    capabilities: vec!["claude.update".into()],
+                }));
+            }
+
+            self.crashed.store(true, AtomicOrdering::SeqCst);
+            panic!("simulated device worker crash");
+        }
+
+        fn write_frame(&mut self, _frame: &WireFrame) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn approval_request_ids(writes: &[WireFrame]) -> Vec<String> {
+        writes
+            .iter()
+            .filter_map(|frame| match frame {
+                WireFrame::Event {
+                    method,
+                    payload,
+                } if method == "claude.approval.request" => {
+                    payload["id"].as_str().map(ToOwned::to_owned)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_approval_dismiss(writes: &[WireFrame], id: &str) -> bool {
+        writes.iter().any(|frame| {
+            matches!(
+                frame,
+                WireFrame::Event { method, payload }
+                    if method == "claude.approval.dismiss"
+                        && payload["id"] == id
+            )
+        })
+    }
+
+    fn prompt_request_ids(writes: &[WireFrame]) -> Vec<String> {
+        writes
+            .iter()
+            .filter_map(|frame| match frame {
+                WireFrame::Event {
+                    method,
+                    payload,
+                } if method == "claude.prompt.request" => {
+                    payload["id"].as_str().map(ToOwned::to_owned)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_prompt_dismiss(writes: &[WireFrame], id: &str) -> bool {
+        writes.iter().any(|frame| {
+            matches!(
+                frame,
+                WireFrame::Event { method, payload }
+                    if method == "claude.prompt.dismiss"
+                        && payload["id"] == id
+            )
+        })
+    }
+
+    fn waiting_prompt_event(
+        session_id: &str,
+        hook_event_name: &str,
+        tool_name: Option<&str>,
+        tool_use_id: Option<&str>,
+        prompt: Option<WaitingPrompt>,
+    ) -> LocalHookEvent {
+        LocalHookEvent {
+            session_id: session_id.into(),
+            cwd: "/tmp/project".into(),
+            hook_event_name: hook_event_name.into(),
+            message: None,
+            prompt_preview: None,
+            tool_name: tool_name.map(str::to_string),
+            tool_use_id: tool_use_id.map(str::to_string),
+            permission_mode: "default".into(),
+            waiting_prompt: prompt,
+            recv_ts: 123,
+            claude_pid: None,
+        }
+    }
+
+    fn sample_waiting_prompt(kind: WaitingPromptKind) -> WaitingPrompt {
+        WaitingPrompt {
+            kind,
+            title: "Awaiting input".into(),
+            question: "Choose an action".into(),
+            options: vec![
+                WaitingPromptOption {
+                    label: "Execute".into(),
+                    description: Some("Run the approved plan".into()),
+                },
+                WaitingPromptOption {
+                    label: "More prompt".into(),
+                    description: Some("Edit the request in terminal".into()),
+                },
+            ],
         }
     }
 
@@ -942,6 +1287,7 @@ mod tests {
                 tool_name: None,
                 tool_use_id: None,
                 permission_mode: "default".into(),
+                waiting_prompt: None,
                 recv_ts: 123,
                 claude_pid: None,
             })
@@ -993,6 +1339,7 @@ mod tests {
                 writes: writes.clone(),
             }),
         );
+        let approval_state = Arc::new(app_state.clone());
         let router = build_router(app_state);
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -1013,6 +1360,20 @@ mod tests {
             .error_for_status()?;
 
         Client::new()
+            .post(format!("http://{addr}/v1/claude/approvals"))
+            .json(&serde_json::json!({
+                "id": "approval-2",
+                "tool_name": "Edit",
+                "tool_input_summary": "edit src/main.rs",
+                "permission_mode": "default",
+                "session_id": "sess-2",
+                "tool_use_id": "tool-2",
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Client::new()
             .post(format!("http://{addr}/v1/claude/events"))
             .json(&LocalHookEvent {
                 session_id: "sess-1".into(),
@@ -1023,6 +1384,7 @@ mod tests {
                 tool_name: Some("Bash".into()),
                 tool_use_id: Some("tool-1".into()),
                 permission_mode: "default".into(),
+                waiting_prompt: None,
                 recv_ts: 124,
                 claude_pid: None,
             })
@@ -1030,27 +1392,310 @@ mod tests {
             .await?
             .error_for_status()?;
 
+        approval_state.sync_device_approvals().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
-        assert!(writes.iter().any(|frame| {
-            matches!(
-                frame,
-                WireFrame::Event { method, payload }
-                    if method == "claude.approval.request"
-                        && payload["id"] == "approval-1"
-            )
-        }));
-        assert!(writes.iter().any(|frame| {
-            matches!(
-                frame,
-                WireFrame::Event { method, payload }
-                    if method == "claude.approval.dismiss"
-                        && payload["id"] == "approval-1"
-            )
-        }));
+        let request_ids = approval_request_ids(&writes);
+        assert_eq!(request_ids, vec!["approval-1".to_string(), "approval-2".to_string()]);
+        assert!(has_approval_dismiss(&writes, "approval-1"));
 
         server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiting_prompt_is_forwarded_and_dismissed_on_follow_up_event() -> Result<()> {
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("esp32dash-prompt-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+        };
+
+        let app_state = Arc::new(build_app_state(
+            config,
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+        ));
+
+        for _ in 0..20 {
+            if app_state.serial_status().connected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(app_state.serial_status().connected);
+
+        app_state
+            .ingest(waiting_prompt_event(
+                "sess-1",
+                "PreToolUse",
+                Some("AskUserQuestion"),
+                Some("tool-1"),
+                Some(sample_waiting_prompt(WaitingPromptKind::AskUserQuestion)),
+            ))
+            .await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+
+        app_state
+            .ingest(waiting_prompt_event(
+                "sess-1",
+                "PostToolUse",
+                Some("AskUserQuestion"),
+                Some("tool-1"),
+                None,
+            ))
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let writes = writes.lock().expect("writes mutex poisoned");
+        let prompt_ids = prompt_request_ids(&writes);
+        assert_eq!(prompt_ids.len(), 1);
+        assert!(has_prompt_dismiss(&writes, &prompt_ids[0]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_preempts_visible_prompt_and_prompt_returns_after_resolution() -> Result<()> {
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
+        let state_dir =
+            std::env::temp_dir().join(format!("esp32dash-prompt-priority-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+        };
+
+        let app_state = Arc::new(build_app_state(
+            config,
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+        ));
+
+        for _ in 0..20 {
+            if app_state.serial_status().connected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(app_state.serial_status().connected);
+
+        app_state
+            .ingest(waiting_prompt_event(
+                "sess-prompt",
+                "Elicitation",
+                None,
+                None,
+                Some(sample_waiting_prompt(WaitingPromptKind::Elicitation)),
+            ))
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        app_state
+            .approvals
+            .submit(
+                "approve-1".into(),
+                "approval-1".into(),
+                ApprovalRequest {
+                    tool_name: "Bash".into(),
+                    tool_input_summary: "rm -rf /tmp/test".into(),
+                    permission_mode: "default".into(),
+                    session_id: "sess-approval".into(),
+                    tool_use_id: Some("tool-approve".into()),
+                },
+            )
+            .await;
+        app_state.sync_device_approvals().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            app_state
+                .approvals
+                .resolve("approval-1", crate::approvals::ApprovalDecision::Allow)
+                .await,
+            Some("approve-1".into())
+        );
+        app_state.sync_device_approvals().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let writes = writes.lock().expect("writes mutex poisoned");
+        let prompt_ids = prompt_request_ids(&writes);
+        assert_eq!(prompt_ids.len(), 2);
+        assert_eq!(prompt_ids[0], prompt_ids[1]);
+        let approval_ids = approval_request_ids(&writes);
+        assert_eq!(approval_ids, vec!["approval-1".to_string()]);
+        assert!(has_prompt_dismiss(&writes, &prompt_ids[0]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn host_serializes_multiple_approvals_until_current_resolves() -> Result<()> {
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("esp32dash-queue-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+        };
+
+        let app_state = build_app_state(
+            config,
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+        );
+        let approval_state = Arc::new(app_state.clone());
+        let router = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        Client::new()
+            .post(format!("http://{addr}/v1/claude/approvals"))
+            .json(&serde_json::json!({
+                "id": "approval-1",
+                "tool_name": "Bash",
+                "tool_input_summary": "rm -rf /tmp/test",
+                "permission_mode": "default",
+                "session_id": "sess-1",
+                "tool_use_id": "tool-1",
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Client::new()
+            .post(format!("http://{addr}/v1/claude/approvals"))
+            .json(&serde_json::json!({
+                "id": "approval-2",
+                "tool_name": "Edit",
+                "tool_input_summary": "edit src/main.rs",
+                "permission_mode": "default",
+                "session_id": "sess-2",
+                "tool_use_id": "tool-2",
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        {
+            let writes = writes.lock().expect("writes mutex poisoned");
+            let request_ids = approval_request_ids(&writes);
+            assert_eq!(request_ids, vec!["approval-1".to_string()]);
+        }
+
+        assert_eq!(
+            approval_state
+                .approvals
+                .resolve("approval-1", crate::approvals::ApprovalDecision::Allow)
+                .await,
+            Some("approval-1".into())
+        );
+        approval_state.sync_device_approvals().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let writes = writes.lock().expect("writes mutex poisoned");
+        let request_ids = approval_request_ids(&writes);
+        assert_eq!(request_ids, vec!["approval-1".to_string(), "approval-2".to_string()]);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_device_forward_does_not_immediately_requeue_claim() -> Result<()> {
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("esp32dash-approval-fail-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let crashed = Arc::new(AtomicBool::new(false));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+        };
+
+        let app_state = build_app_state(
+            config,
+            Arc::new(PanicAfterHelloFactory {
+                crashed: crashed.clone(),
+            }),
+        );
+        let approval_state = Arc::new(app_state.clone());
+
+        for _ in 0..20 {
+            if approval_state.serial_status().connected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(approval_state.serial_status().connected);
+
+        for _ in 0..20 {
+            if crashed.load(AtomicOrdering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(crashed.load(AtomicOrdering::SeqCst));
+        assert!(approval_state.serial_status().connected);
+
+        approval_state
+            .approvals
+            .submit(
+                "approve-1".into(),
+                "approval-1".into(),
+                ApprovalRequest {
+                    tool_name: "Bash".into(),
+                    tool_input_summary: "rm -rf /tmp/test".into(),
+                    permission_mode: "default".into(),
+                    session_id: "sess-1".into(),
+                    tool_use_id: Some("tool-1".into()),
+                },
+            )
+            .await;
+
+        approval_state.sync_device_approvals().await;
+        assert!(approval_state.approvals.claim_next_for_device().await.is_none());
+
+        approval_state.approvals.note_device_disconnected().await;
+        let retried = approval_state.approvals.claim_next_for_device().await.unwrap();
+        assert_eq!(retried.id, "approve-1");
+        assert_eq!(retried.transport_id, "approval-1");
+
         Ok(())
     }
 

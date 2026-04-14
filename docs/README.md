@@ -5,7 +5,6 @@
 - [design/dashboard-design.md](./design/dashboard-design.md): 项目主设计文档，总览架构、阶段目标和页面模型
 - [design/apps/home.md](./design/apps/home.md): Home 页面子设计
 - [design/apps/trading.md](./design/apps/trading.md): Trading 页面子设计
-- [design/apps/satoshi-slot.md](./design/apps/satoshi-slot.md): Satoshi Slot 页面子设计
 - [design/services/time-service.md](./design/services/time-service.md): 时间服务子设计
 - [design/services/weather-service.md](./design/services/weather-service.md): 天气服务子设计
 - [design/services/market-service.md](./design/services/market-service.md): 行情服务子设计

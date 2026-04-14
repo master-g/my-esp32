@@ -55,6 +55,13 @@ typedef struct {
     esp_err_t (*handle_control)(app_control_type_t type, const void *payload);
 } app_descriptor_t;
 
+#define APP_MANAGER_DEBUG_NAME_MAX 32
+
+typedef struct {
+    uint32_t ui_event_queue_drops;
+    char last_dropped_event[APP_MANAGER_DEBUG_NAME_MAX];
+} app_manager_debug_stats_t;
+
 esp_err_t app_manager_init(void);
 esp_err_t app_manager_register(const app_descriptor_t *descriptor);
 esp_err_t app_manager_switch_to(app_id_t app_id);
@@ -64,6 +71,7 @@ esp_err_t app_manager_request_home_screensaver(bool enabled, uint32_t timeout_ms
 esp_err_t app_manager_request_screenshot(app_screenshot_t *capture, uint32_t timeout_ms);
 app_id_t app_manager_get_foreground_app(void);
 const app_descriptor_t *app_manager_get_descriptor(app_id_t app_id);
+void app_manager_get_debug_stats(app_manager_debug_stats_t *out);
 void app_manager_on_event(const app_event_t *event, void *context);
 void app_manager_process_ui_events(void);
 

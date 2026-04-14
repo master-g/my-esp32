@@ -7,6 +7,7 @@ mod hooks;
 mod launchd;
 mod model;
 mod normalizer;
+mod prompts;
 mod text_sanitize;
 
 use std::{
@@ -14,7 +15,10 @@ use std::{
     fs::{self, File},
     io::{self, BufWriter, Read},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -34,13 +38,17 @@ use crate::{
     hooks::InstallHooksResult,
     model::{
         AdminErrorResponse, AdminRpcResponse, Attention, DeviceScreenshot, LocalHookEvent,
-        RawHookInput, RpcRequest, RunStatus, Snapshot, WireFrame,
+        RawHookInput, RpcRequest, RunStatus, Snapshot, WaitingPrompt, WaitingPromptKind,
+        WaitingPromptOption, WireFrame,
     },
     text_sanitize::{
         build_approval_id, sanitize_approval_summary, sanitize_message, sanitize_permission_mode,
-        sanitize_prompt_preview, sanitize_tool_name,
+        sanitize_prompt_preview, sanitize_snapshot_detail, sanitize_snapshot_title,
+        sanitize_tool_name,
     },
 };
+
+static NEXT_APPROVAL_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -101,15 +109,6 @@ enum Command {
     Chibi {
         #[command(subcommand)]
         command: ChibiCommand,
-    },
-    #[command(
-        about = "Satoshi Slot key management",
-        subcommand_required = true,
-        arg_required_else_help = true
-    )]
-    Slot {
-        #[command(subcommand)]
-        command: SlotCommand,
     },
 }
 
@@ -268,18 +267,6 @@ enum ChibiCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum SlotCommand {
-    #[command(about = "Export the saved hit record (WIF private key) from the device")]
-    Export {
-        #[arg(
-            long,
-            help = "Use a specific serial port instead of autodiscovery or the running agent"
-        )]
-        port: Option<String>,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -325,9 +312,6 @@ async fn main() -> Result<()> {
         Command::Chibi {
             command,
         } => run_chibi_command(command).await,
-        Command::Slot {
-            command,
-        } => run_slot_command(command).await,
     }
 }
 
@@ -385,44 +369,6 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
                 height: screenshot.meta.height,
                 bytes: screenshot.data.len(),
             })
-        }
-    }
-}
-
-async fn run_slot_command(command: SlotCommand) -> Result<()> {
-    match command {
-        SlotCommand::Export {
-            port,
-        } => {
-            let result = run_request(
-                port.as_deref(),
-                RpcRequest {
-                    method: "slot.export_hit".into(),
-                    params: json!({}),
-                },
-            )
-            .await?;
-
-            if let Some(wif) = result.get("wif").and_then(|v| v.as_str()) {
-                let label = result.get("label").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let hash160 = result.get("hash160").and_then(|v| v.as_str()).unwrap_or("?");
-                let is_self_test =
-                    result.get("is_self_test").and_then(|v| v.as_bool()).unwrap_or(false);
-
-                eprintln!("=== Satoshi Slot Hit Record ===");
-                eprintln!("Label:     {label}");
-                eprintln!("Hash160:   {hash160}");
-                eprintln!("Self-test: {is_self_test}");
-                eprintln!();
-                println!("{wif}");
-                eprintln!();
-                eprintln!("SECURITY: This is a Bitcoin private key in WIF format.");
-                eprintln!("          Import it into a wallet immediately and");
-                eprintln!("          transfer any funds to an address you control.");
-            } else {
-                print_json(&result)?;
-            }
-            Ok(())
         }
     }
 }
@@ -626,7 +572,7 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
     let now_ms = now_epoch_millis();
     let display_tool_name = sanitize_tool_name(tool).unwrap_or_else(|| "unknown".into());
     let description = sanitize_approval_summary(desc);
-    let approval_id = build_approval_id(now_ms, &display_tool_name);
+    let approval_id = next_approval_id();
     let session_id = format!("approve-dismiss-{now_ms:x}");
     let tool_use_id = format!("tool-{approval_id}");
     let cwd =
@@ -640,6 +586,7 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
         tool_name: Some(display_tool_name.clone()),
         tool_use_id: Some(tool_use_id.clone()),
         permission_mode: "default".into(),
+        waiting_prompt: None,
         recv_ts: now_epoch(),
         claude_pid: None,
     };
@@ -652,6 +599,7 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
         tool_name: Some(display_tool_name.clone()),
         tool_use_id: Some(tool_use_id),
         permission_mode: "default".into(),
+        waiting_prompt: None,
         recv_ts: now_epoch(),
         claude_pid: None,
     };
@@ -904,6 +852,7 @@ fn install_hooks(args: InstallHooksArgs) -> Result<()> {
 }
 
 fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
+    let waiting_prompt = extract_waiting_prompt(&raw);
     let message = raw.message.or(raw.reason).and_then(|message| sanitize_message(&message));
 
     let prompt_preview = raw.prompt.as_deref().and_then(sanitize_prompt_preview);
@@ -923,9 +872,124 @@ fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
         tool_name: raw.tool_name.and_then(|tool| sanitize_tool_name(&tool)),
         tool_use_id: raw.tool_use_id,
         permission_mode,
+        waiting_prompt,
         recv_ts: now_epoch(),
         claude_pid: hook_claude_pid(),
     }
+}
+
+fn extract_waiting_prompt(raw: &RawHookInput) -> Option<WaitingPrompt> {
+    match raw.hook_event_name.as_str() {
+        "PreToolUse" if raw.tool_name.as_deref() == Some("AskUserQuestion") => {
+            raw.tool_input.as_ref().and_then(parse_ask_user_question_prompt)
+        }
+        "Elicitation" => parse_elicitation_prompt(raw),
+        _ => None,
+    }
+}
+
+fn parse_ask_user_question_prompt(tool_input: &Value) -> Option<WaitingPrompt> {
+    let questions = tool_input.get("questions")?.as_array()?;
+    let first = questions.first()?;
+    let question = value_string(first, &["question"]).and_then(sanitize_waiting_detail)?;
+    let question_count = questions.iter().filter(|item| item.is_object()).count().max(1);
+    let default_title = if question_count > 1 {
+        format!("Question 1/{question_count}")
+    } else {
+        "Question".to_string()
+    };
+    let title = value_string(first, &["header"])
+        .and_then(sanitize_waiting_title)
+        .unwrap_or_else(|| sanitize_snapshot_title(&default_title));
+    let options = first.get("options").and_then(parse_waiting_options).unwrap_or_default();
+
+    Some(WaitingPrompt {
+        kind: WaitingPromptKind::AskUserQuestion,
+        title,
+        question,
+        options,
+    })
+}
+
+fn parse_elicitation_prompt(raw: &RawHookInput) -> Option<WaitingPrompt> {
+    let title = value_string_map(
+        &raw.extra,
+        &["title", "header", "label", "server_name", "server", "mcp_server"],
+    )
+    .and_then(sanitize_waiting_title)
+    .unwrap_or_else(|| "Awaiting input".into());
+    let question = value_string_map(&raw.extra, &["question", "prompt", "message"])
+        .or_else(|| raw.message.as_deref())
+        .or_else(|| raw.reason.as_deref())
+        .and_then(sanitize_waiting_detail)?;
+    let options = raw
+        .extra
+        .get("options")
+        .and_then(parse_waiting_options)
+        .or_else(|| raw.extra.get("choices").and_then(parse_waiting_options))
+        .unwrap_or_default();
+
+    Some(WaitingPrompt {
+        kind: WaitingPromptKind::Elicitation,
+        title,
+        question,
+        options,
+    })
+}
+
+fn parse_waiting_options(value: &Value) -> Option<Vec<WaitingPromptOption>> {
+    let options: Vec<WaitingPromptOption> =
+        value.as_array()?.iter().filter_map(parse_waiting_option).take(4).collect();
+    (!options.is_empty()).then_some(options)
+}
+
+fn parse_waiting_option(value: &Value) -> Option<WaitingPromptOption> {
+    match value {
+        Value::String(label) => Some(WaitingPromptOption {
+            label: sanitize_waiting_detail(label)?,
+            description: None,
+        }),
+        Value::Object(map) => {
+            let label = ["label", "title", "value", "name"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str))
+                .and_then(sanitize_waiting_detail)?;
+            let description = ["description", "detail", "hint", "explanation"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str))
+                .and_then(sanitize_waiting_detail);
+            Some(WaitingPromptOption {
+                label,
+                description,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn value_string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn value_string_map<'a>(
+    values: &'a std::collections::BTreeMap<String, Value>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| values.get(*key).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn sanitize_waiting_title(input: &str) -> Option<String> {
+    let title = sanitize_snapshot_title(input);
+    (!title.is_empty()).then_some(title)
+}
+
+fn sanitize_waiting_detail(input: &str) -> Option<String> {
+    let detail = sanitize_snapshot_detail(input);
+    (!detail.is_empty()).then_some(detail)
 }
 
 fn hook_claude_pid() -> Option<u32> {
@@ -1039,7 +1103,7 @@ async fn approve_from_stdin() -> Result<()> {
         .filter(|mode| !mode.is_empty())
         .unwrap_or_else(|| "default".into());
 
-    let approval_id = build_approval_id(now_epoch_millis(), &tool_name);
+    let approval_id = next_approval_id();
     let event = serde_json::from_str::<RawHookInput>(&stdin).ok().map(sanitize_raw_event);
 
     // Also ingest as a normal event so the dashboard updates
@@ -1089,15 +1153,11 @@ async fn approve_from_stdin() -> Result<()> {
     loop {
         if std::time::Instant::now() > deadline {
             warn!("approval timed out, denying");
-            let output = json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": "deny",
-                        "message": "Approval timed out on ESP32 dashboard"
-                    }
-                }
-            });
+            let output = permission_request_output_for_decision(
+                "deny",
+                &tool_name,
+                Some("Approval timed out on ESP32 dashboard"),
+            );
             println!("{}", serde_json::to_string(&output)?);
             return Ok(());
         }
@@ -1131,43 +1191,59 @@ async fn approve_from_stdin() -> Result<()> {
         }
 
         let decision = approval.get("decision").and_then(|v| v.as_str()).unwrap_or("deny");
-
-        let output = match decision {
-            "allow" => json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": "allow"
-                    }
-                }
-            }),
-            "yolo" => json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": "allow",
-                        "updatedPermissions": [{
-                            "type": "addRules",
-                            "rules": [{ "toolName": tool_name }],
-                            "behavior": "allow",
-                            "destination": "localSettings"
-                        }]
-                    }
-                }
-            }),
-            _ => json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": "deny",
-                        "message": "Denied from ESP32 dashboard"
-                    }
-                }
-            }),
-        };
+        let output = permission_request_output_for_decision(
+            decision,
+            &tool_name,
+            Some("Denied from ESP32 dashboard"),
+        );
 
         println!("{}", serde_json::to_string(&output)?);
         return Ok(());
+    }
+}
+
+fn next_approval_id() -> String {
+    let sequence = NEXT_APPROVAL_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    build_approval_id(now_epoch_millis(), sequence)
+}
+
+fn permission_request_output_for_decision(
+    decision: &str,
+    tool_name: &str,
+    deny_message: Option<&str>,
+) -> Value {
+    match decision {
+        "allow" => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "allow"
+                }
+            }
+        }),
+        "yolo" => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "allow",
+                    "updatedPermissions": [{
+                        "type": "addRules",
+                        "rules": [{ "toolName": tool_name }],
+                        "behavior": "allow",
+                        "destination": "localSettings"
+                    }]
+                }
+            }
+        }),
+        _ => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "deny",
+                    "message": deny_message.unwrap_or("Denied from ESP32 dashboard")
+                }
+            }
+        }),
     }
 }
 
@@ -1325,5 +1401,91 @@ mod tests {
 
         server.abort();
         Ok(())
+    }
+
+    #[test]
+    fn yolo_output_adds_persistent_allow_rule_for_tool() {
+        let output = permission_request_output_for_decision("yolo", "Bash", None);
+        let decision = &output["hookSpecificOutput"]["decision"];
+
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(decision["updatedPermissions"][0]["type"], "addRules");
+        assert_eq!(decision["updatedPermissions"][0]["rules"][0]["toolName"], "Bash");
+        assert_eq!(decision["updatedPermissions"][0]["behavior"], "allow");
+        assert_eq!(decision["updatedPermissions"][0]["destination"], "localSettings");
+    }
+
+    #[test]
+    fn sanitize_raw_event_preserves_ask_user_question_prompt() {
+        let event = sanitize_raw_event(RawHookInput {
+            session_id: "sess-1".into(),
+            cwd: "/tmp/project".into(),
+            hook_event_name: "PreToolUse".into(),
+            message: None,
+            prompt: None,
+            tool_name: Some("AskUserQuestion".into()),
+            tool_use_id: Some("tool-1".into()),
+            permission_mode: Some("default".into()),
+            reason: None,
+            tool_input: Some(json!({
+                "questions": [{
+                    "header": "Plan ready",
+                    "question": "Execute now or revise?",
+                    "options": [
+                        { "label": "Execute", "description": "Run the plan" },
+                        { "label": "More prompt", "description": "Edit the plan" }
+                    ]
+                }]
+            })),
+            extra: Default::default(),
+        });
+
+        let prompt = event.waiting_prompt.expect("waiting prompt should be preserved");
+        assert_eq!(prompt.kind, WaitingPromptKind::AskUserQuestion);
+        assert_eq!(prompt.title, "Plan ready");
+        assert_eq!(prompt.question, "Execute now or revise?");
+        assert_eq!(prompt.options.len(), 2);
+        assert_eq!(prompt.options[0].label, "Execute");
+        assert_eq!(prompt.options[0].description.as_deref(), Some("Run the plan"));
+    }
+
+    #[test]
+    fn sanitize_raw_event_preserves_elicitation_prompt() {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("server_name".into(), json!("notion"));
+        extra.insert("prompt".into(), json!("Choose a workspace"));
+        extra.insert(
+            "options".into(),
+            json!(["Engineering", { "label": "Design", "description": "Review assets" }]),
+        );
+
+        let event = sanitize_raw_event(RawHookInput {
+            session_id: "sess-2".into(),
+            cwd: "/tmp/project".into(),
+            hook_event_name: "Elicitation".into(),
+            message: Some("Choose a workspace".into()),
+            prompt: None,
+            tool_name: None,
+            tool_use_id: None,
+            permission_mode: Some("default".into()),
+            reason: None,
+            tool_input: None,
+            extra,
+        });
+
+        let prompt = event.waiting_prompt.expect("elicitation prompt should be preserved");
+        assert_eq!(prompt.kind, WaitingPromptKind::Elicitation);
+        assert_eq!(prompt.title, "notion");
+        assert_eq!(prompt.question, "Choose a workspace");
+        assert_eq!(prompt.options.len(), 2);
+        assert_eq!(prompt.options[0].label, "Engineering");
+        assert_eq!(prompt.options[1].description.as_deref(), Some("Review assets"));
+    }
+
+    #[test]
+    fn deny_output_uses_supplied_message() {
+        let output =
+            permission_request_output_for_decision("deny", "Bash", Some("Approval timed out"));
+        assert_eq!(output["hookSpecificOutput"]["decision"]["message"], "Approval timed out");
     }
 }

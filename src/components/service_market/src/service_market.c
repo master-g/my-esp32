@@ -92,6 +92,7 @@ static bool s_stream_connected;
 static uint8_t s_source_error_count;
 static int64_t s_primary_retry_after_us;
 static int64_t s_stream_retry_after_us;
+static market_debug_stats_t s_debug_stats;
 static market_summary_cache_t s_summaries[MARKET_PAIR_COUNT];
 static market_chart_cache_t s_charts[MARKET_PAIR_COUNT][MARKET_INTERVAL_COUNT];
 static int64_t s_last_summary_request_us[MARKET_PAIR_COUNT];
@@ -107,6 +108,28 @@ static bool market_pair_is_valid(market_pair_id_t pair)
 static bool market_interval_is_valid(market_interval_id_t interval)
 {
     return interval >= MARKET_INTERVAL_5M && interval <= MARKET_INTERVAL_1D;
+}
+
+static const char *market_command_type_to_string(market_command_type_t type)
+{
+    switch (type) {
+    case MARKET_CMD_REFRESH_SUMMARY:
+        return "refresh_summary";
+    case MARKET_CMD_REFRESH_CHART:
+        return "refresh_chart";
+    case MARKET_CMD_SYNC_STREAM:
+        return "sync_stream";
+    case MARKET_CMD_STREAM_CONNECTED:
+        return "stream_connected";
+    case MARKET_CMD_STREAM_DISCONNECTED:
+        return "stream_disconnected";
+    case MARKET_CMD_STREAM_SUMMARY:
+        return "stream_summary";
+    case MARKET_CMD_STREAM_KLINE:
+        return "stream_kline";
+    default:
+        return "unknown";
+    }
 }
 
 const char *market_pair_label(market_pair_id_t pair)
@@ -529,7 +552,19 @@ static bool queue_command(const market_command_t *command)
         return false;
     }
 
-    return xQueueSend(s_command_queue, command, 0) == pdTRUE;
+    if (xQueueSend(s_command_queue, command, 0) == pdTRUE) {
+        return true;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_debug_stats.command_queue_drops++;
+    snprintf(s_debug_stats.last_dropped_command, sizeof(s_debug_stats.last_dropped_command), "%s",
+             market_command_type_to_string(command->type));
+    xSemaphoreGive(s_mutex);
+
+    ESP_LOGW(TAG, "market command queue full, dropping %s",
+             market_command_type_to_string(command->type));
+    return false;
 }
 
 static bool queue_stream_sync(bool clear_backoff)
@@ -1301,6 +1336,22 @@ void market_service_get_snapshot(market_snapshot_t *out)
         snprintf(out->price_text, sizeof(out->price_text), "%s", "--");
         snprintf(out->change_text, sizeof(out->change_text), "%s", "--");
     }
+}
+
+void market_service_get_debug_stats(market_debug_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    memset(out, 0, sizeof(*out));
+    if (s_mutex == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    *out = s_debug_stats;
+    xSemaphoreGive(s_mutex);
 }
 
 bool market_service_has_chart_data(market_pair_id_t pair, market_interval_id_t interval)

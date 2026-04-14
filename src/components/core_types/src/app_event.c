@@ -23,12 +23,14 @@ const char *app_event_type_to_string(app_event_type_t type)
         return "data_weather";
     case APP_EVENT_DATA_SETTINGS:
         return "data_settings";
-    case APP_EVENT_DATA_BITCOIN:
-        return "data_bitcoin";
     case APP_EVENT_PERMISSION_REQUEST:
         return "permission_request";
     case APP_EVENT_PERMISSION_DISMISS:
         return "permission_dismiss";
+    case APP_EVENT_PROMPT_REQUEST:
+        return "prompt_request";
+    case APP_EVENT_PROMPT_DISMISS:
+        return "prompt_dismiss";
     default:
         return "unknown";
     }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an ESP32-S3 dashboard firmware project for the Waveshare ESP32-S3-Touch-LCD-3.49 board. It features a four-page landscape UI (Home, Notify, Trading, Satoshi Slot) built with ESP-IDF 6.0 and LVGL.
+This is an ESP32-S3 dashboard firmware project for the Waveshare ESP32-S3-Touch-LCD-3.49 board. It features a three-page landscape UI (Home, Trading, Settings) built with ESP-IDF 6.0 and LVGL.
 
 The project also includes a Rust-based `esp32dash` host agent that ingests Claude Code hook events and manages the ESP32 over USB serial.
 
@@ -13,11 +13,11 @@ The project also includes a Rust-based `esp32dash` host agent that ingests Claud
 ### Layer Structure
 
 ```
-Apps (app_home, app_notify, app_trading, app_satoshi_slot)
+Apps (app_home, app_trading, app_settings)
   ↑
 UI Core (app_manager, event_bus)
   ↑
-Domain Services (service_time, service_weather, service_claude, service_market, net_manager, power_policy)
+Domain Services (service_time, service_weather, service_claude, service_market, home_service, settings_service, net_manager, power_policy)
   ↑
 BSP Layer (bsp_display, bsp_touch, bsp_rtc)
   ↑
@@ -26,7 +26,7 @@ ESP-IDF / LVGL / FreeRTOS
 
 ### Key Components
 
-- **app_manager** (`src/components/core_app_manager/`): Manages four fixed app slots, handles app lifecycle (init, resume, suspend). Uses a FreeRTOS queue to route events — producers (timer, Wi-Fi, USB) enqueue event types, the LVGL task drains the queue and dispatches to the foreground app.
+- **app_manager** (`src/components/core_app_manager/`): Manages the fixed app roster, handles app lifecycle (init, resume, suspend). Uses a FreeRTOS queue to route events — producers (timer, Wi-Fi, USB) enqueue event types, the LVGL task drains the queue and dispatches to the foreground app.
 - **event_bus** (`src/components/core_event_bus/`): Central event distribution system. Event payloads are NULL; subscribers use event type as a signal and query services for data.
 - **BSP Layer** (`src/components/bsp_board/`): Board support package abstracting display (AXS15231B QSPI LCD), touch (I2C), and RTC (PCF85063). The LVGL task calls a registered UI callback (`bsp_display_set_ui_callback`) each tick to process queued events.
 - **Services**: Background data services for time (NTP+RTC), weather, market data, and Claude Code status. Each service protects its snapshot with a FreeRTOS mutex and exposes a copy-out getter (`void get(X *out)`) — callers receive a stack copy, never a live pointer.
@@ -39,7 +39,9 @@ Apps communicate via events defined in `src/components/core_types/include/core_t
 ```c
 APP_EVENT_ENTER, APP_EVENT_LEAVE, APP_EVENT_TICK_1S,
 APP_EVENT_TOUCH, APP_EVENT_NET_CHANGED, APP_EVENT_POWER_CHANGED,
-APP_EVENT_DATA_CLAUDE, APP_EVENT_DATA_MARKET, APP_EVENT_DATA_WEATHER, APP_EVENT_DATA_BITCOIN
+APP_EVENT_DATA_CLAUDE, APP_EVENT_DATA_MARKET, APP_EVENT_DATA_WEATHER,
+APP_EVENT_DATA_SETTINGS, APP_EVENT_PERMISSION_REQUEST, APP_EVENT_PERMISSION_DISMISS,
+APP_EVENT_PROMPT_REQUEST, APP_EVENT_PROMPT_DISMISS
 ```
 
 Each app implements `app_descriptor_t` with callbacks: `init`, `create_root`, `resume`, `suspend`, `handle_event`.
@@ -113,11 +115,10 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 │   │   ├── net_manager/   # Wi-Fi connection management
 │   │   ├── power_policy/  # Power state machine
 │   │   └── power_runtime/ # Power state execution
-│   └── apps/              # Four app implementations
+│   └── apps/              # App implementations
 │       ├── app_home/
-│       ├── app_notify/
 │       ├── app_trading/
-│       └── app_satoshi_slot/
+│       └── app_settings/
 ├── tools/esp32dash/       # Rust host agent for Claude hooks and serial device control
 ├── docs/                  # Design documents and guides
 │   ├── design/            # Architecture and app designs
@@ -151,7 +152,7 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 - Service layer handles all external data, broadcasts via event bus
 - Power policy controls data collection frequency based on power source and foreground app
 - Display uses partial double buffering (not full screen buffer) due to memory constraints
-- Apps support explicit pause/resume; Satoshi Slot must not run in background
+- Apps support explicit pause/resume; Home also owns the single-overlay approval/prompt UX for Claude interactions
 - Lock order: LVGL lock → service mutex. No service task may call LVGL directly
 
 ## 语言风格

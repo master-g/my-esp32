@@ -17,6 +17,18 @@
 
 另外，仓库里 2026-04-09 的那份审计并没有完全过时，但也不能再原样沿用：其中几条关键问题已经被修掉了，下面会单列。
 
+## 修复进展（2026-04-14）
+
+这份报告原本指出的几条核心问题，已经有了对应修复，不该再被当成“当前仍未处理”来看。
+
+共享状态纪律这一条，`service_time`、`service_weather` 和 `system_state` 已经收口到统一的锁策略上；timezone getter 也改成了 copy-out，`device_link` 的配置导出路径已经跟着切到新接口。
+
+`device_link` 的 Claude overlay 状态现在有了统一 mutex，approval/prompt 的访问都走锁内 copy-out，RPC approval 等待路径也带上了 generation 校验，旧等待任务不会再清掉新请求。串口超长帧也不再静默吞掉；现在会记计数、打 warning，并发出 `protocol.error` 事件，同时把计数暴露到 `device.info`。
+
+队列背压方面，`app_manager` 和 `market_service` 都补了 drop 计数，并把最后一次丢弃的事件或命令暴露到调试面。`debug.market_snapshot` 现在可以直接看见 market command queue 和 UI event queue 的溢出痕迹。
+
+之前报告里的 `slot.export_hit` 已经随着 `Satoshi Slot` 整体下线一起消失。文档漂移也进一步收口：`CLAUDE.md` 已更新到当前 `Home / Trading / Settings` 结构。`event_bus` 的订阅上限则从 8 提到 12，虽然不是动态扩展，但已经不再处在几乎打满的状态。
+
 ## 正面评价
 
 固件主链路已经比较成型。`bootstrap` 把 `event_bus`、`app_manager`、`system_state`、`power_policy/power_runtime`、BSP 和各类 service 串起来，启动顺序基本合理，失败路径也普遍有显式返回，不是靠静默继续往下跑。相关代码在 `src/main/bootstrap.c:102-146`。
@@ -93,14 +105,6 @@ UI 线程边界总体是清楚的。`event_bus` 负责分发事件，`app_manage
 
 如果它目前只是开发设备，这个取舍可以接受；如果后面要长期离开受信环境，或者设备上开始存放更有价值的数据，这一条迟早要补。
 
-#### 6. `slot.export_hit` 直接把 WIF 通过串口协议导出，必须明确写进威胁模型
-
-`slot.export_hit` RPC 在读取到命中记录后，会直接把 `wif`、`label`、`hash160` 和时间戳返回给 host，代码在 `src/components/device_link/src/device_link.c:1309-1336`。
-
-从功能角度看，这显然是为了运营或调试便利；从安全角度看，它等于告诉你：**只要串口协议通了，命中私钥就能被导出，而且这里没有再加一层确认、授权或物理存在校验。**
-
-这不一定要删，但至少要在报告里写明白它的前提：它只适合“USB host 完全可信”的场景。否则，前面做的 NVS encryption 就只保护了静态存储，没保护运行时导出面。
-
 ### 低风险
 
 #### 7. 文档已经和真实 app 结构脱节
@@ -116,6 +120,12 @@ UI 线程边界总体是清楚的。`event_bus` 负责分发事件，`app_manage
 当前实际订阅点已经有 7 个：`bootstrap/app_manager`、`time_service`、`weather_service`、`settings_service`、`power_runtime`、`market_service`、`bitcoin_service`，对应 `src/main/bootstrap.c:112`，`src/components/service_time/src/service_time.c:282`，`src/components/service_weather/src/service_weather.c:261`，`src/components/service_settings/src/service_settings.c:209`，`src/components/power_runtime/src/power_runtime.c:152`，`src/components/service_market/src/service_market.c:1139`，`src/components/service_bitcoin/src/service_bitcoin.c:664`。
 
 它现在还没出问题，但扩展余量已经非常薄。再加一个订阅者，就要开始考虑“为什么初始化会失败”这类很不值当的问题。
+
+## 安全 rollout 备注
+
+并发和协议这批问题已经可以在代码里直接修，但 secure boot / flash encryption 不是同一类工作。它会改写 flashing、恢复、量产 key 管理和现场救砖流程，所以更适合作为单独决策项，而不是顺手塞进这轮修复里。
+
+当前结论可以直接写死：**NVS encryption 已启用，但 secure boot 和 flash encryption 仍未启用。** 如果设备继续只跑在受信开发环境，这个边界是清楚且可接受的；如果要走向长期部署，就需要单独定义 provisioning 和 recovery 流程，再决定是否开启这两项硬化。
 
 ## 和 2026-04-09 报告相比，已经修掉的项
 

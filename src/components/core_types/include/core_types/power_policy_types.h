@@ -39,8 +39,6 @@ typedef struct {
     refresh_mode_t claude_mode;
     refresh_mode_t market_mode;
     bool weather_refresh_allowed;
-    bool slot_compute_allowed;
-    bool slot_compute_throttled;
     bool should_enter_sleep;
 } power_policy_output_t;
 

@@ -35,6 +35,29 @@ typedef enum {
     WEATHER_CMD_REFRESH = 1,
 } weather_service_cmd_t;
 
+static void weather_service_copy_runtime_state(weather_location_config_t *location,
+                                               int64_t *last_request_us, int64_t *last_success_us,
+                                               bool *refresh_in_progress, weather_state_t *state)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (location != NULL) {
+        *location = s_location_config;
+    }
+    if (last_request_us != NULL) {
+        *last_request_us = s_last_request_us;
+    }
+    if (last_success_us != NULL) {
+        *last_success_us = s_last_success_us;
+    }
+    if (refresh_in_progress != NULL) {
+        *refresh_in_progress = s_refresh_in_progress;
+    }
+    if (state != NULL) {
+        *state = s_snapshot.state;
+    }
+    xSemaphoreGive(s_mutex);
+}
+
 static esp_err_t load_location_config_from_nvs(void)
 {
     nvs_handle_t handle = 0;
@@ -111,7 +134,8 @@ static void weather_service_mark_stale_if_needed(void)
     xSemaphoreGive(s_mutex);
 }
 
-static void weather_service_update_success(const weather_client_result_t *result)
+static void weather_service_update_success(const weather_location_config_t *location,
+                                           const weather_client_result_t *result)
 {
     memset(s_snapshot.text, 0, sizeof(s_snapshot.text));
     s_snapshot.state = WEATHER_LIVE;
@@ -119,7 +143,8 @@ static void weather_service_update_success(const weather_client_result_t *result
     s_snapshot.last_error_epoch_s = 0;
     s_snapshot.temperature_c_tenths = result->temperature_c_tenths;
     s_snapshot.icon_id = weather_mapper_icon_for_code(result->weather_code, result->is_day);
-    snprintf(s_snapshot.city, sizeof(s_snapshot.city), "%s", s_location_config.city_label);
+    snprintf(s_snapshot.city, sizeof(s_snapshot.city), "%s",
+             (location != NULL) ? location->city_label : "");
     snprintf(s_snapshot.text, sizeof(s_snapshot.text), "%s",
              weather_mapper_text_for_code(result->weather_code, result->is_day));
     s_last_success_us = esp_timer_get_time();
@@ -135,42 +160,53 @@ static bool weather_service_should_auto_refresh(void)
 {
     power_policy_output_t policy;
     const int64_t now_us = esp_timer_get_time();
+    int64_t last_request_us = 0;
+    int64_t last_success_us = 0;
+    bool refresh_in_progress = false;
 
     power_policy_get_output(&policy);
-    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || s_refresh_in_progress) {
+    weather_service_copy_runtime_state(NULL, &last_request_us, &last_success_us,
+                                       &refresh_in_progress, NULL);
+    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || refresh_in_progress) {
         return false;
     }
 
-    if (s_last_success_us == 0) {
-        if (s_last_request_us == 0) {
+    if (last_success_us == 0) {
+        if (last_request_us == 0) {
             return true;
         }
 
-        return (now_us - s_last_request_us) >= WEATHER_MANUAL_REFRESH_GUARD_US;
+        return (now_us - last_request_us) >= WEATHER_MANUAL_REFRESH_GUARD_US;
     }
 
-    return (now_us - s_last_success_us) >= WEATHER_REFRESH_INTERVAL_US;
+    return (now_us - last_success_us) >= WEATHER_REFRESH_INTERVAL_US;
 }
 
 static bool weather_service_should_refresh_on_reconnect(void)
 {
     power_policy_output_t policy;
     const int64_t now_us = esp_timer_get_time();
+    int64_t last_request_us = 0;
+    int64_t last_success_us = 0;
+    bool refresh_in_progress = false;
+    weather_state_t state = WEATHER_EMPTY;
 
     power_policy_get_output(&policy);
-    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || s_refresh_in_progress) {
+    weather_service_copy_runtime_state(NULL, &last_request_us, &last_success_us,
+                                       &refresh_in_progress, &state);
+    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || refresh_in_progress) {
         return false;
     }
 
-    if (s_last_success_us == 0) {
-        if (s_last_request_us == 0) {
+    if (last_success_us == 0) {
+        if (last_request_us == 0) {
             return true;
         }
 
-        return (now_us - s_last_request_us) >= WEATHER_MANUAL_REFRESH_GUARD_US;
+        return (now_us - last_request_us) >= WEATHER_MANUAL_REFRESH_GUARD_US;
     }
 
-    if (s_snapshot.state == WEATHER_STALE || s_snapshot.state == WEATHER_ERROR) {
+    if (state == WEATHER_STALE || state == WEATHER_ERROR) {
         return true;
     }
 
@@ -187,37 +223,54 @@ static void weather_service_task(void *arg)
             continue;
         }
 
-        if (cmd != WEATHER_CMD_REFRESH || !net_manager_is_connected() || s_refresh_in_progress) {
+        if (cmd != WEATHER_CMD_REFRESH || !net_manager_is_connected()) {
             continue;
         }
-
-        s_refresh_in_progress = true;
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        s_snapshot.state = (s_last_success_us > 0) ? WEATHER_REFRESHING : s_snapshot.state;
-        xSemaphoreGive(s_mutex);
-        publish_weather_event();
-
         {
-            weather_client_result_t result = {0};
-            if (weather_client_fetch_current(&s_location_config, &result) == ESP_OK) {
-                xSemaphoreTake(s_mutex, portMAX_DELAY);
-                weather_service_update_success(&result);
-                xSemaphoreGive(s_mutex);
-                ESP_LOGI(TAG, "Weather refresh ok: city=%s text=%s temp=%d.%dC", s_snapshot.city,
-                         s_snapshot.text, s_snapshot.temperature_c_tenths / 10,
-                         s_snapshot.temperature_c_tenths >= 0
-                             ? s_snapshot.temperature_c_tenths % 10
-                             : -(s_snapshot.temperature_c_tenths % 10));
-            } else {
-                xSemaphoreTake(s_mutex, portMAX_DELAY);
-                weather_service_update_failure();
-                xSemaphoreGive(s_mutex);
-                ESP_LOGW(TAG, "Weather refresh failed");
-            }
-        }
+            bool refresh_in_progress = false;
+            weather_location_config_t location = {0};
 
-        s_refresh_in_progress = false;
-        publish_weather_event();
+            xSemaphoreTake(s_mutex, portMAX_DELAY);
+            refresh_in_progress = s_refresh_in_progress;
+            if (!refresh_in_progress) {
+                s_refresh_in_progress = true;
+                if (s_last_success_us > 0) {
+                    s_snapshot.state = WEATHER_REFRESHING;
+                }
+                location = s_location_config;
+            }
+            xSemaphoreGive(s_mutex);
+            if (refresh_in_progress) {
+                continue;
+            }
+            publish_weather_event();
+
+            {
+                weather_client_result_t result = {0};
+                if (weather_client_fetch_current(&location, &result) == ESP_OK) {
+                    char snapshot_text[sizeof(s_snapshot.text)] = {0};
+                    int16_t temperature_c_tenths = 0;
+
+                    xSemaphoreTake(s_mutex, portMAX_DELAY);
+                    weather_service_update_success(&location, &result);
+                    snprintf(snapshot_text, sizeof(snapshot_text), "%s", s_snapshot.text);
+                    temperature_c_tenths = s_snapshot.temperature_c_tenths;
+                    s_refresh_in_progress = false;
+                    xSemaphoreGive(s_mutex);
+                    ESP_LOGI(TAG, "Weather refresh ok: city=%s text=%s temp=%d.%dC",
+                             location.city_label, snapshot_text, temperature_c_tenths / 10,
+                             temperature_c_tenths >= 0 ? temperature_c_tenths % 10
+                                                       : -(temperature_c_tenths % 10));
+                } else {
+                    xSemaphoreTake(s_mutex, portMAX_DELAY);
+                    weather_service_update_failure();
+                    s_refresh_in_progress = false;
+                    xSemaphoreGive(s_mutex);
+                    ESP_LOGW(TAG, "Weather refresh failed");
+                }
+            }
+            publish_weather_event();
+        }
     }
 }
 
@@ -262,7 +315,7 @@ esp_err_t weather_service_init(void)
                         "weather subscribe failed");
     {
         BaseType_t ret = xTaskCreatePinnedToCore(weather_service_task, "weather_service",
-                                                  WEATHER_TASK_STACK_SIZE, NULL, 4, NULL, 1);
+                                                 WEATHER_TASK_STACK_SIZE, NULL, 4, NULL, 1);
         ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "weather task create failed");
     }
     return ESP_OK;
@@ -271,13 +324,21 @@ esp_err_t weather_service_init(void)
 void weather_service_request_refresh(void)
 {
     weather_service_cmd_t cmd = WEATHER_CMD_REFRESH;
+    power_policy_output_t policy;
+    const int64_t now_us = esp_timer_get_time();
 
-    if (!weather_service_can_refresh()) {
+    power_policy_get_output(&policy);
+    if (!net_manager_is_connected() || !policy.weather_refresh_allowed) {
         return;
     }
 
-    s_last_request_us = esp_timer_get_time();
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_refresh_in_progress || (s_last_request_us != 0 &&
+                                  (now_us - s_last_request_us) < WEATHER_MANUAL_REFRESH_GUARD_US)) {
+        xSemaphoreGive(s_mutex);
+        return;
+    }
+    s_last_request_us = now_us;
     s_snapshot.state = WEATHER_REFRESHING;
     xSemaphoreGive(s_mutex);
     publish_weather_event();
@@ -287,18 +348,20 @@ void weather_service_request_refresh(void)
 bool weather_service_can_refresh(void)
 {
     power_policy_output_t policy;
+    int64_t last_request_us = 0;
+    bool refresh_in_progress = false;
 
     power_policy_get_output(&policy);
-    if (!net_manager_is_connected() || s_refresh_in_progress ||
-        !policy.weather_refresh_allowed) {
+    weather_service_copy_runtime_state(NULL, &last_request_us, NULL, &refresh_in_progress, NULL);
+    if (!net_manager_is_connected() || refresh_in_progress || !policy.weather_refresh_allowed) {
         return false;
     }
 
-    if (s_last_request_us == 0) {
+    if (last_request_us == 0) {
         return true;
     }
 
-    return (esp_timer_get_time() - s_last_request_us) >= WEATHER_MANUAL_REFRESH_GUARD_US;
+    return (esp_timer_get_time() - last_request_us) >= WEATHER_MANUAL_REFRESH_GUARD_US;
 }
 
 void weather_service_get_location_config(weather_location_config_t *config)
@@ -307,7 +370,7 @@ void weather_service_get_location_config(weather_location_config_t *config)
         return;
     }
 
-    memcpy(config, &s_location_config, sizeof(*config));
+    weather_service_copy_runtime_state(config, NULL, NULL, NULL, NULL);
 }
 
 esp_err_t weather_service_apply_location_config(const weather_location_config_t *config)
@@ -320,15 +383,15 @@ esp_err_t weather_service_apply_location_config(const weather_location_config_t 
         return ESP_ERR_INVALID_ARG;
     }
 
-    memcpy(&s_location_config, config, sizeof(s_location_config));
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    memcpy(&s_location_config, config, sizeof(s_location_config));
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     s_snapshot.state = WEATHER_EMPTY;
     snprintf(s_snapshot.city, sizeof(s_snapshot.city), "%s", s_location_config.city_label);
-    xSemaphoreGive(s_mutex);
     s_last_request_us = 0;
     s_last_success_us = 0;
     s_refresh_in_progress = false;
+    xSemaphoreGive(s_mutex);
     publish_weather_event();
 
     if (net_manager_is_connected()) {

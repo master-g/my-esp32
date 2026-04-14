@@ -61,15 +61,7 @@ static power_policy_output_t compute_output(const power_policy_input_t *input)
                                  : REFRESH_MODE_PAUSED;
     }
 
-    output.slot_compute_allowed = (input->display_state == DISPLAY_STATE_ACTIVE) &&
-                                  (input->foreground_app == APP_ID_SATOSHI_SLOT) &&
-                                  !input->thermal_throttled && !input->voltage_guard_triggered;
-    output.slot_compute_throttled =
-        output.slot_compute_allowed && (input->power_source == POWER_SOURCE_BATTERY);
-
     if (input->thermal_throttled || input->voltage_guard_triggered) {
-        output.slot_compute_allowed = false;
-        output.slot_compute_throttled = false;
         if (output.market_mode == REFRESH_MODE_REALTIME) {
             output.market_mode = REFRESH_MODE_INTERACTIVE_POLL;
         }

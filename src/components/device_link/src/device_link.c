@@ -1,6 +1,7 @@
 #include "device_link.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,6 @@
 #include "service_market.h"
 #include "service_time.h"
 #include "service_weather.h"
-#include "service_bitcoin.h"
 
 #include "mbedtls/platform_util.h"
 #include "mbedtls/base64.h"
@@ -57,12 +57,22 @@ static uint32_t s_screenshot_seq;
 
 /* Approval state — shared between reader task and LVGL task */
 static SemaphoreHandle_t s_approval_sem;
+static SemaphoreHandle_t s_state_mutex;
 static approval_request_t s_approval_req;
 static approval_decision_t s_approval_decision;
 static bool s_approval_uses_rpc;
 static char s_approval_rpc_id[APPROVAL_RPC_ID_MAX];
+static prompt_request_t s_prompt_req;
+static uint32_t s_approval_generation;
+static uint32_t s_protocol_overflow_count;
+static uint32_t s_last_protocol_overflow_bytes;
 
 static void reset_approval_state(void);
+static void reset_prompt_state(void);
+static void reset_approval_state_locked(void);
+static void reset_prompt_state_locked(void);
+static void clear_approval_state_for_generation(uint32_t generation);
+static void note_protocol_overflow(size_t dropped_bytes);
 
 typedef struct {
     bool set_timezone_name;
@@ -90,11 +100,13 @@ static const char *capabilities[] = {
     "claude.approval.request",
     "claude.approval.dismiss",
     "claude.approval.resolved",
+    "claude.prompt.request",
+    "claude.prompt.dismiss",
+    "protocol.error",
     "home.screensaver",
     "app.switch",
     "screen.capture.start",
     "debug.market_snapshot",
-    "slot.export_hit",
 };
 
 static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
@@ -377,17 +389,17 @@ static void publish_ui_event(app_event_type_t type)
     event_bus_publish(&evt);
 }
 
-static esp_err_t focus_home_for_approval(void)
+static esp_err_t focus_home_for_claude_overlay(void)
 {
     return app_manager_request_switch_to(APP_ID_HOME, UI_CONTROL_TIMEOUT_MS);
 }
 
-static void send_approval_rpc_response(approval_decision_t decision)
+static void send_approval_rpc_response(const char *rpc_id, approval_decision_t decision)
 {
     const char *decision_str = "deny";
     cJSON *result = NULL;
 
-    if (s_approval_rpc_id[0] == '\0') {
+    if (rpc_id == NULL || rpc_id[0] == '\0') {
         return;
     }
 
@@ -403,29 +415,40 @@ static void send_approval_rpc_response(approval_decision_t decision)
     }
 
     cJSON_AddStringToObject(result, "decision", decision_str);
-    send_response_ok(s_approval_rpc_id, result);
+    send_response_ok(rpc_id, result);
 }
 
 static void approval_rpc_wait_task(void *arg)
 {
+    const uint32_t generation = (uint32_t)(uintptr_t)arg;
     const BaseType_t got_decision =
         xSemaphoreTake(s_approval_sem, pdMS_TO_TICKS(APPROVAL_TIMEOUT_MS));
     approval_decision_t decision = APPROVAL_DECISION_DENY;
+    char rpc_id[APPROVAL_RPC_ID_MAX] = {0};
+    bool should_reply = false;
 
-    (void)arg;
-
-    if (got_decision == pdTRUE) {
-        decision = s_approval_decision;
-    } else {
+    if (got_decision != pdTRUE) {
         ESP_LOGW(TAG, "claude.approve: timed out waiting for user");
     }
 
-    send_approval_rpc_response(decision);
-    reset_approval_state();
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_approval_req.pending && s_approval_uses_rpc && s_approval_generation == generation) {
+        if (got_decision == pdTRUE) {
+            decision = s_approval_decision;
+        }
+        strlcpy(rpc_id, s_approval_rpc_id, sizeof(rpc_id));
+        reset_approval_state_locked();
+        should_reply = rpc_id[0] != '\0';
+    }
+    (void)xSemaphoreGive(s_state_mutex);
+
+    if (should_reply) {
+        send_approval_rpc_response(rpc_id, decision);
+    }
     vTaskDelete(NULL);
 }
 
-static void reset_approval_state(void)
+static void reset_approval_state_locked(void)
 {
     memset(&s_approval_req, 0, sizeof(s_approval_req));
     s_approval_decision = APPROVAL_DECISION_DENY;
@@ -433,13 +456,48 @@ static void reset_approval_state(void)
     s_approval_rpc_id[0] = '\0';
 }
 
+static void reset_approval_state(void)
+{
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    reset_approval_state_locked();
+    (void)xSemaphoreGive(s_state_mutex);
+}
+
+static void reset_prompt_state_locked(void) { memset(&s_prompt_req, 0, sizeof(s_prompt_req)); }
+
+static void reset_prompt_state(void)
+{
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    reset_prompt_state_locked();
+    (void)xSemaphoreGive(s_state_mutex);
+}
+
+static void clear_approval_state_for_generation(uint32_t generation)
+{
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_approval_req.pending && s_approval_generation == generation) {
+        reset_approval_state_locked();
+    }
+    (void)xSemaphoreGive(s_state_mutex);
+}
+
 static esp_err_t set_pending_approval(const cJSON *req_id, const cJSON *tool, const cJSON *desc,
-                                      bool via_rpc)
+                                      bool via_rpc, uint32_t *generation_out)
 {
     ESP_RETURN_ON_FALSE(cJSON_IsString(req_id) && req_id->valuestring != NULL, ESP_ERR_INVALID_ARG,
                         TAG, "approval request missing id");
 
-    reset_approval_state();
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_approval_req.pending) {
+        (void)xSemaphoreGive(s_state_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_prompt_req.pending) {
+        reset_prompt_state_locked();
+    }
+
+    reset_approval_state_locked();
     if (s_approval_sem != NULL) {
         (void)xSemaphoreTake(s_approval_sem, 0);
     }
@@ -452,7 +510,63 @@ static esp_err_t set_pending_approval(const cJSON *req_id, const cJSON *tool, co
     }
     s_approval_req.pending = true;
     s_approval_uses_rpc = via_rpc;
+    s_approval_generation++;
+    if (generation_out != NULL) {
+        *generation_out = s_approval_generation;
+    }
+    (void)xSemaphoreGive(s_state_mutex);
     return ESP_OK;
+}
+
+static esp_err_t set_pending_prompt(const cJSON *req_id, const cJSON *title, const cJSON *question,
+                                    const cJSON *options_text)
+{
+    ESP_RETURN_ON_FALSE(cJSON_IsString(req_id) && req_id->valuestring != NULL, ESP_ERR_INVALID_ARG,
+                        TAG, "prompt request missing id");
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_approval_req.pending) {
+        (void)xSemaphoreGive(s_state_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    reset_prompt_state_locked();
+    strlcpy(s_prompt_req.id, req_id->valuestring, sizeof(s_prompt_req.id));
+    if (cJSON_IsString(title)) {
+        strlcpy(s_prompt_req.title, title->valuestring, sizeof(s_prompt_req.title));
+    }
+    if (cJSON_IsString(question)) {
+        strlcpy(s_prompt_req.question, question->valuestring, sizeof(s_prompt_req.question));
+    }
+    if (cJSON_IsString(options_text)) {
+        strlcpy(s_prompt_req.options_text, options_text->valuestring,
+                sizeof(s_prompt_req.options_text));
+    }
+    s_prompt_req.pending = true;
+    (void)xSemaphoreGive(s_state_mutex);
+    return ESP_OK;
+}
+
+static void note_protocol_overflow(size_t dropped_bytes)
+{
+    cJSON *payload = NULL;
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    s_protocol_overflow_count++;
+    s_last_protocol_overflow_bytes = (uint32_t)dropped_bytes;
+    (void)xSemaphoreGive(s_state_mutex);
+
+    ESP_LOGW(TAG, "dropped oversized protocol line (%u bytes)", (unsigned)dropped_bytes);
+
+    payload = cJSON_CreateObject();
+    if (payload == NULL) {
+        return;
+    }
+
+    cJSON_AddStringToObject(payload, "code", "line_too_long");
+    cJSON_AddNumberToObject(payload, "line_bytes", (double)dropped_bytes);
+    cJSON_AddNumberToObject(payload, "line_limit", DEVICE_LINK_LINE_MAX);
+    send_event_frame("protocol.error", payload);
 }
 
 static void send_hello(void)
@@ -542,6 +656,8 @@ static esp_err_t write_namespace_strings(const char *namespace_name, const char 
 static cJSON *build_config_export(void)
 {
     weather_location_config_t weather = {0};
+    char timezone_name[TIME_SERVICE_TIMEZONE_NAME_MAX] = {0};
+    char timezone_tz[TIME_SERVICE_TIMEZONE_TZ_MAX] = {0};
     cJSON *result = cJSON_CreateObject();
     cJSON *items = cJSON_CreateArray();
     cJSON *item = NULL;
@@ -553,31 +669,33 @@ static cJSON *build_config_export(void)
     }
 
     weather_service_get_location_config(&weather);
+    time_service_get_timezone_name(timezone_name, sizeof(timezone_name));
+    time_service_get_timezone_tz(timezone_tz, sizeof(timezone_tz));
 
     item = cJSON_CreateObject();
     cJSON_AddStringToObject(item, "group", "time");
     cJSON_AddStringToObject(item, "label", "Timezone");
     cJSON_AddStringToObject(item, "key", "time.timezone_name");
-    if (time_service_get_timezone_name()[0] != '\0') {
-        cJSON_AddStringToObject(item, "value", time_service_get_timezone_name());
+    if (timezone_name[0] != '\0') {
+        cJSON_AddStringToObject(item, "value", timezone_name);
     } else {
         cJSON_AddNullToObject(item, "value");
     }
     cJSON_AddStringToObject(item, "value_type", "string");
     cJSON_AddBoolToObject(item, "mutable", true);
     cJSON_AddBoolToObject(item, "secret", false);
-    cJSON_AddBoolToObject(item, "has_value", time_service_get_timezone_name()[0] != '\0');
+    cJSON_AddBoolToObject(item, "has_value", timezone_name[0] != '\0');
     cJSON_AddItemToArray(items, item);
 
     item = cJSON_CreateObject();
     cJSON_AddStringToObject(item, "group", "time");
     cJSON_AddStringToObject(item, "label", "POSIX TZ");
     cJSON_AddStringToObject(item, "key", "time.timezone_tz");
-    cJSON_AddStringToObject(item, "value", time_service_get_timezone_tz());
+    cJSON_AddStringToObject(item, "value", timezone_tz);
     cJSON_AddStringToObject(item, "value_type", "string");
     cJSON_AddBoolToObject(item, "mutable", false);
     cJSON_AddBoolToObject(item, "secret", false);
-    cJSON_AddBoolToObject(item, "has_value", time_service_get_timezone_tz()[0] != '\0');
+    cJSON_AddBoolToObject(item, "has_value", timezone_tz[0] != '\0');
     cJSON_AddItemToArray(items, item);
 
     item = cJSON_CreateObject();
@@ -634,9 +752,8 @@ static esp_err_t apply_pending_config(const pending_config_t *pending, cJSON **r
     }
 
     weather_service_get_location_config(&current_weather);
-    snprintf(final_timezone_name, sizeof(final_timezone_name), "%s",
-             time_service_get_timezone_name());
-    snprintf(final_timezone_tz, sizeof(final_timezone_tz), "%s", time_service_get_timezone_tz());
+    time_service_get_timezone_name(final_timezone_name, sizeof(final_timezone_name));
+    time_service_get_timezone_tz(final_timezone_tz, sizeof(final_timezone_tz));
 
     if (pending->set_timezone_name) {
         snprintf(final_timezone_name, sizeof(final_timezone_name), "%s", pending->timezone_name);
@@ -840,6 +957,8 @@ static cJSON *build_device_info(void)
     net_snapshot_t net;
     const esp_app_desc_t *app = esp_app_get_description();
     cJSON *result = NULL;
+    uint32_t protocol_overflow_count = 0;
+    uint32_t last_protocol_overflow_bytes = 0;
 
     net_manager_get_snapshot(&net);
     result = cJSON_CreateObject();
@@ -859,6 +978,15 @@ static cJSON *build_device_info(void)
     cJSON_AddStringToObject(result, "ssid", net.ssid);
     cJSON_AddStringToObject(result, "ip_addr", net.ip_addr);
     cJSON_AddBoolToObject(result, "has_credentials", net.has_credentials);
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    protocol_overflow_count = s_protocol_overflow_count;
+    last_protocol_overflow_bytes = s_last_protocol_overflow_bytes;
+    (void)xSemaphoreGive(s_state_mutex);
+
+    cJSON_AddNumberToObject(result, "protocol_overflow_count", (double)protocol_overflow_count);
+    cJSON_AddNumberToObject(result, "last_protocol_overflow_bytes",
+                            (double)last_protocol_overflow_bytes);
     return result;
 }
 
@@ -908,10 +1036,6 @@ static bool parse_app_id_value(const char *value, app_id_t *out)
         *out = APP_ID_TRADING;
         return true;
     }
-    if (strcmp(value, "slot") == 0 || strcmp(value, "satoshi_slot") == 0) {
-        *out = APP_ID_SATOSHI_SLOT;
-        return true;
-    }
     if (strcmp(value, "settings") == 0) {
         *out = APP_ID_SETTINGS;
         return true;
@@ -923,6 +1047,8 @@ static bool parse_app_id_value(const char *value, app_id_t *out)
 static cJSON *build_market_snapshot_debug(void)
 {
     market_snapshot_t market = {0};
+    market_debug_stats_t market_debug = {0};
+    app_manager_debug_stats_t app_debug = {0};
     power_policy_input_t policy_input = {0};
     power_policy_output_t policy_output = {0};
     cJSON *result = cJSON_CreateObject();
@@ -932,6 +1058,8 @@ static cJSON *build_market_snapshot_debug(void)
     }
 
     market_service_get_snapshot(&market);
+    market_service_get_debug_stats(&market_debug);
+    app_manager_get_debug_stats(&app_debug);
     power_policy_get_input(&policy_input);
     power_policy_get_output(&policy_output);
 
@@ -955,6 +1083,12 @@ static cJSON *build_market_snapshot_debug(void)
                                                                                  : "sleep");
     cJSON_AddStringToObject(result, "market_mode",
                             refresh_mode_to_string(policy_output.market_mode));
+    cJSON_AddNumberToObject(result, "market_command_queue_drops",
+                            (double)market_debug.command_queue_drops);
+    cJSON_AddStringToObject(result, "market_last_dropped_command",
+                            market_debug.last_dropped_command);
+    cJSON_AddNumberToObject(result, "ui_event_queue_drops", (double)app_debug.ui_event_queue_drops);
+    cJSON_AddStringToObject(result, "ui_last_dropped_event", app_debug.last_dropped_event);
     return result;
 }
 
@@ -1017,15 +1151,16 @@ static void handle_event_frame(const cJSON *root)
         const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
         esp_err_t err;
 
-        if (s_approval_req.pending) {
+        err = set_pending_approval(req_id, tool, desc, false, NULL);
+        if (err == ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "approval request ignored because another approval is pending");
             return;
         }
-        if (set_pending_approval(req_id, tool, desc, false) != ESP_OK) {
+        if (err != ESP_OK) {
             ESP_LOGW(TAG, "claude.approval.request: invalid payload");
             return;
         }
-        err = focus_home_for_approval();
+        err = focus_home_for_claude_overlay();
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "claude.approval.request: failed to focus home: %s",
                      esp_err_to_name(err));
@@ -1038,15 +1173,73 @@ static void handle_event_frame(const cJSON *root)
 
     if (strcmp(method->valuestring, "claude.approval.dismiss") == 0) {
         const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
-        if (!s_approval_req.pending || !cJSON_IsString(req_id) || req_id->valuestring == NULL) {
+        bool dismissed = false;
+
+        if (!cJSON_IsString(req_id) || req_id->valuestring == NULL) {
             return;
         }
-        if (strcmp(s_approval_req.id, req_id->valuestring) != 0) {
+
+        (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (s_approval_req.pending && strcmp(s_approval_req.id, req_id->valuestring) == 0) {
+            reset_approval_state_locked();
+            dismissed = true;
+        }
+        (void)xSemaphoreGive(s_state_mutex);
+
+        if (!dismissed) {
             ESP_LOGW(TAG, "approval dismiss ignored for unknown id");
             return;
         }
-        device_link_dismiss_approval();
         publish_ui_event(APP_EVENT_PERMISSION_DISMISS);
+        return;
+    }
+
+    if (strcmp(method->valuestring, "claude.prompt.request") == 0) {
+        const cJSON *title = cJSON_GetObjectItemCaseSensitive(payload, "title");
+        const cJSON *question = cJSON_GetObjectItemCaseSensitive(payload, "question");
+        const cJSON *options_text = cJSON_GetObjectItemCaseSensitive(payload, "options_text");
+        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
+        esp_err_t err;
+
+        err = set_pending_prompt(req_id, title, question, options_text);
+        if (err == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "prompt request ignored because approval is pending");
+            return;
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "claude.prompt.request: invalid payload");
+            return;
+        }
+        err = focus_home_for_claude_overlay();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "claude.prompt.request: failed to focus home: %s", esp_err_to_name(err));
+            device_link_dismiss_prompt();
+            return;
+        }
+        publish_ui_event(APP_EVENT_PROMPT_REQUEST);
+        return;
+    }
+
+    if (strcmp(method->valuestring, "claude.prompt.dismiss") == 0) {
+        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
+        bool dismissed = false;
+
+        if (!cJSON_IsString(req_id) || req_id->valuestring == NULL) {
+            return;
+        }
+
+        (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (s_prompt_req.pending && strcmp(s_prompt_req.id, req_id->valuestring) == 0) {
+            reset_prompt_state_locked();
+            dismissed = true;
+        }
+        (void)xSemaphoreGive(s_state_mutex);
+
+        if (!dismissed) {
+            ESP_LOGW(TAG, "prompt dismiss ignored for unknown id");
+            return;
+        }
+        publish_ui_event(APP_EVENT_PROMPT_DISMISS);
     }
 }
 
@@ -1169,34 +1362,40 @@ static void handle_request_frame(const cJSON *root)
     if (strcmp(method->valuestring, "claude.approve") == 0) {
         esp_err_t err;
         BaseType_t task_ok;
-
-        /* Already have a pending approval — reject new one */
-        if (s_approval_req.pending) {
-            send_response_error(id->valuestring, "busy", "approval already pending");
-            return;
-        }
+        uint32_t generation = 0;
 
         const cJSON *tool = cJSON_GetObjectItemCaseSensitive(params, "tool_name");
         const cJSON *desc = cJSON_GetObjectItemCaseSensitive(params, "description");
         const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(params, "id");
 
-        if (set_pending_approval(req_id, tool, desc, true) != ESP_OK) {
+        err = set_pending_approval(req_id, tool, desc, true, &generation);
+        if (err == ESP_ERR_INVALID_STATE) {
+            send_response_error(id->valuestring, "busy", "approval already pending");
+            return;
+        }
+        if (err != ESP_OK) {
             send_response_error(id->valuestring, "invalid_request", "approval is missing id");
             return;
         }
 
-        err = focus_home_for_approval();
+        err = focus_home_for_claude_overlay();
         if (err != ESP_OK) {
-            reset_approval_state();
+            clear_approval_state_for_generation(generation);
             send_response_error(id->valuestring, "ui_control_failed", esp_err_to_name(err));
             return;
         }
 
-        strlcpy(s_approval_rpc_id, id->valuestring, sizeof(s_approval_rpc_id));
+        (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        if (s_approval_req.pending && s_approval_generation == generation) {
+            strlcpy(s_approval_rpc_id, id->valuestring, sizeof(s_approval_rpc_id));
+        }
+        (void)xSemaphoreGive(s_state_mutex);
+
         task_ok = xTaskCreatePinnedToCore(approval_rpc_wait_task, "approval_wait",
-                                          APPROVAL_WAIT_TASK_STACK, NULL, 4, NULL, 1);
+                                          APPROVAL_WAIT_TASK_STACK, (void *)(uintptr_t)generation,
+                                          4, NULL, 1);
         if (task_ok != pdPASS) {
-            reset_approval_state();
+            clear_approval_state_for_generation(generation);
             send_response_error(id->valuestring, "no_memory", "approval wait task create failed");
             return;
         }
@@ -1227,7 +1426,7 @@ static void handle_request_frame(const cJSON *root)
         if (!cJSON_IsString(app) || app->valuestring == NULL ||
             !parse_app_id_value(app->valuestring, &app_id)) {
             send_response_error(id->valuestring, "invalid_request",
-                                "app must be one of home/trading/slot/settings");
+                                "app must be one of home/trading/settings");
             return;
         }
 
@@ -1306,37 +1505,6 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "slot.export_hit") == 0) {
-        slot_hit_export_t hit = {0};
-        esp_err_t err = bitcoin_service_read_hit_record(&hit);
-
-        if (err != ESP_OK) {
-            send_response_error(id->valuestring, "no_hit_record",
-                                err == ESP_ERR_NVS_NOT_FOUND ? "no hit record found"
-                                                             : esp_err_to_name(err));
-            return;
-        }
-
-        cJSON *result = cJSON_CreateObject();
-        cJSON_AddStringToObject(result, "wif", hit.wif);
-        cJSON_AddStringToObject(result, "label", bitcoin_service_label_for_id(hit.label_id));
-        cJSON_AddBoolToObject(result, "is_self_test", hit.is_self_test);
-        cJSON_AddNumberToObject(result, "created_at", (double)hit.created_at_epoch_s);
-
-        {
-            char hash160_hex[41] = {0};
-            size_t k;
-            for (k = 0; k < sizeof(hit.hash160); k++) {
-                snprintf(hash160_hex + k * 2, 3, "%02x", hit.hash160[k]);
-            }
-            cJSON_AddStringToObject(result, "hash160", hash160_hex);
-        }
-
-        mbedtls_platform_zeroize(&hit, sizeof(hit));
-        send_response_ok(id->valuestring, result);
-        return;
-    }
-
     send_response_error(id->valuestring, "unknown_method", method->valuestring);
 }
 
@@ -1372,6 +1540,8 @@ static void reader_task(void *arg)
     char line[DEVICE_LINK_LINE_MAX];
     uint8_t buffer[128];
     size_t line_len = 0;
+    size_t dropped_bytes = 0;
+    bool discarding_line = false;
 
     (void)arg;
 
@@ -1396,17 +1566,30 @@ static void reader_task(void *arg)
                 continue;
             }
             if (ch == '\n') {
-                line[line_len] = '\0';
-                if (line_len > 0) {
-                    process_protocol_line(line);
+                if (discarding_line) {
+                    note_protocol_overflow(dropped_bytes);
+                    dropped_bytes = 0;
+                    discarding_line = false;
+                } else {
+                    line[line_len] = '\0';
+                    if (line_len > 0) {
+                        process_protocol_line(line);
+                    }
                 }
                 line_len = 0;
+                continue;
+            }
+
+            if (discarding_line) {
+                dropped_bytes++;
                 continue;
             }
 
             if (line_len + 1 < sizeof(line)) {
                 line[line_len++] = ch;
             } else {
+                dropped_bytes = line_len + 1;
+                discarding_line = true;
                 line_len = 0;
             }
         }
@@ -1430,7 +1613,14 @@ esp_err_t device_link_init(void)
     s_approval_sem = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(s_approval_sem != NULL, ESP_ERR_NO_MEM, TAG,
                         "failed to create approval sem");
+    s_state_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_state_mutex != NULL, ESP_ERR_NO_MEM, TAG,
+                        "failed to create device-link state mutex");
     reset_approval_state();
+    reset_prompt_state();
+    s_approval_generation = 0;
+    s_protocol_overflow_count = 0;
+    s_last_protocol_overflow_bytes = 0;
     ESP_RETURN_ON_ERROR(esp_read_mac(mac, ESP_MAC_WIFI_STA), TAG, "failed to read device mac");
     if (!usb_serial_jtag_is_driver_installed()) {
         ESP_RETURN_ON_ERROR(usb_serial_jtag_driver_install(&usb_config), TAG,
@@ -1457,21 +1647,54 @@ esp_err_t device_link_init(void)
 
 bool device_link_get_pending_approval(approval_request_t *out)
 {
-    if (!s_approval_req.pending) {
-        return false;
+    bool pending = false;
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_approval_req.pending) {
+        if (out != NULL) {
+            *out = s_approval_req;
+        }
+        pending = true;
     }
-    if (out) {
-        *out = s_approval_req;
+    (void)xSemaphoreGive(s_state_mutex);
+    return pending;
+}
+
+bool device_link_get_pending_prompt(prompt_request_t *out)
+{
+    bool pending = false;
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_prompt_req.pending) {
+        if (out != NULL) {
+            *out = s_prompt_req;
+        }
+        pending = true;
     }
-    return true;
+    (void)xSemaphoreGive(s_state_mutex);
+    return pending;
 }
 
 void device_link_resolve_approval(approval_decision_t decision)
 {
+    bool uses_rpc = false;
+    char approval_id[sizeof(s_approval_req.id)] = {0};
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     if (!s_approval_req.pending) {
+        (void)xSemaphoreGive(s_state_mutex);
         return;
     }
-    if (!s_approval_uses_rpc) {
+    uses_rpc = s_approval_uses_rpc;
+    if (!uses_rpc) {
+        strlcpy(approval_id, s_approval_req.id, sizeof(approval_id));
+        reset_approval_state_locked();
+    } else {
+        s_approval_decision = decision;
+    }
+    (void)xSemaphoreGive(s_state_mutex);
+
+    if (!uses_rpc) {
         const char *decision_str = "deny";
         cJSON *payload = cJSON_CreateObject();
 
@@ -1482,33 +1705,50 @@ void device_link_resolve_approval(approval_decision_t decision)
         }
 
         if (payload != NULL) {
-            cJSON_AddStringToObject(payload, "id", s_approval_req.id);
+            cJSON_AddStringToObject(payload, "id", approval_id);
             cJSON_AddStringToObject(payload, "decision", decision_str);
             send_event_frame("claude.approval.resolved", payload);
         }
-        device_link_dismiss_approval();
         return;
     }
-    s_approval_decision = decision;
+
     xSemaphoreGive(s_approval_sem);
 }
 
 void device_link_cancel_approval(void)
 {
+    bool signal_waiter = false;
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     if (s_approval_req.pending) {
         if (!s_approval_uses_rpc) {
-            reset_approval_state();
-            return;
+            reset_approval_state_locked();
+        } else {
+            s_approval_decision = APPROVAL_DECISION_DENY;
+            signal_waiter = true;
         }
-        s_approval_decision = APPROVAL_DECISION_DENY;
+    }
+    (void)xSemaphoreGive(s_state_mutex);
+
+    if (signal_waiter) {
         xSemaphoreGive(s_approval_sem);
     }
 }
 
 void device_link_dismiss_approval(void)
 {
-    if (!s_approval_req.pending) {
-        return;
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_approval_req.pending) {
+        reset_approval_state_locked();
     }
-    reset_approval_state();
+    (void)xSemaphoreGive(s_state_mutex);
+}
+
+void device_link_dismiss_prompt(void)
+{
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_prompt_req.pending) {
+        reset_prompt_state_locked();
+    }
+    (void)xSemaphoreGive(s_state_mutex);
 }

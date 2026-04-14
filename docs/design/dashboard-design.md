@@ -15,11 +15,11 @@
 
 ### 2.1 核心目标
 
-基于 Waveshare ESP32-S3-Touch-LCD-3.49 开发一个三页式横屏仪表板，其中包含两个核心页和一个 BTC 应用页：
+基于 Waveshare ESP32-S3-Touch-LCD-3.49 开发一个三页式横屏仪表板，当前三页为：
 
 1. `Home`：时间、日期、联网状态、天气摘要，以及 Claude Code 状态与未读提示
 2. `Trading`：BTC/USDT、ETH/USDT、BTC/ETH 的价格与简化行情
-3. `Satoshi Slot`：随机生成 BTC 私钥并与目标地址指纹集合进行匹配的趣味页
+3. `Settings`：Wi-Fi 配置、时间与天气参数、Crypto Market 偏好
 
 ### 2.2 非目标
 
@@ -97,13 +97,11 @@ P1 不包含：
 - 背景图片
 - IMU 抬手唤醒
 - 复杂动画
-- `Satoshi Slot`
 
 ### 4.3 P2: 增强能力
 
 - 天气正式接入并缓存
 - 交易页接入蜡烛图
-- `Satoshi Slot` 页面
 - 电池模式下的差异化采样和刷新策略
 - IMU 抬手唤醒
 - IMU 自动翻转
@@ -121,8 +119,7 @@ P1 不包含：
 ```text
 ┌──────────────────────────────────────────────┐
 │                  Apps                        │
-│  home_app  notify_app  trading_app           │
-│  satoshi_slot_app                            │
+│  home_app  trading_app  settings_app         │
 ├──────────────────────────────────────────────┤
 │                UI Core                       │
 │  app_manager  page_router  gesture_router    │
@@ -130,7 +127,7 @@ P1 不包含：
 │              Domain Services                 │
 │  time_service    weather_service             │
 │  claude_service  market_service              │
-│  bitcoin_service power_policy                │
+│  settings_service power_policy               │
 │  net_manager                                 │
 ├──────────────────────────────────────────────┤
 │                 BSP Layer                    │
@@ -163,7 +160,7 @@ P1 不包含：
 | `weather_service` | 获取天气摘要、缓存上次成功结果 | 是 |
 | `claude_service` | 获取 Claude 最新状态快照、未读计数、重连 | 是 |
 | `market_service` | 获取交易对价格和 K 线源数据 | 是 |
-| `bitcoin_service` | BTC 私钥生成、地址指纹比对、哈希核心算法、自检向量 | 否 |
+| `settings_service` | Wi-Fi profile、天气参数和其他本地设置的保存与回读 | 是 |
 | `power_policy` | 根据供电、亮屏、前台页决定刷新频率 | 是 |
 | `net_manager` | Wi-Fi 连接、断线重连、网络事件广播 | 否 |
 
@@ -218,21 +215,9 @@ P1 不包含：
 - 当前代码线继续为 market feed 开启 mbedTLS external SPIRAM 分配，避免显示栈长期占用 internal DRAM 时 REST / WSS 的 TLS setup 失效
 - 天气始终属于缓存型数据，不进入高频更新路径
 
-### 6.3 计算密集型页面策略
+### 6.3 当前约束
 
-`Satoshi Slot` 属于本地高计算负载页面，必须受 `power_policy` 统一约束：
-
-| 条件 | Satoshi Slot |
-|------|--------------|
-| USB + 前台 | 连续批量运行 |
-| 电池 + 前台 | 降级为 burst 模式 |
-| `DIM` / `SLEEP` | 停止 |
-| 温度/掉压异常 | 停止并提示 |
-
-关键约束：
-
-- `Satoshi Slot` 必须支持显式开始/暂停，不允许后台偷偷持续扫描
-- 计算过程不能阻塞 UI 主线程
+当前产品线不再保留本地暴力计算页面，`power_policy` 只负责亮度、Claude/Market 刷新级别以及天气刷新许可。
 
 ## 7. Claude Code 桥接协议
 
@@ -325,33 +310,6 @@ P2 再做蜡烛图：
 - 失败后保留上次成功结果并标记“缓存”
 - 若网络不可用，`Home` 页面仍显示时间，不因天气接口失败阻塞首页
 
-### 8.3 BTC 趣味应用策略
-
-#### Satoshi Slot
-
-`Satoshi Slot` 是“随机私钥 + 指纹比对”的趣味页，不是现实可行的密钥恢复方案。
-
-详细子设计见 [satoshi-slot.md](./apps/satoshi-slot.md)。
-
-设计边界：
-
-- 页面随机生成 secp256k1 私钥，派生公钥和地址指纹
-- 设备只和本地预置的“目标地址指纹集合”做比对，不依赖联网
-- 目标集合应抽象成 `hash160` 或等价短指纹，不在 UI 层硬编码一组地址字符串
-- 命中概率在现实中近乎为零，因此页面必须内置 `self-test / forced-hit` 模式，用于验证保存和提醒链路
-
-命中后的动作：
-
-- 立即暂停扫描
-- 亮屏并弹出全屏告警
-- 将命中记录保存到受保护存储
-- 若启用了 `claude_bridge` 或其他通知桥接，可额外发送主机提醒
-
-安全要求：
-
-- 只在启用了安全存储能力时允许落盘保存原始私钥
-- 若安全存储不可用，页面应降级为“仅演示 / 仅自检”模式
-
 ## 9. UI 和交互设计
 
 ### 9.1 页面模型
@@ -360,7 +318,7 @@ P2 再做蜡烛图：
 
 - `Home`
 - `Trading`
-- `Satoshi Slot`
+- `Settings`
 
 页面之间允许全局切换，但页面内部交互不得与全局翻页冲突。
 
@@ -423,27 +381,19 @@ Claude 状态不再单列为独立页面，而是并入 `Home`：
 
 该规则用于消除与全局翻页的冲突。
 
-### 9.6 Satoshi Slot 页面
+### 9.6 Settings 页面
 
 显示内容：
 
-- 当前运行状态：`idle / running / hit / self-test`
-- 已尝试次数
-- 当前批次速度：`keys/s`
-- 最近一次生成的短地址指纹
-- 目标集合标签：`Satoshi candidate set`
+- Wi-Fi profile 列表、扫描结果和连接状态
+- 时间与天气相关参数
+- `Settings > Crypto Market` 中的默认 chart interval 和 price digits 风格
 
 交互规则：
 
-- `Start / Pause`
-- `Self-test`，用于注入一次可验证命中
-- `Reset counter`
-
-行为约束：
-
-- 页面进入时默认不自动开始
-- 只在前台运行
-- 一旦命中或进入自检命中态，必须暂停并等待用户确认
+- 通过层级列表进入各子页面
+- 修改立即持久化，并通过 service 快照回流到前台页面
+- 输入密码等敏感操作使用单独输入层，不把明文长期留在普通列表项里
 
 ## 10. 应用框架设计
 
@@ -462,7 +412,6 @@ typedef enum {
     APP_EVENT_DATA_CLAUDE,
     APP_EVENT_DATA_MARKET,
     APP_EVENT_DATA_WEATHER,
-    APP_EVENT_DATA_BITCOIN,
 } app_event_type_t;
 
 typedef struct {
@@ -512,7 +461,7 @@ project/
 │   └── apps/
 │       ├── app_home/
 │       ├── app_trading/
-│       └── app_satoshi_slot/
+│       └── app_settings/
 │
 ├── tools/
 │   ├── claude_bridge/
@@ -541,8 +490,6 @@ project/
 | 分辨率和触控型号描述不一致 | 高 | 以 Waveshare 示例和实测为准，抽象统一 BSP |
 | Claude hooks 语义不足以直接驱动 UI | 高 | 在桥接层做状态归一化，不让设备依赖原始事件 |
 | 电池模式下实时行情过于耗电 | 中 | 前台低频轮询，后台暂停 |
-| 用户对 “Satoshi 私钥命中” 存在不现实预期 | 高 | 文档和 UI 明确标注为趣味页，提供 self-test 而非承诺实际命中 |
-| 命中后原始私钥保存涉及安全风险 | 高 | 只有安全存储可用时才允许持久化，否则降级为演示模式 |
 | K 线渲染占用内存和 CPU | 中 | P2 再做，先做价格摘要 |
 | 网络不稳定导致页面卡死 | 中 | service 层缓存最近一次成功结果，UI 永远可降级显示 |
 
@@ -561,7 +508,6 @@ project/
 
 - 天气缓存策略生效
 - K 线图切换周期时无明显卡顿
-- `Satoshi Slot` 可以通过 self-test 验证命中保存和提醒链路
 - IMU 抬手唤醒可靠率达到可接受水平
 
 ## 14. 参考资料
@@ -571,7 +517,6 @@ project/
 - Gate API v4: https://www.gate.io/docs/developers/apiv4/en/
 - Binance Spot API: https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams
 - OpenWeatherMap API: https://openweathermap.org/api
-- secp256k1: https://github.com/bitcoin-core/secp256k1
 
 ---
 

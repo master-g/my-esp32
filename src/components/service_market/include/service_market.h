@@ -87,6 +87,13 @@ typedef struct {
     uint8_t source_error_count;
 } market_snapshot_t;
 
+#define MARKET_DEBUG_NAME_MAX 32
+
+typedef struct {
+    uint32_t command_queue_drops;
+    char last_dropped_command[MARKET_DEBUG_NAME_MAX];
+} market_debug_stats_t;
+
 const char *market_pair_label(market_pair_id_t pair);
 const char *market_interval_label(market_interval_id_t interval);
 const char *market_source_label(market_source_t source);
@@ -97,6 +104,7 @@ void market_service_get_preferences(market_preferences_t *out);
 esp_err_t market_service_set_default_interval(market_interval_id_t interval);
 esp_err_t market_service_set_binance_price_colors(bool enabled);
 void market_service_get_snapshot(market_snapshot_t *out);
+void market_service_get_debug_stats(market_debug_stats_t *out);
 bool market_service_has_chart_data(market_pair_id_t pair, market_interval_id_t interval);
 bool market_service_get_candles(market_pair_id_t pair, market_interval_id_t interval,
                                 market_candle_window_t *out);

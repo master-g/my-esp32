@@ -86,11 +86,8 @@ pub fn build_workspace(cwd: &str) -> String {
         .unwrap_or_default()
 }
 
-pub fn build_approval_id(now_epoch: u64, tool_name: &str) -> String {
-    truncate_ascii_token(
-        &format!("approval-{now_epoch:x}-{:08x}", fnv1a_32(tool_name.as_bytes())),
-        APPROVAL_ID_MAX_BYTES,
-    )
+pub fn build_approval_id(now_epoch: u64, sequence: u64) -> String {
+    truncate_ascii_token(&format!("approval-{now_epoch:x}-{sequence:x}"), APPROVAL_ID_MAX_BYTES)
 }
 
 pub fn sanitize_transport_id(input: &str) -> String {
@@ -208,9 +205,14 @@ mod tests {
 
     #[test]
     fn approval_id_is_ascii_and_bounded() {
-        let approval_id = build_approval_id(1_775_742_746, "创建文件");
+        let approval_id = build_approval_id(1_775_742_746, 7);
         assert!(approval_id.is_ascii());
         assert!(approval_id.len() <= 31);
+    }
+
+    #[test]
+    fn approval_id_changes_with_sequence() {
+        assert_ne!(build_approval_id(42, 1), build_approval_id(42, 2));
     }
 
     #[test]

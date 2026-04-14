@@ -60,7 +60,15 @@ void system_state_get_power_policy_input(power_policy_input_t *out)
     xSemaphoreGive(s_mutex);
 }
 
-uint32_t system_state_get_user_activity_seq(void) { return s_user_activity_seq; }
+uint32_t system_state_get_user_activity_seq(void)
+{
+    uint32_t seq = 0;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    seq = s_user_activity_seq;
+    xSemaphoreGive(s_mutex);
+    return seq;
+}
 
 void system_state_set_power_source(power_source_t power_source)
 {
@@ -102,4 +110,9 @@ void system_state_set_user_interacting(bool user_interacting)
     xSemaphoreGive(s_mutex);
 }
 
-void system_state_note_user_activity(void) { s_user_activity_seq++; }
+void system_state_note_user_activity(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_user_activity_seq++;
+    xSemaphoreGive(s_mutex);
+}

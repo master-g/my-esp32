@@ -4,7 +4,8 @@
 
 #include "esp_check.h"
 
-#define EVENT_BUS_MAX_SUBSCRIBERS 8
+/* Keep a little slack above the current subscriber set so new services do not fail at boot. */
+#define EVENT_BUS_MAX_SUBSCRIBERS 12
 
 typedef struct {
     event_bus_handler_t handler;

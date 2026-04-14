@@ -107,7 +107,6 @@ typedef enum {
     APP_EVENT_DATA_CLAUDE,
     APP_EVENT_DATA_MARKET,
     APP_EVENT_DATA_WEATHER,
-    APP_EVENT_DATA_BITCOIN,
 } app_event_type_t;
 ```
 

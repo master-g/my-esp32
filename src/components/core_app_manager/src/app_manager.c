@@ -57,6 +57,8 @@ static QueueHandle_t s_ui_event_queue;
 static QueueHandle_t s_ui_control_queue;
 static uint16_t s_ui_control_request_seq;
 static portMUX_TYPE s_ui_control_request_lock = portMUX_INITIALIZER_UNLOCKED;
+static app_manager_debug_stats_t s_debug_stats;
+static portMUX_TYPE s_debug_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static app_slot_t *find_slot_mut(app_id_t app_id);
 static const app_slot_t *find_slot(app_id_t app_id);
@@ -170,7 +172,6 @@ static app_id_t swipe_target_for_touch(app_id_t current_app, const app_touch_eve
     static const app_id_t app_order[] = {
         APP_ID_HOME,
         APP_ID_TRADING,
-        APP_ID_SATOSHI_SLOT,
     };
     size_t i = 0;
 
@@ -522,6 +523,17 @@ const app_descriptor_t *app_manager_get_descriptor(app_id_t app_id)
     return &slot->descriptor;
 }
 
+void app_manager_get_debug_stats(app_manager_debug_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_debug_stats_lock);
+    *out = s_debug_stats;
+    portEXIT_CRITICAL(&s_debug_stats_lock);
+}
+
 void app_manager_on_event(const app_event_t *event, void *context)
 {
     ui_event_queue_item_t queued_event = {0};
@@ -542,8 +554,14 @@ void app_manager_on_event(const app_event_t *event, void *context)
     }
 
     if (xQueueSend(s_ui_event_queue, &queued_event, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "ui event queue full, dropping %s",
-                 app_event_type_to_string(queued_event.type));
+        const char *event_name = app_event_type_to_string(queued_event.type);
+
+        portENTER_CRITICAL(&s_debug_stats_lock);
+        s_debug_stats.ui_event_queue_drops++;
+        strlcpy(s_debug_stats.last_dropped_event, event_name,
+                sizeof(s_debug_stats.last_dropped_event));
+        portEXIT_CRITICAL(&s_debug_stats_lock);
+        ESP_LOGW(TAG, "ui event queue full, dropping %s", event_name);
     }
 }
 

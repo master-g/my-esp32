@@ -16,7 +16,6 @@ idf_component_register(
         mbedtls
         net_manager
         nvs_flash
-        service_bitcoin
         service_claude
         service_market
         service_time
