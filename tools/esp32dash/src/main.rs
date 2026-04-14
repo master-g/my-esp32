@@ -196,6 +196,7 @@ enum ChibiState {
     Idle,
     Working,
     Waiting,
+    Compacting,
     Sleeping,
 }
 
@@ -211,6 +212,7 @@ impl ChibiState {
             Self::Idle => RunStatus::Unknown,
             Self::Working => RunStatus::Processing,
             Self::Waiting => RunStatus::WaitingForInput,
+            Self::Compacting => RunStatus::Compacting,
             Self::Sleeping => RunStatus::Ended,
         }
     }
@@ -422,6 +424,7 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 (ChibiState::Idle, "Just chilling..."),
                 (ChibiState::Working, "Thinking hard..."),
                 (ChibiState::Working, "Running tests"),
+                (ChibiState::Compacting, "Compacting..."),
                 (ChibiState::Waiting, "Need your input!"),
                 (ChibiState::Sleeping, ""),
             ];

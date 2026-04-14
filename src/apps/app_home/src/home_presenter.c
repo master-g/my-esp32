@@ -83,8 +83,9 @@ static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
     switch (rs) {
     case CLAUDE_RUN_PROCESSING:
     case CLAUDE_RUN_RUNNING_TOOL:
-    case CLAUDE_RUN_COMPACTING:
         return SPRITE_STATE_WORKING;
+    case CLAUDE_RUN_COMPACTING:
+        return SPRITE_STATE_COMPACTING;
     case CLAUDE_RUN_WAITING_FOR_INPUT:
         return SPRITE_STATE_WAITING;
     case CLAUDE_RUN_ENDED:

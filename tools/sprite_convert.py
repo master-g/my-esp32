@@ -22,6 +22,7 @@ SPRITES = [
     ("idle", "idle_neutral", 6),
     ("working", "working_neutral", 6),
     ("waiting", "waiting_neutral", 6),
+    ("compacting", "compacting_neutral", 5),
     ("sleeping", "sleeping_neutral", 6),
 ]
 
@@ -31,10 +32,14 @@ def convert_sheet(state_name: str, asset_name: str, num_frames: int) -> str:
     png_path = os.path.join(ASSETS_DIR, f"{asset_name}.imageset", "sprite_sheet.png")
     img = Image.open(png_path).convert("RGBA")
 
+    if img.height != FRAME_H or img.width % FRAME_W != 0:
+        raise ValueError(
+            f"{asset_name} must be {FRAME_H}px tall and a multiple of {FRAME_W}px wide"
+        )
+
     actual_frames = img.width // FRAME_W
-    if actual_frames < num_frames:
-        print(f"Warning: {asset_name} has {actual_frames} frames, expected {num_frames}")
-        num_frames = actual_frames
+    if actual_frames != num_frames:
+        raise ValueError(f"{asset_name} has {actual_frames} frames, expected {num_frames}")
 
     lines = [
         f'/* Auto-generated from {asset_name} — do not edit */',
@@ -51,15 +56,9 @@ def convert_sheet(state_name: str, asset_name: str, num_frames: int) -> str:
         pixels = list(frame.getdata())  # [(R,G,B,A), ...]
 
         lines.append(f"    /* frame {fi} */")
-        row_hex = []
         for r, g, b, a in pixels:
-            # LVGL ARGB8888 little-endian byte order: B, G, R, A
-            row_hex.extend([f"0x{b:02x}", f"0x{g:02x}", f"0x{r:02x}", f"0x{a:02x}"])
-            if len(row_hex) >= 32:  # 8 pixels per line
-                lines.append("    " + ",".join(row_hex) + ",")
-                row_hex = []
-        if row_hex:
-            lines.append("    " + ",".join(row_hex) + ",")
+            for byte in (b, g, r, a):
+                lines.append(f"    0x{byte:02x},")
 
     lines.append("};")
     lines.append("")
@@ -95,14 +94,17 @@ def generate_header() -> str:
         "",
         f"#define SPRITE_FRAME_W {FRAME_W}",
         f"#define SPRITE_FRAME_H {FRAME_H}",
-        f"#define SPRITE_FRAMES_PER_STATE 6",
         "",
     ]
+
+    for state_name, _, num_frames in SPRITES:
+        lines.append(f"#define SPRITE_{state_name.upper()}_FRAME_COUNT {num_frames}")
+    lines.append("")
 
     for state_name, _, _ in SPRITES:
         lines.append(
             f"extern const lv_image_dsc_t sprite_{state_name}_frames"
-            f"[SPRITE_FRAMES_PER_STATE];"
+            f"[SPRITE_{state_name.upper()}_FRAME_COUNT];"
         )
 
     lines.extend(["", "#endif /* SPRITE_FRAMES_H */", ""])

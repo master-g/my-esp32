@@ -14,6 +14,7 @@ idf_component_register(
         "src/generated/sprite_idle.c"
         "src/generated/sprite_working.c"
         "src/generated/sprite_waiting.c"
+        "src/generated/sprite_compacting.c"
         "src/generated/sprite_sleeping.c"
     INCLUDE_DIRS
         "include"

@@ -15,10 +15,11 @@ struct sprite_anim_def_t {
 };
 
 static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT] = {
-    [SPRITE_STATE_IDLE] = {sprite_idle_frames, SPRITE_FRAMES_PER_STATE, 333},
-    [SPRITE_STATE_WORKING] = {sprite_working_frames, SPRITE_FRAMES_PER_STATE, 250},
-    [SPRITE_STATE_WAITING] = {sprite_waiting_frames, SPRITE_FRAMES_PER_STATE, 333},
-    [SPRITE_STATE_SLEEPING] = {sprite_sleeping_frames, SPRITE_FRAMES_PER_STATE, 500},
+    [SPRITE_STATE_IDLE] = {sprite_idle_frames, SPRITE_IDLE_FRAME_COUNT, 333},
+    [SPRITE_STATE_WORKING] = {sprite_working_frames, SPRITE_WORKING_FRAME_COUNT, 250},
+    [SPRITE_STATE_WAITING] = {sprite_waiting_frames, SPRITE_WAITING_FRAME_COUNT, 333},
+    [SPRITE_STATE_COMPACTING] = {sprite_compacting_frames, SPRITE_COMPACTING_FRAME_COUNT, 167},
+    [SPRITE_STATE_SLEEPING] = {sprite_sleeping_frames, SPRITE_SLEEPING_FRAME_COUNT, 500},
 };
 
 static const sprite_anim_def_t *current_anim(const home_view_t *view) { return view->sprite_anim; }
@@ -85,11 +86,22 @@ static void refresh_sprite(home_view_t *view, sprite_state_t new_state)
         return;
     }
 
+    if ((unsigned)new_state >= SPRITE_STATE_COUNT) {
+        new_state = SPRITE_STATE_IDLE;
+    }
+
     if (new_state == view->sprite_state && current_anim(view) != NULL) {
         return;
     }
 
     anim = &s_sprite_anims[new_state];
+    if (anim->frames == NULL || anim->num_frames == 0U) {
+        new_state = SPRITE_STATE_IDLE;
+        anim = &s_sprite_anims[new_state];
+        if (anim->frames == NULL || anim->num_frames == 0U) {
+            return;
+        }
+    }
     view->sprite_state = new_state;
     view->sprite_anim = anim;
     view->frame_idx = 0;
