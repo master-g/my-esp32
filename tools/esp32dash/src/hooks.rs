@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use directories::BaseDirs;
+use dir_spec::home;
 use inquire::{Confirm, InquireError};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -121,8 +121,8 @@ struct InstallAnalysis {
 }
 
 pub fn install_hooks(executable: &Path, force: bool) -> Result<InstallHooksResult> {
-    let base_dirs = BaseDirs::new().context("failed to resolve home directory")?;
-    let claude_dir = base_dirs.home_dir().join(CLAUDE_DIR_NAME);
+    let claude_dir =
+        home().ok_or_else(|| anyhow!("failed to resolve home directory"))?.join(CLAUDE_DIR_NAME);
     let analysis = analyze_install(&claude_dir, executable)?;
 
     if !analysis.script_written && !analysis.settings_updated {

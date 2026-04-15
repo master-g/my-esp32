@@ -144,6 +144,7 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
         session_id: event.session_id.clone(),
         event: event.hook_event_name.clone(),
         status: status.as_str().to_string(),
+        emotion: current.emotion.clone(),
         title: sanitize_snapshot_title(&title),
         workspace,
         detail: sanitize_snapshot_detail(&detail),
@@ -246,6 +247,7 @@ pub fn apply_notification_status(
 
 pub fn materially_equal(a: &Snapshot, b: &Snapshot) -> bool {
     a.status == b.status
+        && a.emotion == b.emotion
         && a.title == b.title
         && a.detail == b.detail
         && a.workspace == b.workspace
@@ -285,6 +287,7 @@ mod tests {
             hook_event_name: "PermissionRequest".into(),
             message: None,
             prompt_preview: None,
+            prompt_raw: None,
             tool_name: Some("exec_command".into()),
             tool_use_id: Some("tool-1".into()),
             permission_mode: "default".into(),
@@ -308,6 +311,7 @@ mod tests {
             hook_event_name: "Notification".into(),
             message: Some("Background summary".into()),
             prompt_preview: None,
+            prompt_raw: None,
             tool_name: None,
             tool_use_id: None,
             permission_mode: "default".into(),
@@ -328,6 +332,14 @@ mod tests {
         assert!(materially_equal(&a, &b));
     }
 
+    #[test]
+    fn materially_equal_detects_emotion_changes() {
+        let a = Snapshot::empty(1);
+        let mut b = Snapshot::empty(1);
+        b.emotion = "happy".into();
+        assert!(!materially_equal(&a, &b));
+    }
+
     fn make_event(name: &str) -> LocalHookEvent {
         LocalHookEvent {
             session_id: "sess".into(),
@@ -335,6 +347,7 @@ mod tests {
             hook_event_name: name.into(),
             message: None,
             prompt_preview: None,
+            prompt_raw: None,
             tool_name: None,
             tool_use_id: None,
             permission_mode: "default".into(),

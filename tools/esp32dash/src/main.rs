@@ -1,8 +1,11 @@
 mod agent;
 mod approvals;
 mod compat;
+mod config;
 mod config_ui;
 mod device;
+mod emotion;
+mod emotion_state;
 mod hooks;
 mod launchd;
 mod model;
@@ -201,6 +204,14 @@ enum ChibiState {
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
+enum ChibiEmotion {
+    Neutral,
+    Happy,
+    Sad,
+    Sob,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
 enum ScreensaverAction {
     Enter,
     Exit,
@@ -218,12 +229,27 @@ impl ChibiState {
     }
 }
 
+impl ChibiEmotion {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Neutral => "neutral",
+            Self::Happy => "happy",
+            Self::Sad => "sad",
+            Self::Sob => "sob",
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ChibiCommand {
-    #[command(about = "Send a specific sprite state (and optional text bubble) to the device")]
+    #[command(
+        about = "Send a specific sprite state, emotion, and optional text bubble to the device"
+    )]
     Test {
         #[arg(long, value_enum, help = "Sprite state to display")]
         state: ChibiState,
+        #[arg(long, value_enum, default_value = "neutral", help = "Emotion variant to display")]
+        emotion: ChibiEmotion,
         #[arg(long, help = "Text to show in the speech bubble")]
         bubble: Option<String>,
         #[arg(long, help = "Serial port (default: autodiscover)")]
@@ -392,10 +418,11 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
     match command {
         ChibiCommand::Test {
             state,
+            emotion,
             bubble,
             port,
         } => {
-            let snapshot = build_test_snapshot(&state, bubble.as_deref());
+            let snapshot = build_test_snapshot(&state, &emotion, bubble.as_deref());
             send_event_direct(
                 Arc::new(UnixSerialFactory),
                 port.as_deref(),
@@ -403,8 +430,9 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 &snapshot,
             )?;
             println!(
-                "sent state={} bubble={:?}",
+                "sent state={} emotion={} bubble={:?}",
                 snapshot.status,
+                snapshot.emotion,
                 if snapshot.detail.is_empty() {
                     None
                 } else {
@@ -420,31 +448,33 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             let baud = compat::serial_baud();
             let mut session = open_direct_session(factory, port.as_deref(), baud)?;
 
-            let steps: &[(ChibiState, &str)] = &[
-                (ChibiState::Idle, "Just chilling..."),
-                (ChibiState::Working, "Thinking hard..."),
-                (ChibiState::Working, "Running tests"),
-                (ChibiState::Compacting, "Compacting..."),
-                (ChibiState::Waiting, "Need your input!"),
-                (ChibiState::Sleeping, ""),
+            let steps: &[(ChibiState, ChibiEmotion, &str)] = &[
+                (ChibiState::Idle, ChibiEmotion::Happy, "Just chilling..."),
+                (ChibiState::Working, ChibiEmotion::Happy, "Making progress"),
+                (ChibiState::Working, ChibiEmotion::Sad, "That test failed"),
+                (ChibiState::Compacting, ChibiEmotion::Neutral, "Compacting..."),
+                (ChibiState::Waiting, ChibiEmotion::Sad, "Need your input!"),
+                (ChibiState::Idle, ChibiEmotion::Sob, "This is rough..."),
+                (ChibiState::Sleeping, ChibiEmotion::Happy, ""),
             ];
 
-            for (i, (state, bubble)) in steps.iter().enumerate() {
+            for (i, (state, emotion, bubble)) in steps.iter().enumerate() {
                 let bubble_text = if bubble.is_empty() {
                     None
                 } else {
                     Some(*bubble)
                 };
-                let snapshot = build_test_snapshot(state, bubble_text);
+                let snapshot = build_test_snapshot(state, emotion, bubble_text);
                 session.write_frame(&WireFrame::event(
                     "claude.update",
                     serde_json::to_value(&snapshot)?,
                 ))?;
                 println!(
-                    "[{}/{}] state={} bubble={:?}",
+                    "[{}/{}] state={} emotion={} bubble={:?}",
                     i + 1,
                     steps.len(),
                     snapshot.status,
+                    snapshot.emotion,
                     bubble_text
                 );
                 if i + 1 < steps.len() {
@@ -539,7 +569,11 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
     }
 }
 
-fn build_test_snapshot(state: &ChibiState, bubble: Option<&str>) -> Snapshot {
+fn build_test_snapshot(
+    state: &ChibiState,
+    emotion: &ChibiEmotion,
+    bubble: Option<&str>,
+) -> Snapshot {
     let status = state.to_run_status();
     let unread = matches!(state, ChibiState::Waiting);
     Snapshot {
@@ -548,6 +582,7 @@ fn build_test_snapshot(state: &ChibiState, bubble: Option<&str>) -> Snapshot {
         session_id: "test-session".to_string(),
         event: "Stop".to_string(),
         status: status.as_str().to_string(),
+        emotion: emotion.as_str().to_string(),
         title: "Chibi Test".to_string(),
         workspace: String::new(),
         detail: bubble.unwrap_or_default().to_string(),
@@ -586,6 +621,7 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
         hook_event_name: "PermissionRequest".into(),
         message: None,
         prompt_preview: None,
+        prompt_raw: None,
         tool_name: Some(display_tool_name.clone()),
         tool_use_id: Some(tool_use_id.clone()),
         permission_mode: "default".into(),
@@ -599,6 +635,7 @@ fn build_approve_dismiss_scenario(tool: &str, desc: &str) -> ApproveDismissScena
         hook_event_name: "PreToolUse".into(),
         message: None,
         prompt_preview: None,
+        prompt_raw: None,
         tool_name: Some(display_tool_name.clone()),
         tool_use_id: Some(tool_use_id),
         permission_mode: "default".into(),
@@ -857,8 +894,8 @@ fn install_hooks(args: InstallHooksArgs) -> Result<()> {
 fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
     let waiting_prompt = extract_waiting_prompt(&raw);
     let message = raw.message.or(raw.reason).and_then(|message| sanitize_message(&message));
-
-    let prompt_preview = raw.prompt.as_deref().and_then(sanitize_prompt_preview);
+    let prompt_raw = raw.prompt.filter(|prompt| !prompt.trim().is_empty());
+    let prompt_preview = prompt_raw.as_deref().and_then(sanitize_prompt_preview);
     let permission_mode = raw
         .permission_mode
         .as_deref()
@@ -872,6 +909,7 @@ fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
         hook_event_name: raw.hook_event_name,
         message,
         prompt_preview,
+        prompt_raw,
         tool_name: raw.tool_name.and_then(|tool| sanitize_tool_name(&tool)),
         tool_use_id: raw.tool_use_id,
         permission_mode,
@@ -1483,6 +1521,46 @@ mod tests {
         assert_eq!(prompt.options.len(), 2);
         assert_eq!(prompt.options[0].label, "Engineering");
         assert_eq!(prompt.options[1].description.as_deref(), Some("Review assets"));
+    }
+
+    #[test]
+    fn sanitize_raw_event_preserves_prompt_raw_for_host_analysis() {
+        let event = sanitize_raw_event(RawHookInput {
+            session_id: "sess-raw".into(),
+            cwd: "/tmp/project".into(),
+            hook_event_name: "UserPromptSubmit".into(),
+            message: None,
+            prompt: Some("first line\nsecond line".into()),
+            tool_name: None,
+            tool_use_id: None,
+            permission_mode: Some("default".into()),
+            reason: None,
+            tool_input: None,
+            extra: Default::default(),
+        });
+
+        assert_eq!(event.prompt_raw.as_deref(), Some("first line\nsecond line"));
+        assert_eq!(event.prompt_preview.as_deref(), Some("first line"));
+    }
+
+    #[test]
+    fn build_test_snapshot_preserves_requested_emotion() {
+        let snapshot =
+            build_test_snapshot(&ChibiState::Working, &ChibiEmotion::Sad, Some("Need help"));
+
+        assert_eq!(snapshot.status, "processing");
+        assert_eq!(snapshot.emotion, "sad");
+        assert_eq!(snapshot.detail, "Need help");
+        assert!(!snapshot.unread);
+    }
+
+    #[test]
+    fn build_test_snapshot_marks_waiting_as_unread() {
+        let snapshot = build_test_snapshot(&ChibiState::Waiting, &ChibiEmotion::Happy, None);
+
+        assert_eq!(snapshot.status, "waiting_for_input");
+        assert_eq!(snapshot.emotion, "happy");
+        assert!(snapshot.unread);
     }
 
     #[test]

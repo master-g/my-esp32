@@ -10,6 +10,7 @@
 #define CLAUDE_STR_TITLE_MAX 40
 #define CLAUDE_STR_DETAIL_MAX 96
 #define CLAUDE_STR_SESSION_MAX 40
+#define CLAUDE_STR_EMOTION_MAX 16
 
 typedef enum {
     CLAUDE_CONN_DISCONNECTED = 0,
@@ -38,6 +39,7 @@ typedef struct {
     char workspace[CLAUDE_STR_WORKSPACE_MAX];
     char title[CLAUDE_STR_TITLE_MAX];
     char detail[CLAUDE_STR_DETAIL_MAX];
+    char emotion[CLAUDE_STR_EMOTION_MAX];
     char event[24];
     char permission_mode[16];
 } claude_snapshot_t;

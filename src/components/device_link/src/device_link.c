@@ -1112,6 +1112,7 @@ static esp_err_t parse_claude_update(const cJSON *payload, claude_snapshot_t *sn
     copy_json_string(payload, "workspace", snapshot->workspace, sizeof(snapshot->workspace));
     copy_json_string(payload, "title", snapshot->title, sizeof(snapshot->title));
     copy_json_string(payload, "detail", snapshot->detail, sizeof(snapshot->detail));
+    copy_json_string(payload, "emotion", snapshot->emotion, sizeof(snapshot->emotion));
     copy_json_string(payload, "event", snapshot->event, sizeof(snapshot->event));
     copy_json_string(payload, "permission_mode", snapshot->permission_mode,
                      sizeof(snapshot->permission_mode));

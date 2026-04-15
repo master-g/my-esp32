@@ -225,6 +225,7 @@ mod tests {
             hook_event_name: name.into(),
             message: None,
             prompt_preview: None,
+            prompt_raw: None,
             tool_name: tool_name.map(str::to_string),
             tool_use_id: tool_use_id.map(str::to_string),
             permission_mode: "default".into(),

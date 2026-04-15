@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use directories::BaseDirs;
+use dir_spec::home;
 
 use crate::compat;
 
@@ -14,41 +14,31 @@ const LABEL: &str = "com.local.esp32dash";
 pub fn install_launchd(executable: &Path) -> Result<PathBuf> {
     let uid = current_uid()?;
     validate_launch_agent_uid(&uid)?;
-    let base_dirs = BaseDirs::new().context("failed to resolve home directory")?;
-    let launch_agents_dir = base_dirs.home_dir().join("Library/LaunchAgents");
-    let log_dir = base_dirs.home_dir().join("Library/Logs/esp32dash");
+    let home_dir = home().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    let launch_agents_dir = home_dir.join("Library/LaunchAgents");
+    let log_dir = home_dir.join("Library/Logs/esp32dash");
     fs::create_dir_all(&launch_agents_dir)
         .with_context(|| format!("failed to create {}", launch_agents_dir.display()))?;
-    fs::create_dir_all(&log_dir).with_context(|| format!("failed to create {}", log_dir.display()))?;
+    fs::create_dir_all(&log_dir)
+        .with_context(|| format!("failed to create {}", log_dir.display()))?;
 
     let plist_path = launch_agents_dir.join(format!("{LABEL}.plist"));
-    let admin_addr = compat::admin_addr();
     let serial_port = compat::serial_port();
-    let serial_baud = compat::serial_baud().to_string();
     let state_dir = compat::state_dir();
+    let config_path = compat::env_value("ESP32DASH_CONFIG");
     let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
 
-    let serial_port_block = if let Some(serial_port) = serial_port.as_deref() {
-        format!(
-            r#"
-    <key>ESP32DASH_SERIAL_PORT</key>
-    <string>{}</string>"#,
-            xml_escape(serial_port)
-        )
-    } else {
-        String::new()
-    };
-
-    let state_dir_block = if let Some(state_dir) = state_dir.as_deref() {
-        format!(
-            r#"
-    <key>ESP32DASH_STATE_DIR</key>
-    <string>{}</string>"#,
-            xml_escape(state_dir)
-        )
-    } else {
-        String::new()
-    };
+    let admin_addr_block = optional_env_var_block(
+        "ESP32DASH_ADMIN_ADDR",
+        compat::env_value("ESP32DASH_ADMIN_ADDR").as_deref(),
+    );
+    let serial_port_block = optional_env_var_block("ESP32DASH_SERIAL_PORT", serial_port.as_deref());
+    let serial_baud_block = optional_env_var_block(
+        "ESP32DASH_SERIAL_BAUD",
+        compat::env_value("ESP32DASH_SERIAL_BAUD").as_deref(),
+    );
+    let state_dir_block = optional_env_var_block("ESP32DASH_STATE_DIR", state_dir.as_deref());
+    let config_path_block = optional_env_var_block("ESP32DASH_CONFIG", config_path.as_deref());
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -69,12 +59,11 @@ pub fn install_launchd(executable: &Path) -> Result<PathBuf> {
   <true/>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>ESP32DASH_ADMIN_ADDR</key>
-    <string>{admin_addr}</string>
+{admin_addr_block}
 {serial_port_block}
-    <key>ESP32DASH_SERIAL_BAUD</key>
-    <string>{serial_baud}</string>
+{serial_baud_block}
 {state_dir_block}
+{config_path_block}
     <key>RUST_LOG</key>
     <string>{rust_log}</string>
   </dict>
@@ -87,10 +76,11 @@ pub fn install_launchd(executable: &Path) -> Result<PathBuf> {
 "#,
         label = LABEL,
         exe = xml_escape(executable),
-        admin_addr = xml_escape(&admin_addr),
+        admin_addr_block = admin_addr_block,
         serial_port_block = serial_port_block,
-        serial_baud = xml_escape(&serial_baud),
+        serial_baud_block = serial_baud_block,
         state_dir_block = state_dir_block,
+        config_path_block = config_path_block,
         rust_log = xml_escape(&rust_log),
         stdout_log = xml_escape(log_dir.join("stdout.log")),
         stderr_log = xml_escape(log_dir.join("stderr.log")),
@@ -122,9 +112,8 @@ pub fn install_launchd(executable: &Path) -> Result<PathBuf> {
 pub fn uninstall_launchd() -> Result<Option<PathBuf>> {
     let uid = current_uid()?;
     validate_launch_agent_uid(&uid)?;
-    let base_dirs = BaseDirs::new().context("failed to resolve home directory")?;
-    let plist_path =
-        base_dirs.home_dir().join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
+    let home_dir = home().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    let plist_path = home_dir.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
 
     bootout_service_if_present(&uid, LABEL);
 
@@ -180,6 +169,18 @@ fn command_failure_detail(output: &Output) -> String {
     }
 }
 
+fn optional_env_var_block(key: &str, value: Option<&str>) -> String {
+    value.map_or_else(String::new, |value| {
+        format!(
+            r#"    <key>{key}</key>
+    <string>{value}</string>
+"#,
+            key = key,
+            value = xml_escape(value),
+        )
+    })
+}
+
 fn xml_escape(path: impl AsRef<Path>) -> String {
     path.as_ref()
         .to_string_lossy()
@@ -192,7 +193,7 @@ fn xml_escape(path: impl AsRef<Path>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_launch_agent_uid;
+    use super::{optional_env_var_block, validate_launch_agent_uid};
 
     #[test]
     fn launch_agent_rejects_root_uid() {
@@ -203,5 +204,17 @@ mod tests {
     #[test]
     fn launch_agent_accepts_non_root_uid() {
         validate_launch_agent_uid("501").expect("non-root uid should be accepted");
+    }
+
+    #[test]
+    fn optional_env_var_block_omits_missing_values() {
+        assert_eq!(optional_env_var_block("ESP32DASH_CONFIG", None), "");
+    }
+
+    #[test]
+    fn optional_env_var_block_renders_present_values() {
+        let block = optional_env_var_block("ESP32DASH_CONFIG", Some("/tmp/esp32dash/config.toml"));
+        assert!(block.contains("ESP32DASH_CONFIG"));
+        assert!(block.contains("/tmp/esp32dash/config.toml"));
     }
 }

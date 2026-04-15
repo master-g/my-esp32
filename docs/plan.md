@@ -44,7 +44,7 @@
 
 ## Revised plan
 
-### Phase 0: Compacting 独立状态
+### Phase 0: Compacting 独立状态（已完成）
 
 这是最适合先落地的 phase。Host 和 serial protocol 已经把状态传过来了，真正要做的是 firmware 不再吞掉它，并补一套 compacting sprite。
 
@@ -79,46 +79,62 @@ make build
 
 如果不改 `chibi` harness，也可以靠真实 `PreCompact` 事件验证，但回归效率会差很多。
 
+**实现备注（2026-04-14）**
+
+- `home_presenter` / `home_view` / `sprite_convert.py` / `esp32dash chibi` 已按本节落地，`compacting` 不再并进 `working`。
+- 新增 `src/apps/app_home/src/generated/sprite_compacting.c`，并把 `sprite_frames.h` 改成 per-asset frame count 宏。
+- 实机 compacting 动画和 `cargo run --manifest-path tools/esp32dash/Cargo.toml -- chibi test --state compacting` 已验证通过。
+- 当前 `build/esp32_dashboard.bin` 为 `2575360 B`，factory app 分区剩余 `1618944 B`。
+
 ### Phase 1: Emotion 系统全链路
 
 这个 phase 依然值得做，但要先补 host 基础设施。建议拆成 1A-1F。
 
-#### 1A: Host 配置来源
+#### 1A: Host 配置来源（已完成，agent run 已接入）
 
-这里不建议只做一个孤立的 `~/.config/esp32dash/config.toml`，否则会和 Claude 本身的 provider 配置分叉。更稳妥的顺序是：
+这里要把“配置路径”和“emotion provider 来源”分开看。更稳妥的顺序是：
 
 1. `ESP32DASH_CONFIG` 指向显式配置文件（方便测试和 launchd）
 2. `~/.config/esp32dash/config.toml` / `$XDG_CONFIG_HOME/esp32dash/config.toml` 覆盖项
-3. `~/.claude/settings.json` 的 `env` 字段兜底，兼容 Notchi 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`
+3. `agent run` 首次启动时自动创建 `~/.config/esp32dash/` 和默认 `config.toml`
 
 **配置建议**
 
 ```toml
 [emotion]
 enabled = false
-api_base_url = "https://api.anthropic.com"
+api_base_url = "https://api.anthropic.com/v1/messages"
 model = "claude-haiku-4-5-20251001"
 api_key = ""
 timeout_secs = 3
 max_tokens = 50
 ```
 
-`enabled` 默认 false。没配置、没 token、解析失败、超时、HTTP 非 200、返回 JSON 不合法时，全部回退到 `neutral + 0.0`，不重试。
+`enabled` 默认 false。只有本地 `config.toml` 显式提供 anthropic-compatible API 配置时才启用；没配置、没 token、解析失败、超时、HTTP 非 200、返回 JSON 不合法时，全部回退到 `disabled`，不再回退到 Claude 自身配置。
 
 **修改点**
 
 1. `tools/esp32dash/src/config.rs`（new）
    - `AppConfig`
    - `EmotionConfig`
-   - `load()`，支持显式文件、XDG、Claude settings fallback
+   - `load()` 保持无副作用；`load_for_agent_run()` 负责默认配置 bootstrap
 2. `tools/esp32dash/Cargo.toml`
    - 增加 `toml`
+   - 接入 `dir_spec`
 3. `tools/esp32dash/src/agent.rs`
    - `Config::from_env()` 接入 `AppConfig`
 4. `tools/esp32dash/src/main.rs`
    - `agent run` 启动时加载配置
 
-#### 1B: 完整 prompt 传递与隐私边界
+**实现备注（2026-04-14）**
+
+- `tools/esp32dash/src/config.rs` 已落地，当前用 `dir_spec` 解析默认配置路径，并在首次 `agent run` 时自动写出 `~/.config/esp32dash/config.toml`。
+- `agent::Config::from_env()` 已接入 `AppConfig`，文件配置现在可以回退到 `admin_addr` / `state_dir` / `serial_port` / `serial_baud`。
+- emotion provider 现在只认本地 `config.toml`；没有显式 anthropic-compatible API 配置就保持 disabled，不再回退到 `~/.claude/settings.json`。
+- `emotion api_base_url` 现在会做安全校验：只接受 HTTPS，拒绝 `localhost` 和私网 IP literal；对域名 endpoint，请求前还会解析并 pin 住公开地址，避免 DNS rebinding。
+- `launchd` 安装现在会透传显式设置的 `ESP32DASH_CONFIG` / `ESP32DASH_*` 覆盖项；`device` / `chibi` 这些直接 CLI 入口仍沿用现有 env-only 路径，等 Phase 1 后续子项一起收口时再统一。
+
+#### 1B: 完整 prompt 传递与隐私边界（host 侧已完成）
 
 这一步是原计划缺得最明显的部分。当前 `sanitize_raw_event()` 只保留 `prompt_preview`，完整 prompt 进不了 agent。
 
@@ -140,7 +156,14 @@ max_tokens = 50
 3. `tools/esp32dash/src/text_sanitize.rs`
    - 保持现有展示清洗逻辑，不把它混进 emotion 分析路径
 
-#### 1C: Emotion analyzer 与 agent 集成
+**实现备注（2026-04-15）**
+
+- `LocalHookEvent` 已新增 `prompt_raw`，`sanitize_raw_event()` 现在会同时保留：
+  - 展示用 `prompt_preview`
+  - host-only 分析用 `prompt_raw`
+- raw prompt 目前只在本机 ingest -> agent 路径里流转，不会进入 `state.json`，也不会进设备串口快照。
+
+#### 1C: Emotion analyzer 与 agent 集成（host 侧已完成）
 
 异步 LLM 请求应该挂在 `AppState::process_event()` 附近，而不是 `normalizer.rs`。
 
@@ -179,6 +202,15 @@ max_tokens = 50
 6. `tools/esp32dash/src/main.rs`
    - `build_test_snapshot()` 和 `chibi` 测试路径补 emotion
 
+**实现备注（2026-04-15）**
+
+- `tools/esp32dash/src/emotion.rs` / `emotion_state.rs` 已落地，agent 现在会在 `UserPromptSubmit` 且 `prompt_raw` 存在时异步请求 emotion analyzer。
+- direct HTTP 调用会把 `api_base_url` 归一化到 `/v1/messages`；像 MiniMax 这种 bare base path 兼容服务不需要手工把 endpoint 写死到 config。
+- response parser 不再假设 `content[0]` 一定是 `text`；它会跳过 `thinking`，找到第一个 `text` block，再剥 markdown code fence 解 JSON。
+- 对 MiniMax 这类会先输出较长 `thinking` 的兼容服务，单纯依赖较小的 `max_tokens` 很容易只拿到 `thinking` 而拿不到最终 `text`。当前 analyzer 已把有效 token 预算抬到一个安全下限，默认模板也同步提高到 `256`。
+- `Snapshot` 已新增 `emotion`，`normalizer::materially_equal()` 也已把它纳入比较，所以 emotion 变化会触发新的 host snapshot。
+- agent 内部 emotion state 只保留在内存里；session 结束、prune、liveness lost 会清理对应状态。agent 重启后显示 emotion 会回到 `neutral`。
+
 #### 1D: Serial protocol 扩展
 
 这一步风险不高，因为 host 发设备快照本来就是 `serde_json::to_value(snapshot)`。
@@ -200,6 +232,14 @@ max_tokens = 50
 - 老 host：不发 `emotion`，firmware 读到空串后按 neutral 处理
 - 老 `state.json`：靠 `#[serde(default)] emotion` 继续可读
 
+**实现备注（2026-04-15）**
+
+- `service_claude` / `device_link` / `service_home` 已接通 `emotion` 字段：
+  - `claude_snapshot_t` 新增 `emotion[16]`
+  - `parse_claude_update()` 已读取 `"emotion"`
+  - `home_snapshot_t` 已新增 `claude_emotion`
+- 旧 host 不发 `emotion` 时，firmware 侧会保留空串；presenter 再统一把空串映射到 `neutral`。
+
 #### 1E: Firmware 情绪枚举与 sprite 选择
 
 这里不只是 `home_presenter`，`home_view` 自身的状态缓存也要扩。
@@ -218,6 +258,17 @@ max_tokens = 50
    - `s_sprite_anims` 改成 `[SPRITE_STATE_COUNT][SPRITE_EMOTION_COUNT]`
    - `refresh_sprite()` 比较 state + emotion，而不是只比较 state
    - fallback 链建议做成：`exact -> sad (仅 sob) -> neutral`
+
+**实现备注（2026-04-15）**
+
+- `home_presenter` 已新增 `sprite_emotion_t`，并通过 `emotion_from_text()` 把 `happy/sad/sob/unknown` 映射到 UI 枚举。
+- `home_view` 现在按 `state x emotion` 选择动画，并缓存当前展示的 emotion 变体。
+- fallback 实现为：
+  - 先找精确匹配
+  - `sob` 没资源时退到同 task 的 `sad`
+  - 再退到同 task 的 `neutral`
+  - 最后才回 `idle_neutral` 兜底
+- 这意味着最小资源矩阵可以先缺省 `working_sob` / `waiting_sob` / `sleeping_sad` 这类低优先级组合，不会把 UI 弄坏。
 
 #### 1F: Sprite 转换与 smoke test
 
@@ -250,6 +301,19 @@ max_tokens = 50
 3. `tools/esp32dash/src/main.rs`
    - `chibi test --emotion happy|sad|sob|neutral`
    - `chibi demo` 增加几组 emotion case
+
+**实现备注（2026-04-15）**
+
+- 当前已按最小矩阵生成并编入以下新增资源：
+  - `idle_happy` / `idle_sad` / `idle_sob`
+  - `working_happy` / `working_sad`
+  - `waiting_happy` / `waiting_sad`
+  - `sleeping_happy`
+- `tools/sprite_convert.py` 已扩展为按资源名生成独立的 frame count 宏和 extern 声明；neutral 资产继续保留原来的无后缀符号名。
+- `esp32dash chibi test` 已支持 `--emotion neutral|happy|sad|sob`；`chibi demo` 也已经带几组 emotion 场景。
+- 当前 `make build` 结果：
+  - app binary size: `0x335300`
+  - smallest app partition free: `0x0cad00`（约 20%）
 
 **验证**
 

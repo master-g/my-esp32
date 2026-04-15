@@ -68,6 +68,8 @@ pub struct LocalHookEvent {
     pub hook_event_name: String,
     pub message: Option<String>,
     pub prompt_preview: Option<String>,
+    #[serde(default)]
+    pub prompt_raw: Option<String>,
     pub tool_name: Option<String>,
     pub tool_use_id: Option<String>,
     pub permission_mode: String,
@@ -146,6 +148,8 @@ pub struct Snapshot {
     pub session_id: String,
     pub event: String,
     pub status: String,
+    #[serde(default)]
+    pub emotion: String,
     pub title: String,
     pub workspace: String,
     pub detail: String,
@@ -163,6 +167,7 @@ impl Snapshot {
             session_id: String::new(),
             event: "none".to_string(),
             status: RunStatus::Unknown.as_str().to_string(),
+            emotion: "neutral".to_string(),
             title: "No data yet".to_string(),
             workspace: String::new(),
             detail: "".to_string(),

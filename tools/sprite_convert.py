@@ -20,14 +20,22 @@ STRIDE = FRAME_W * BYTES_PER_PIXEL
 
 SPRITES = [
     ("idle", "idle_neutral", 6),
+    ("idle_happy", "idle_happy", 6),
+    ("idle_sad", "idle_sad", 6),
+    ("idle_sob", "idle_sob", 6),
     ("working", "working_neutral", 6),
+    ("working_happy", "working_happy", 6),
+    ("working_sad", "working_sad", 6),
     ("waiting", "waiting_neutral", 6),
+    ("waiting_happy", "waiting_happy", 6),
+    ("waiting_sad", "waiting_sad", 6),
     ("compacting", "compacting_neutral", 5),
     ("sleeping", "sleeping_neutral", 6),
+    ("sleeping_happy", "sleeping_happy", 6),
 ]
 
 
-def convert_sheet(state_name: str, asset_name: str, num_frames: int) -> str:
+def convert_sheet(symbol_name: str, asset_name: str, num_frames: int) -> str:
     """Convert one sprite sheet PNG to LVGL C source."""
     png_path = os.path.join(ASSETS_DIR, f"{asset_name}.imageset", "sprite_sheet.png")
     img = Image.open(png_path).convert("RGBA")
@@ -48,7 +56,7 @@ def convert_sheet(state_name: str, asset_name: str, num_frames: int) -> str:
     ]
 
     # Emit raw data for all frames as one contiguous array
-    data_var = f"sprite_{state_name}_data"
+    data_var = f"sprite_{symbol_name}_data"
     lines.append(f"static const uint8_t {data_var}[] = {{")
 
     for fi in range(num_frames):
@@ -64,7 +72,7 @@ def convert_sheet(state_name: str, asset_name: str, num_frames: int) -> str:
     lines.append("")
 
     # Emit descriptor array
-    dsc_var = f"sprite_{state_name}_frames"
+    dsc_var = f"sprite_{symbol_name}_frames"
     lines.append(f"const lv_image_dsc_t {dsc_var}[{num_frames}] = {{")
     for fi in range(num_frames):
         offset = fi * FRAME_DATA_SIZE
@@ -97,14 +105,14 @@ def generate_header() -> str:
         "",
     ]
 
-    for state_name, _, num_frames in SPRITES:
-        lines.append(f"#define SPRITE_{state_name.upper()}_FRAME_COUNT {num_frames}")
+    for symbol_name, _, num_frames in SPRITES:
+        lines.append(f"#define SPRITE_{symbol_name.upper()}_FRAME_COUNT {num_frames}")
     lines.append("")
 
-    for state_name, _, _ in SPRITES:
+    for symbol_name, _, _ in SPRITES:
         lines.append(
-            f"extern const lv_image_dsc_t sprite_{state_name}_frames"
-            f"[SPRITE_{state_name.upper()}_FRAME_COUNT];"
+            f"extern const lv_image_dsc_t sprite_{symbol_name}_frames"
+            f"[SPRITE_{symbol_name.upper()}_FRAME_COUNT];"
         )
 
     lines.extend(["", "#endif /* SPRITE_FRAMES_H */", ""])
@@ -114,9 +122,9 @@ def generate_header() -> str:
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    for state_name, asset_name, num_frames in SPRITES:
-        c_src = convert_sheet(state_name, asset_name, num_frames)
-        out_path = os.path.join(OUTPUT_DIR, f"sprite_{state_name}.c")
+    for symbol_name, asset_name, num_frames in SPRITES:
+        c_src = convert_sheet(symbol_name, asset_name, num_frames)
+        out_path = os.path.join(OUTPUT_DIR, f"sprite_{symbol_name}.c")
         with open(out_path, "w") as f:
             f.write(c_src)
         size_kb = os.path.getsize(out_path) / 1024

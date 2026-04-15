@@ -1094,6 +1094,7 @@ mod tests {
                 session_id: "sess".into(),
                 event: "Stop".into(),
                 status: "waiting_for_input".into(),
+                emotion: "neutral".into(),
                 title: "Ready".into(),
                 workspace: "esp32".into(),
                 detail: "done".into(),

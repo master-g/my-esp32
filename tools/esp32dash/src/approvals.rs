@@ -398,6 +398,7 @@ mod tests {
                 hook_event_name: "PreToolUse".into(),
                 message: None,
                 prompt_preview: None,
+                prompt_raw: None,
                 tool_name: Some("Bash".into()),
                 tool_use_id: Some("tool-1".into()),
                 permission_mode: "default".into(),

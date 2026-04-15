@@ -28,6 +28,7 @@ typedef struct {
     lv_obj_t *bubble_box;
     lv_obj_t *bubble_label;
     sprite_state_t sprite_state;
+    sprite_emotion_t sprite_emotion;
     const sprite_anim_def_t *sprite_anim;
     uint8_t frame_idx;
     lv_timer_t *sprite_timer;

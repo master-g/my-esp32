@@ -95,6 +95,23 @@ static sprite_state_t map_run_state(claude_run_state_t rs, bool connected)
     }
 }
 
+static sprite_emotion_t emotion_from_text(const char *emotion)
+{
+    if (emotion == NULL) {
+        return SPRITE_EMOTION_NEUTRAL;
+    }
+    if (strcmp(emotion, "happy") == 0) {
+        return SPRITE_EMOTION_HAPPY;
+    }
+    if (strcmp(emotion, "sad") == 0) {
+        return SPRITE_EMOTION_SAD;
+    }
+    if (strcmp(emotion, "sob") == 0) {
+        return SPRITE_EMOTION_SOB;
+    }
+    return SPRITE_EMOTION_NEUTRAL;
+}
+
 void home_presenter_build(home_present_model_t *out, const home_snapshot_t *snapshot)
 {
     bool has_weather;
@@ -140,6 +157,7 @@ void home_presenter_build(home_present_model_t *out, const home_snapshot_t *snap
         snprintf(out->weather_text, sizeof(out->weather_text), "%s  --", city_name);
     }
     out->sprite_state = map_run_state(snapshot->claude_run_state, snapshot->claude_connected);
+    out->sprite_emotion = emotion_from_text(snapshot->claude_emotion);
     out->bubble_visible =
         snapshot->claude_detail[0] != '\0' && out->sprite_state != SPRITE_STATE_SLEEPING;
     snprintf(out->bubble_text, sizeof(out->bubble_text), "%s", snapshot->claude_detail);

@@ -12,10 +12,18 @@ idf_component_register(
         "src/generated/app_home_status_font.c"
         "src/generated/departure_mono_55.c"
         "src/generated/sprite_idle.c"
+        "src/generated/sprite_idle_happy.c"
+        "src/generated/sprite_idle_sad.c"
+        "src/generated/sprite_idle_sob.c"
         "src/generated/sprite_working.c"
+        "src/generated/sprite_working_happy.c"
+        "src/generated/sprite_working_sad.c"
         "src/generated/sprite_waiting.c"
+        "src/generated/sprite_waiting_happy.c"
+        "src/generated/sprite_waiting_sad.c"
         "src/generated/sprite_compacting.c"
         "src/generated/sprite_sleeping.c"
+        "src/generated/sprite_sleeping_happy.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

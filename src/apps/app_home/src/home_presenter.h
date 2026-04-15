@@ -15,6 +15,14 @@ typedef enum {
     SPRITE_STATE_COUNT,
 } sprite_state_t;
 
+typedef enum {
+    SPRITE_EMOTION_NEUTRAL = 0,
+    SPRITE_EMOTION_HAPPY,
+    SPRITE_EMOTION_SAD,
+    SPRITE_EMOTION_SOB,
+    SPRITE_EMOTION_COUNT,
+} sprite_emotion_t;
+
 typedef struct {
     char time_text[9];
     char date_line[48];
@@ -27,6 +35,7 @@ typedef struct {
     uint32_t weather_color;
     char weather_text[64];
     sprite_state_t sprite_state;
+    sprite_emotion_t sprite_emotion;
     bool bubble_visible;
     char bubble_text[96];
     char screensaver_time_text[6];

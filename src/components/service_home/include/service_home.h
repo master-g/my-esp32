@@ -27,6 +27,7 @@ typedef struct {
     bool claude_unread;
     claude_run_state_t claude_run_state;
     char claude_detail[96];
+    char claude_emotion[CLAUDE_STR_EMOTION_MAX];
 } home_snapshot_t;
 
 esp_err_t home_service_init(void);

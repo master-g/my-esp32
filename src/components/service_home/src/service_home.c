@@ -62,6 +62,7 @@ void home_service_get_snapshot(home_snapshot_t *out)
     out->claude_unread = claude_snap.unread;
     out->claude_run_state = claude_snap.run_state;
     copy_text(out->claude_detail, sizeof(out->claude_detail), claude_snap.detail);
+    copy_text(out->claude_emotion, sizeof(out->claude_emotion), claude_snap.emotion);
 }
 
 void home_service_request_weather_refresh(void) { weather_service_request_refresh(); }

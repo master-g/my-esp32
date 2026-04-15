@@ -14,15 +14,113 @@ struct sprite_anim_def_t {
     uint16_t period_ms;
 };
 
-static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT] = {
-    [SPRITE_STATE_IDLE] = {sprite_idle_frames, SPRITE_IDLE_FRAME_COUNT, 333},
-    [SPRITE_STATE_WORKING] = {sprite_working_frames, SPRITE_WORKING_FRAME_COUNT, 250},
-    [SPRITE_STATE_WAITING] = {sprite_waiting_frames, SPRITE_WAITING_FRAME_COUNT, 333},
-    [SPRITE_STATE_COMPACTING] = {sprite_compacting_frames, SPRITE_COMPACTING_FRAME_COUNT, 167},
-    [SPRITE_STATE_SLEEPING] = {sprite_sleeping_frames, SPRITE_SLEEPING_FRAME_COUNT, 500},
+static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT][SPRITE_EMOTION_COUNT] = {
+    [SPRITE_STATE_IDLE] =
+        {
+            [SPRITE_EMOTION_NEUTRAL] = {sprite_idle_frames, SPRITE_IDLE_FRAME_COUNT, 333},
+            [SPRITE_EMOTION_HAPPY] = {sprite_idle_happy_frames, SPRITE_IDLE_HAPPY_FRAME_COUNT, 333},
+            [SPRITE_EMOTION_SAD] = {sprite_idle_sad_frames, SPRITE_IDLE_SAD_FRAME_COUNT, 333},
+            [SPRITE_EMOTION_SOB] = {sprite_idle_sob_frames, SPRITE_IDLE_SOB_FRAME_COUNT, 333},
+        },
+    [SPRITE_STATE_WORKING] =
+        {
+            [SPRITE_EMOTION_NEUTRAL] = {sprite_working_frames, SPRITE_WORKING_FRAME_COUNT, 250},
+            [SPRITE_EMOTION_HAPPY] =
+                {
+                    sprite_working_happy_frames,
+                    SPRITE_WORKING_HAPPY_FRAME_COUNT,
+                    250,
+                },
+            [SPRITE_EMOTION_SAD] = {sprite_working_sad_frames, SPRITE_WORKING_SAD_FRAME_COUNT, 250},
+        },
+    [SPRITE_STATE_WAITING] =
+        {
+            [SPRITE_EMOTION_NEUTRAL] = {sprite_waiting_frames, SPRITE_WAITING_FRAME_COUNT, 333},
+            [SPRITE_EMOTION_HAPPY] =
+                {
+                    sprite_waiting_happy_frames,
+                    SPRITE_WAITING_HAPPY_FRAME_COUNT,
+                    333,
+                },
+            [SPRITE_EMOTION_SAD] = {sprite_waiting_sad_frames, SPRITE_WAITING_SAD_FRAME_COUNT, 333},
+        },
+    [SPRITE_STATE_COMPACTING] =
+        {
+            [SPRITE_EMOTION_NEUTRAL] =
+                {
+                    sprite_compacting_frames,
+                    SPRITE_COMPACTING_FRAME_COUNT,
+                    167,
+                },
+        },
+    [SPRITE_STATE_SLEEPING] =
+        {
+            [SPRITE_EMOTION_NEUTRAL] = {sprite_sleeping_frames, SPRITE_SLEEPING_FRAME_COUNT, 500},
+            [SPRITE_EMOTION_HAPPY] =
+                {
+                    sprite_sleeping_happy_frames,
+                    SPRITE_SLEEPING_HAPPY_FRAME_COUNT,
+                    500,
+                },
+        },
 };
 
 static const sprite_anim_def_t *current_anim(const home_view_t *view) { return view->sprite_anim; }
+
+static bool anim_ready(const sprite_anim_def_t *anim)
+{
+    return anim != NULL && anim->frames != NULL && anim->num_frames != 0U;
+}
+
+static const sprite_anim_def_t *fallback_anim(void)
+{
+    const sprite_anim_def_t *anim = &s_sprite_anims[SPRITE_STATE_IDLE][SPRITE_EMOTION_NEUTRAL];
+    return anim_ready(anim) ? anim : NULL;
+}
+
+static const sprite_anim_def_t *lookup_anim(sprite_state_t state, sprite_emotion_t emotion,
+                                            sprite_emotion_t *resolved_emotion)
+{
+    const sprite_anim_def_t *anim;
+
+    if ((unsigned)state >= SPRITE_STATE_COUNT) {
+        state = SPRITE_STATE_IDLE;
+    }
+    if ((unsigned)emotion >= SPRITE_EMOTION_COUNT) {
+        emotion = SPRITE_EMOTION_NEUTRAL;
+    }
+
+    anim = &s_sprite_anims[state][emotion];
+    if (anim_ready(anim)) {
+        if (resolved_emotion != NULL) {
+            *resolved_emotion = emotion;
+        }
+        return anim;
+    }
+
+    if (emotion == SPRITE_EMOTION_SOB) {
+        anim = &s_sprite_anims[state][SPRITE_EMOTION_SAD];
+        if (anim_ready(anim)) {
+            if (resolved_emotion != NULL) {
+                *resolved_emotion = SPRITE_EMOTION_SAD;
+            }
+            return anim;
+        }
+    }
+
+    anim = &s_sprite_anims[state][SPRITE_EMOTION_NEUTRAL];
+    if (anim_ready(anim)) {
+        if (resolved_emotion != NULL) {
+            *resolved_emotion = SPRITE_EMOTION_NEUTRAL;
+        }
+        return anim;
+    }
+
+    if (resolved_emotion != NULL) {
+        *resolved_emotion = SPRITE_EMOTION_NEUTRAL;
+    }
+    return fallback_anim();
+}
 
 static void set_status_dot_visible(lv_obj_t *dot, bool visible)
 {
@@ -78,9 +176,11 @@ static void bubble_fade_cb(lv_timer_t *timer)
     stop_bubble_timer(view);
 }
 
-static void refresh_sprite(home_view_t *view, sprite_state_t new_state)
+static void refresh_sprite(home_view_t *view, sprite_state_t new_state,
+                           sprite_emotion_t new_emotion)
 {
     const sprite_anim_def_t *anim;
+    sprite_emotion_t resolved_emotion = new_emotion;
 
     if (view->sprite_img == NULL) {
         return;
@@ -89,20 +189,21 @@ static void refresh_sprite(home_view_t *view, sprite_state_t new_state)
     if ((unsigned)new_state >= SPRITE_STATE_COUNT) {
         new_state = SPRITE_STATE_IDLE;
     }
+    if ((unsigned)new_emotion >= SPRITE_EMOTION_COUNT) {
+        new_emotion = SPRITE_EMOTION_NEUTRAL;
+    }
 
-    if (new_state == view->sprite_state && current_anim(view) != NULL) {
+    anim = lookup_anim(new_state, new_emotion, &resolved_emotion);
+    if (new_state == view->sprite_state && resolved_emotion == view->sprite_emotion &&
+        current_anim(view) == anim) {
+        return;
+    }
+    if (!anim_ready(anim)) {
         return;
     }
 
-    anim = &s_sprite_anims[new_state];
-    if (anim->frames == NULL || anim->num_frames == 0U) {
-        new_state = SPRITE_STATE_IDLE;
-        anim = &s_sprite_anims[new_state];
-        if (anim->frames == NULL || anim->num_frames == 0U) {
-            return;
-        }
-    }
     view->sprite_state = new_state;
+    view->sprite_emotion = resolved_emotion;
     view->sprite_anim = anim;
     view->frame_idx = 0;
     lv_image_set_src(view->sprite_img, &anim->frames[0]);
@@ -278,10 +379,11 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_label_set_text_static(view->bubble_label, "");
 
     view->sprite_state = SPRITE_STATE_IDLE;
-    view->sprite_anim = &s_sprite_anims[SPRITE_STATE_IDLE];
+    view->sprite_emotion = SPRITE_EMOTION_NEUTRAL;
+    view->sprite_anim = &s_sprite_anims[SPRITE_STATE_IDLE][SPRITE_EMOTION_NEUTRAL];
     view->frame_idx = 0;
-    view->sprite_timer =
-        lv_timer_create(sprite_timer_cb, s_sprite_anims[SPRITE_STATE_IDLE].period_ms, view);
+    view->sprite_timer = lv_timer_create(
+        sprite_timer_cb, s_sprite_anims[SPRITE_STATE_IDLE][SPRITE_EMOTION_NEUTRAL].period_ms, view);
     return view->root;
 }
 
@@ -306,7 +408,7 @@ void home_view_apply(home_view_t *view, const home_present_model_t *model)
     lv_label_set_text(view->weather_label, model->weather_text);
     lv_obj_set_style_text_color(view->weather_label, lv_color_hex(model->weather_color), 0);
 
-    refresh_sprite(view, model->sprite_state);
+    refresh_sprite(view, model->sprite_state, model->sprite_emotion);
     refresh_bubble(view, model);
 }
 

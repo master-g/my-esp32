@@ -8,7 +8,7 @@ anyhow = "1"
 axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
-directories = "6"
+dir_spec = "0.5.2"
 inquire = "0.9.4"
 libc = "0.2"
 png = "0.17"
@@ -19,5 +19,6 @@ reqwest = { version = "0.13.2", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
