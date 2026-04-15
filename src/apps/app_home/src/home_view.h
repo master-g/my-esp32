@@ -8,6 +8,7 @@
 #include "lvgl.h"
 
 typedef struct sprite_anim_def_t sprite_anim_def_t;
+typedef struct sprite_motion_def_t sprite_motion_def_t;
 
 typedef struct {
     lv_obj_t *root;
@@ -29,10 +30,20 @@ typedef struct {
     lv_obj_t *bubble_label;
     sprite_state_t sprite_state;
     sprite_emotion_t sprite_emotion;
+    sprite_emotion_t sprite_display_emotion;
     const sprite_anim_def_t *sprite_anim;
+    const sprite_motion_def_t *sprite_motion;
     uint8_t frame_idx;
     lv_timer_t *sprite_timer;
+    lv_timer_t *motion_timer;
     lv_timer_t *bubble_timer;
+    uint32_t motion_tick_ms;
+    lv_coord_t sprite_base_x;
+    lv_coord_t sprite_base_y;
+    lv_coord_t sprite_base_translate_x;
+    lv_coord_t sprite_base_translate_y;
+    lv_coord_t sprite_motion_x;
+    lv_coord_t sprite_motion_y;
     bool bubble_dismissed;
 } home_view_t;
 

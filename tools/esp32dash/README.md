@@ -21,11 +21,15 @@ cargo run -- device screenshot --out screen.png
 cargo run -- config
 cargo run -- install-launchd
 cargo run -- uninstall-launchd
+cargo run -- chibi test --state idle --emotion happy --bubble "Nice"
 cargo run -- install-hooks
 cargo run -- chibi approve-dismiss --delay-ms 1500
+cargo run -- chibi screensaver enter
 ```
 
 `chibi approve-dismiss` prefers the real host-side approval flow. When the local agent is reachable, it posts a synthetic `PermissionRequest`, submits a matching approval, then posts a follow-up `PreToolUse` event so the agent dismisses the ESP32 overlay through the same path used by normal Claude hooks. If the local agent is unavailable, it falls back to a direct serial smoke test and first forces `home.screensaver` off so the overlay is visible.
+
+`chibi test` is the quickest Home UI smoke harness. Besides `--state`, `--emotion`, and `--bubble`, it now also accepts snapshot-level overrides like `--unread auto|on|off`, `--attention auto|low|medium|high`, plus `--title`, `--source`, `--session-id`, and `--event`, so you can exercise unread-dot, notification, and idle-state cases without waiting for real Claude hooks.
 
 ## Environment
 

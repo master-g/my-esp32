@@ -52,6 +52,7 @@ use crate::{
 };
 
 static NEXT_APPROVAL_ID_SEQ: AtomicU64 = AtomicU64::new(1);
+const CHIBI_SCREENSAVER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -211,6 +212,21 @@ enum ChibiEmotion {
     Sob,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ChibiUnread {
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ChibiAttention {
+    Auto,
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Clone, clap::ValueEnum)]
 enum ScreensaverAction {
     Enter,
@@ -240,10 +256,37 @@ impl ChibiEmotion {
     }
 }
 
+impl ChibiUnread {
+    fn resolve(self, state: &ChibiState) -> bool {
+        match self {
+            Self::Auto => matches!(state, ChibiState::Waiting),
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
+impl ChibiAttention {
+    fn resolve(self, unread: bool) -> Attention {
+        match self {
+            Self::Auto => {
+                if unread {
+                    Attention::Medium
+                } else {
+                    Attention::Low
+                }
+            }
+            Self::Low => Attention::Low,
+            Self::Medium => Attention::Medium,
+            Self::High => Attention::High,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ChibiCommand {
     #[command(
-        about = "Send a specific sprite state, emotion, and optional text bubble to the device"
+        about = "Send a custom Home snapshot to the device for sprite, bubble, and badge testing"
     )]
     Test {
         #[arg(long, value_enum, help = "Sprite state to display")]
@@ -252,6 +295,18 @@ enum ChibiCommand {
         emotion: ChibiEmotion,
         #[arg(long, help = "Text to show in the speech bubble")]
         bubble: Option<String>,
+        #[arg(long, value_enum, default_value = "auto", help = "Unread badge behavior")]
+        unread: ChibiUnread,
+        #[arg(long, value_enum, default_value = "auto", help = "Attention level to send")]
+        attention: ChibiAttention,
+        #[arg(long, default_value = "Chibi Test", help = "Snapshot title to send")]
+        title: String,
+        #[arg(long, default_value = "chibi_test", help = "Snapshot source label")]
+        source: String,
+        #[arg(long, default_value = "test-session", help = "Session id to send")]
+        session_id: String,
+        #[arg(long, default_value = "Stop", help = "Hook event label to send")]
+        event: String,
         #[arg(long, help = "Serial port (default: autodiscover)")]
         port: Option<String>,
     },
@@ -420,9 +475,27 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             state,
             emotion,
             bubble,
+            unread,
+            attention,
+            title,
+            source,
+            session_id,
+            event,
             port,
         } => {
-            let snapshot = build_test_snapshot(&state, &emotion, bubble.as_deref());
+            let snapshot = build_test_snapshot(
+                &state,
+                &emotion,
+                bubble.as_deref(),
+                &ChibiSnapshotOptions {
+                    unread,
+                    attention,
+                    title,
+                    source,
+                    session_id,
+                    event,
+                },
+            );
             send_event_direct(
                 Arc::new(UnixSerialFactory),
                 port.as_deref(),
@@ -464,7 +537,12 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 } else {
                     Some(*bubble)
                 };
-                let snapshot = build_test_snapshot(state, emotion, bubble_text);
+                let snapshot = build_test_snapshot(
+                    state,
+                    emotion,
+                    bubble_text,
+                    &ChibiSnapshotOptions::default(),
+                );
                 session.write_frame(&WireFrame::event(
                     "claude.update",
                     serde_json::to_value(&snapshot)?,
@@ -546,16 +624,18 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             port,
         } => {
             let enabled = matches!(action, ScreensaverAction::Enter);
-            run_request(
+            request_direct_with_timeout(
+                Arc::new(UnixSerialFactory),
                 port.as_deref(),
+                compat::serial_baud(),
                 RpcRequest {
                     method: "home.screensaver".into(),
                     params: json!({
                         "enabled": enabled,
                     }),
                 },
-            )
-            .await?;
+                CHIBI_SCREENSAVER_RPC_TIMEOUT,
+            )?;
             println!(
                 "screensaver {}",
                 if enabled {
@@ -569,31 +649,52 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ChibiSnapshotOptions {
+    unread: ChibiUnread,
+    attention: ChibiAttention,
+    title: String,
+    source: String,
+    session_id: String,
+    event: String,
+}
+
+impl Default for ChibiSnapshotOptions {
+    fn default() -> Self {
+        Self {
+            unread: ChibiUnread::Auto,
+            attention: ChibiAttention::Auto,
+            title: "Chibi Test".to_string(),
+            source: "chibi_test".to_string(),
+            session_id: "test-session".to_string(),
+            event: "Stop".to_string(),
+        }
+    }
+}
+
 fn build_test_snapshot(
     state: &ChibiState,
     emotion: &ChibiEmotion,
     bubble: Option<&str>,
+    options: &ChibiSnapshotOptions,
 ) -> Snapshot {
     let status = state.to_run_status();
-    let unread = matches!(state, ChibiState::Waiting);
+    let unread = options.unread.resolve(state);
+    let attention = options.attention.resolve(unread);
     Snapshot {
         seq: 1,
-        source: "chibi_test".to_string(),
-        session_id: "test-session".to_string(),
-        event: "Stop".to_string(),
+        source: options.source.clone(),
+        session_id: options.session_id.clone(),
+        event: options.event.clone(),
         status: status.as_str().to_string(),
         emotion: emotion.as_str().to_string(),
-        title: "Chibi Test".to_string(),
+        title: options.title.clone(),
         workspace: String::new(),
         detail: bubble.unwrap_or_default().to_string(),
         permission_mode: "default".to_string(),
         ts: now_epoch(),
         unread,
-        attention: if unread {
-            Attention::Medium
-        } else {
-            Attention::Low
-        },
+        attention,
     }
 }
 
@@ -723,7 +824,7 @@ async fn run_approve_dismiss_direct(
     let factory = Arc::new(UnixSerialFactory);
     let baud = compat::serial_baud();
 
-    request_direct(
+    request_direct_with_timeout(
         factory.clone(),
         port,
         baud,
@@ -733,6 +834,7 @@ async fn run_approve_dismiss_direct(
                 "enabled": false,
             }),
         },
+        CHIBI_SCREENSAVER_RPC_TIMEOUT,
     )?;
 
     send_protocol_event_direct(
@@ -1545,8 +1647,12 @@ mod tests {
 
     #[test]
     fn build_test_snapshot_preserves_requested_emotion() {
-        let snapshot =
-            build_test_snapshot(&ChibiState::Working, &ChibiEmotion::Sad, Some("Need help"));
+        let snapshot = build_test_snapshot(
+            &ChibiState::Working,
+            &ChibiEmotion::Sad,
+            Some("Need help"),
+            &ChibiSnapshotOptions::default(),
+        );
 
         assert_eq!(snapshot.status, "processing");
         assert_eq!(snapshot.emotion, "sad");
@@ -1556,11 +1662,56 @@ mod tests {
 
     #[test]
     fn build_test_snapshot_marks_waiting_as_unread() {
-        let snapshot = build_test_snapshot(&ChibiState::Waiting, &ChibiEmotion::Happy, None);
+        let snapshot = build_test_snapshot(
+            &ChibiState::Waiting,
+            &ChibiEmotion::Happy,
+            None,
+            &ChibiSnapshotOptions::default(),
+        );
 
         assert_eq!(snapshot.status, "waiting_for_input");
         assert_eq!(snapshot.emotion, "happy");
         assert!(snapshot.unread);
+    }
+
+    #[test]
+    fn build_test_snapshot_allows_unread_override() {
+        let snapshot = build_test_snapshot(
+            &ChibiState::Idle,
+            &ChibiEmotion::Neutral,
+            None,
+            &ChibiSnapshotOptions {
+                unread: ChibiUnread::On,
+                ..ChibiSnapshotOptions::default()
+            },
+        );
+
+        assert!(snapshot.unread);
+        assert_eq!(snapshot.attention, Attention::Medium);
+    }
+
+    #[test]
+    fn build_test_snapshot_allows_attention_and_metadata_overrides() {
+        let snapshot = build_test_snapshot(
+            &ChibiState::Idle,
+            &ChibiEmotion::Happy,
+            Some("Heads up"),
+            &ChibiSnapshotOptions {
+                attention: ChibiAttention::High,
+                title: "Notice".to_string(),
+                source: "manual_smoke".to_string(),
+                session_id: "sess-42".to_string(),
+                event: "Notification".to_string(),
+                ..ChibiSnapshotOptions::default()
+            },
+        );
+
+        assert_eq!(snapshot.title, "Notice");
+        assert_eq!(snapshot.source, "manual_smoke");
+        assert_eq!(snapshot.session_id, "sess-42");
+        assert_eq!(snapshot.event, "Notification");
+        assert_eq!(snapshot.detail, "Heads up");
+        assert_eq!(snapshot.attention, Attention::High);
     }
 
     #[test]

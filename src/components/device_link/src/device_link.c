@@ -44,6 +44,7 @@
 #define APPROVAL_RPC_ID_MAX 64
 #define APPROVAL_WAIT_TASK_STACK 4096
 #define UI_CONTROL_TIMEOUT_MS 2000
+#define HOME_SCREENSAVER_CONTROL_TIMEOUT_MS 5000
 #define SCREENSHOT_TIMEOUT_MS 5000
 #define SCREENSHOT_BUFFER_BYTES ((size_t)BSP_LCD_H_RES * BSP_LCD_V_RES * sizeof(uint16_t))
 #define SCREENSHOT_CHUNK_RAW_BYTES 1024U
@@ -1408,8 +1409,8 @@ static void handle_request_frame(const cJSON *root)
 
     if (strcmp(method->valuestring, "home.screensaver") == 0) {
         const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(params, "enabled");
-        esp_err_t err =
-            app_manager_request_home_screensaver(cJSON_IsTrue(enabled), UI_CONTROL_TIMEOUT_MS);
+        esp_err_t err = app_manager_request_home_screensaver(cJSON_IsTrue(enabled),
+                                                             HOME_SCREENSAVER_CONTROL_TIMEOUT_MS);
 
         if (err != ESP_OK) {
             send_response_error(id->valuestring, "ui_control_failed", esp_err_to_name(err));
