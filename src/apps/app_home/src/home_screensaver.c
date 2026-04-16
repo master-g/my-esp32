@@ -18,6 +18,15 @@
 
 static int64_t home_now_us(void) { return esp_timer_get_time(); }
 
+void home_screensaver_mute_perf_logs(home_screensaver_t *screensaver, uint32_t duration_ms)
+{
+    if (screensaver == NULL) {
+        return;
+    }
+
+    screensaver->fx.perf_log_muted_until_us = home_now_us() + ((int64_t)duration_ms * 1000LL);
+}
+
 static uint16_t home_avg_us_to_ms_x10(uint64_t total_us, uint32_t samples)
 {
     if (samples == 0) {
@@ -160,16 +169,18 @@ static void tick(home_screensaver_t *screensaver)
             screensaver->fx.render_ms_x10 = home_avg_us_to_ms_x10(
                 screensaver->fx.perf_render_total_us, screensaver->fx.perf_frames);
             screensaver_direct_get_perf_snapshot(&direct_perf);
-            ESP_LOGI(TAG,
-                     "screensaver_perf fps=%u.%u int=%u.%u frm=%u.%u cmp=%u.%u txt=%u.%u "
-                     "wait=%u.%u push=%u.%u",
-                     screensaver->fx.fps_x10 / 10, screensaver->fx.fps_x10 % 10,
-                     screensaver->fx.interval_ms_x10 / 10, screensaver->fx.interval_ms_x10 % 10,
-                     screensaver->fx.render_ms_x10 / 10, screensaver->fx.render_ms_x10 % 10,
-                     direct_perf.compose_ms_x10 / 10, direct_perf.compose_ms_x10 % 10,
-                     direct_perf.text_ms_x10 / 10, direct_perf.text_ms_x10 % 10,
-                     direct_perf.wait_ms_x10 / 10, direct_perf.wait_ms_x10 % 10,
-                     direct_perf.push_ms_x10 / 10, direct_perf.push_ms_x10 % 10);
+            if (frame_end_us >= screensaver->fx.perf_log_muted_until_us) {
+                ESP_LOGI(TAG,
+                         "screensaver_perf fps=%u.%u int=%u.%u frm=%u.%u cmp=%u.%u txt=%u.%u "
+                         "wait=%u.%u push=%u.%u",
+                         screensaver->fx.fps_x10 / 10, screensaver->fx.fps_x10 % 10,
+                         screensaver->fx.interval_ms_x10 / 10, screensaver->fx.interval_ms_x10 % 10,
+                         screensaver->fx.render_ms_x10 / 10, screensaver->fx.render_ms_x10 % 10,
+                         direct_perf.compose_ms_x10 / 10, direct_perf.compose_ms_x10 % 10,
+                         direct_perf.text_ms_x10 / 10, direct_perf.text_ms_x10 % 10,
+                         direct_perf.wait_ms_x10 / 10, direct_perf.wait_ms_x10 % 10,
+                         direct_perf.push_ms_x10 / 10, direct_perf.push_ms_x10 % 10);
+            }
         }
 
         screensaver->fx.perf_frames = 0;

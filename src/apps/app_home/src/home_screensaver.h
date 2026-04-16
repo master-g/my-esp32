@@ -27,6 +27,7 @@ typedef struct {
     uint32_t perf_render_total_us;
     uint64_t perf_interval_total_us;
     int64_t perf_window_start_us;
+    int64_t perf_log_muted_until_us;
     int64_t prev_frame_start_us;
     int64_t time_origin_us;
     int64_t last_time_refresh_us;
@@ -54,6 +55,7 @@ void home_screensaver_exit(home_screensaver_t *screensaver);
 void home_screensaver_suspend(home_screensaver_t *screensaver);
 void home_screensaver_apply(home_screensaver_t *screensaver, const home_present_model_t *model);
 void home_screensaver_poke_activity(home_screensaver_t *screensaver);
+void home_screensaver_mute_perf_logs(home_screensaver_t *screensaver, uint32_t duration_ms);
 bool home_screensaver_should_enter(const home_screensaver_t *screensaver, int64_t now_us);
 bool home_screensaver_is_active(const home_screensaver_t *screensaver);
 

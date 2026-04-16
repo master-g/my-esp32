@@ -13,6 +13,7 @@
 #include "service_time.h"
 
 static const char *TAG = "home_runtime";
+static const uint32_t HOME_SCREENSAVER_PROTOCOL_QUIET_MS = 2000;
 
 static int64_t home_now_us(void) { return esp_timer_get_time(); }
 
@@ -380,7 +381,11 @@ esp_err_t home_runtime_handle_control(home_runtime_t *runtime, app_control_type_
         build_model(&snapshot, &model);
         if (control->enabled) {
             enter_screensaver(runtime, &model);
+            home_screensaver_mute_perf_logs(&runtime->screensaver,
+                                            HOME_SCREENSAVER_PROTOCOL_QUIET_MS);
         } else {
+            home_screensaver_mute_perf_logs(&runtime->screensaver,
+                                            HOME_SCREENSAVER_PROTOCOL_QUIET_MS);
             home_screensaver_poke_activity(&runtime->screensaver);
             exit_screensaver(runtime);
             home_view_apply(&runtime->view, &model);

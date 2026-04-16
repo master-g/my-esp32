@@ -17,6 +17,7 @@ struct sprite_anim_def_t {
 struct sprite_motion_def_t {
     uint16_t bob_period_ms;
     uint16_t bob_amplitude_px_x10;
+    int16_t sway_angle_deg_x10;
 };
 
 static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT][SPRITE_EMOTION_COUNT] = {
@@ -73,38 +74,38 @@ static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT][SPRITE_EMOTION
 static const sprite_motion_def_t s_sprite_motions[SPRITE_STATE_COUNT][SPRITE_EMOTION_COUNT] = {
     [SPRITE_STATE_IDLE] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {1500, 18},
-            [SPRITE_EMOTION_HAPPY] = {1500, 20},
-            [SPRITE_EMOTION_SAD] = {1500, 9},
-            [SPRITE_EMOTION_SOB] = {0, 0},
+            [SPRITE_EMOTION_NEUTRAL] = {1500, 18, 18},
+            [SPRITE_EMOTION_HAPPY] = {1500, 20, 22},
+            [SPRITE_EMOTION_SAD] = {1500, 9, 10},
+            [SPRITE_EMOTION_SOB] = {0, 0, 0},
         },
     [SPRITE_STATE_WORKING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {400, 8},
-            [SPRITE_EMOTION_HAPPY] = {400, 10},
-            [SPRITE_EMOTION_SAD] = {400, 4},
-            [SPRITE_EMOTION_SOB] = {0, 0},
+            [SPRITE_EMOTION_NEUTRAL] = {400, 8, 8},
+            [SPRITE_EMOTION_HAPPY] = {400, 10, 10},
+            [SPRITE_EMOTION_SAD] = {400, 4, 5},
+            [SPRITE_EMOTION_SOB] = {0, 0, 0},
         },
     [SPRITE_STATE_WAITING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {1500, 10},
-            [SPRITE_EMOTION_HAPPY] = {1500, 12},
-            [SPRITE_EMOTION_SAD] = {1500, 5},
-            [SPRITE_EMOTION_SOB] = {0, 0},
+            [SPRITE_EMOTION_NEUTRAL] = {1500, 10, 10},
+            [SPRITE_EMOTION_HAPPY] = {1500, 12, 12},
+            [SPRITE_EMOTION_SAD] = {1500, 5, 6},
+            [SPRITE_EMOTION_SOB] = {0, 0, 0},
         },
     [SPRITE_STATE_COMPACTING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {0, 0},
-            [SPRITE_EMOTION_HAPPY] = {0, 0},
-            [SPRITE_EMOTION_SAD] = {0, 0},
-            [SPRITE_EMOTION_SOB] = {0, 0},
+            [SPRITE_EMOTION_NEUTRAL] = {0, 0, 0},
+            [SPRITE_EMOTION_HAPPY] = {0, 0, 0},
+            [SPRITE_EMOTION_SAD] = {0, 0, 0},
+            [SPRITE_EMOTION_SOB] = {0, 0, 0},
         },
     [SPRITE_STATE_SLEEPING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {0, 0},
-            [SPRITE_EMOTION_HAPPY] = {0, 0},
-            [SPRITE_EMOTION_SAD] = {0, 0},
-            [SPRITE_EMOTION_SOB] = {0, 0},
+            [SPRITE_EMOTION_NEUTRAL] = {0, 0, 0},
+            [SPRITE_EMOTION_HAPPY] = {0, 0, 0},
+            [SPRITE_EMOTION_SAD] = {0, 0, 0},
+            [SPRITE_EMOTION_SOB] = {0, 0, 0},
         },
 };
 
@@ -121,7 +122,8 @@ static bool anim_ready(const sprite_anim_def_t *anim)
 
 static bool motion_ready(const sprite_motion_def_t *motion)
 {
-    return motion != NULL && motion->bob_period_ms != 0U && motion->bob_amplitude_px_x10 != 0U;
+    return motion != NULL && motion->bob_period_ms != 0U &&
+           (motion->bob_amplitude_px_x10 != 0U || motion->sway_angle_deg_x10 != 0);
 }
 
 static const sprite_anim_def_t *fallback_anim(void)
@@ -226,7 +228,8 @@ static lv_coord_t round_x10_to_coord(int32_t value_x10)
     return (lv_coord_t)((value_x10 >= 0) ? ((value_x10 + 5) / 10) : ((value_x10 - 5) / 10));
 }
 
-static void apply_sprite_transform(home_view_t *view, lv_coord_t motion_x, lv_coord_t motion_y)
+static void apply_sprite_transform(home_view_t *view, lv_coord_t motion_x, lv_coord_t motion_y,
+                                   int32_t rotation_deg_x10)
 {
     if (view == NULL || view->sprite_img == NULL) {
         return;
@@ -236,6 +239,7 @@ static void apply_sprite_transform(home_view_t *view, lv_coord_t motion_x, lv_co
     view->sprite_motion_y = motion_y;
     lv_obj_set_style_translate_x(view->sprite_img, view->sprite_base_translate_x + motion_x, 0);
     lv_obj_set_style_translate_y(view->sprite_img, view->sprite_base_translate_y + motion_y, 0);
+    lv_image_set_rotation(view->sprite_img, rotation_deg_x10);
 }
 
 static void reset_motion_phase(home_view_t *view)
@@ -245,7 +249,7 @@ static void reset_motion_phase(home_view_t *view)
     }
 
     view->motion_tick_ms = 0;
-    apply_sprite_transform(view, 0, 0);
+    apply_sprite_transform(view, 0, 0, 0);
 }
 
 static void sync_motion_timer(home_view_t *view)
@@ -266,6 +270,7 @@ static void motion_timer_cb(lv_timer_t *timer)
     home_view_t *view = lv_timer_get_user_data(timer);
     const sprite_motion_def_t *motion;
     int32_t bob_offset_y_x10;
+    int32_t sway_angle_x10;
 
     if (view == NULL || view->sprite_img == NULL) {
         return;
@@ -273,14 +278,16 @@ static void motion_timer_cb(lv_timer_t *timer)
 
     motion = current_motion(view);
     if (!motion_ready(motion)) {
-        apply_sprite_transform(view, 0, 0);
+        apply_sprite_transform(view, 0, 0, 0);
         return;
     }
 
     view->motion_tick_ms += HOME_SPRITE_MOTION_PERIOD_MS;
     bob_offset_y_x10 =
         wave_offset_x10(view->motion_tick_ms, motion->bob_period_ms, motion->bob_amplitude_px_x10);
-    apply_sprite_transform(view, 0, round_x10_to_coord(bob_offset_y_x10));
+    sway_angle_x10 =
+        wave_offset_x10(view->motion_tick_ms, motion->bob_period_ms, motion->sway_angle_deg_x10);
+    apply_sprite_transform(view, 0, round_x10_to_coord(bob_offset_y_x10), sway_angle_x10);
 }
 
 static void sprite_timer_cb(lv_timer_t *timer)
@@ -502,6 +509,8 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     view->sprite_img = lv_image_create(view->root);
     lv_image_set_src(view->sprite_img, &sprite_idle_frames[0]);
     lv_image_set_scale(view->sprite_img, HOME_SPRITE_SCALE);
+    lv_image_set_pivot(view->sprite_img, SPRITE_FRAME_W / 2, SPRITE_FRAME_H - 8);
+    lv_image_set_rotation(view->sprite_img, 0);
     lv_obj_set_style_image_recolor(view->sprite_img, lv_color_white(), 0);
     lv_obj_set_style_image_recolor_opa(view->sprite_img, LV_OPA_TRANSP, 0);
     view->sprite_base_x = HOME_SPRITE_X_OFFSET;

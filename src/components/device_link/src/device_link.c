@@ -1,6 +1,7 @@
 #include "device_link.h"
 
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,7 @@
 
 static const char *TAG = "device_link";
 static SemaphoreHandle_t s_stdout_lock;
+static int (*s_prev_log_vprintf)(const char *fmt, va_list args);
 static char s_device_id[32];
 static bool s_started;
 static uint32_t s_screenshot_seq;
@@ -74,6 +76,38 @@ static void reset_approval_state_locked(void);
 static void reset_prompt_state_locked(void);
 static void clear_approval_state_for_generation(uint32_t generation);
 static void note_protocol_overflow(size_t dropped_bytes);
+
+static void stdout_lock_take(void)
+{
+    if (s_stdout_lock != NULL) {
+        (void)xSemaphoreTakeRecursive(s_stdout_lock, portMAX_DELAY);
+    }
+}
+
+static void stdout_lock_give(void)
+{
+    if (s_stdout_lock != NULL) {
+        (void)xSemaphoreGiveRecursive(s_stdout_lock);
+    }
+}
+
+static int locked_log_vprintf(const char *fmt, va_list args)
+{
+    int written = 0;
+
+    stdout_lock_take();
+    if (s_prev_log_vprintf != NULL) {
+        written = s_prev_log_vprintf(fmt, args);
+    } else {
+        written = vprintf(fmt, args);
+    }
+    fflush(stdout);
+    if (usb_serial_jtag_is_connected()) {
+        (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(DEVICE_LINK_WRITE_TIMEOUT_MS));
+    }
+    stdout_lock_give();
+    return written;
+}
 
 typedef struct {
     bool set_timezone_name;
@@ -184,9 +218,7 @@ static void write_protocol_json(cJSON *root)
         line[prefix_len + json_len] = '\n';
         line[prefix_len + json_len + 1] = '\0';
         line_len = prefix_len + json_len + 1;
-        if (s_stdout_lock != NULL) {
-            (void)xSemaphoreTake(s_stdout_lock, portMAX_DELAY);
-        }
+        stdout_lock_take();
 
         /* Direct CLI calls connect only long enough to issue one command.
          * Periodic hello frames must not spin forever once the host closes the port. */
@@ -214,9 +246,7 @@ static void write_protocol_json(cJSON *root)
                 (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(DEVICE_LINK_WRITE_TIMEOUT_MS));
             }
         }
-        if (s_stdout_lock != NULL) {
-            (void)xSemaphoreGive(s_stdout_lock);
-        }
+        stdout_lock_give();
         free(line);
     }
 
@@ -1610,7 +1640,7 @@ esp_err_t device_link_init(void)
         return ESP_OK;
     }
 
-    s_stdout_lock = xSemaphoreCreateMutex();
+    s_stdout_lock = xSemaphoreCreateRecursiveMutex();
     ESP_RETURN_ON_FALSE(s_stdout_lock != NULL, ESP_ERR_NO_MEM, TAG, "failed to create stdout lock");
     s_approval_sem = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(s_approval_sem != NULL, ESP_ERR_NO_MEM, TAG,
@@ -1633,6 +1663,7 @@ esp_err_t device_link_init(void)
     ESP_RETURN_ON_ERROR(usb_serial_jtag_vfs_register(), TAG,
                         "failed to register usb_serial_jtag vfs");
     usb_serial_jtag_vfs_use_driver();
+    s_prev_log_vprintf = esp_log_set_vprintf(locked_log_vprintf);
     snprintf(s_device_id, sizeof(s_device_id), "esp32-dashboard-%02x%02x%02x", mac[3], mac[4],
              mac[5]);
 
