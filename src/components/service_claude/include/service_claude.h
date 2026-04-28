@@ -42,6 +42,7 @@ typedef struct {
     char emotion[CLAUDE_STR_EMOTION_MAX];
     char event[24];
     char permission_mode[16];
+    bool has_pending_prompt;
 } claude_snapshot_t;
 
 esp_err_t claude_service_init(void);
@@ -53,6 +54,8 @@ void claude_service_get_snapshot(claude_snapshot_t *out);
 bool claude_service_has_unread(void);
 void claude_service_mark_read(uint32_t seq);
 claude_conn_state_t claude_service_get_conn_state(void);
+void claude_service_set_pending_prompt(bool pending);
+bool claude_service_get_pending_prompt(void);
 
 /**
  * Check if the bridge has gone stale (no snapshot or heartbeat for a while).

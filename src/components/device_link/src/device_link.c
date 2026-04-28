@@ -589,6 +589,7 @@ static esp_err_t set_pending_prompt(const cJSON *req_id, const cJSON *title, con
     }
     s_prompt_req.pending = true;
     (void)xSemaphoreGive(s_state_mutex);
+    claude_service_set_pending_prompt(true);
     return ESP_OK;
 }
 
@@ -1259,13 +1260,7 @@ static void handle_event_frame(const cJSON *root)
             ESP_LOGW(TAG, "claude.prompt.request: invalid payload");
             return;
         }
-        err = focus_home_for_claude_overlay();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "claude.prompt.request: failed to focus home: %s", esp_err_to_name(err));
-            device_link_dismiss_prompt();
-            return;
-        }
-        publish_ui_event(APP_EVENT_PROMPT_REQUEST);
+        /* Prompt overlay removed; state is reflected via sprite emotion in snapshot */
         return;
     }
 
@@ -1288,6 +1283,7 @@ static void handle_event_frame(const cJSON *root)
             ESP_LOGW(TAG, "prompt dismiss ignored for unknown id");
             return;
         }
+        claude_service_set_pending_prompt(false);
         publish_ui_event(APP_EVENT_PROMPT_DISMISS);
     }
 }
@@ -1786,6 +1782,7 @@ void device_link_resolve_prompt(uint8_t selection_index)
     }
     (void)xSemaphoreGive(s_state_mutex);
 
+    claude_service_set_pending_prompt(false);
     if (payload != NULL) {
         send_event_frame("claude.prompt.response", payload);
     }
@@ -1822,9 +1819,14 @@ void device_link_dismiss_approval(void)
 
 void device_link_dismiss_prompt(void)
 {
+    bool had_pending = false;
     (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     if (s_prompt_req.pending) {
         reset_prompt_state_locked();
+        had_pending = true;
     }
     (void)xSemaphoreGive(s_state_mutex);
+    if (had_pending) {
+        claude_service_set_pending_prompt(false);
+    }
 }

@@ -152,6 +152,7 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
         ts: event.recv_ts,
         unread,
         attention,
+        has_pending_prompt: current.has_pending_prompt,
     }
 }
 
@@ -255,6 +256,7 @@ pub fn materially_equal(a: &Snapshot, b: &Snapshot) -> bool {
         && a.unread == b.unread
         && a.attention == b.attention
         && a.permission_mode == b.permission_mode
+        && a.has_pending_prompt == b.has_pending_prompt
 }
 
 #[cfg(test)]

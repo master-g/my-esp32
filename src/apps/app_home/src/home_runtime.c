@@ -237,7 +237,7 @@ lv_obj_t *home_runtime_create_root(home_runtime_t *runtime, lv_obj_t *parent)
     home_screensaver_create(&runtime->screensaver, runtime->view.root, screensaver_touch_exit_cb,
                             runtime);
     home_approval_create(&runtime->approval, runtime->view.root);
-    home_prompt_create(&runtime->prompt, runtime->view.root);
+    /* home_prompt_create removed — prompt overlay no longer displayed */
     if (runtime->view.settings_item != NULL) {
         lv_obj_add_event_cb(runtime->view.settings_item, settings_btn_cb, LV_EVENT_CLICKED,
                             runtime);
@@ -349,13 +349,8 @@ void home_runtime_handle_event(home_runtime_t *runtime, const app_event_t *event
         home_approval_hide(&runtime->approval);
         break;
     case APP_EVENT_PROMPT_REQUEST:
-        home_screensaver_poke_activity(&runtime->screensaver);
-        exit_screensaver(runtime);
-        home_approval_hide(&runtime->approval);
-        home_prompt_show_pending(&runtime->prompt);
-        break;
     case APP_EVENT_PROMPT_DISMISS:
-        home_prompt_hide(&runtime->prompt);
+        /* Prompt overlays removed; state now reflected via sprite emotion in snapshot */
         break;
     default:
         break;

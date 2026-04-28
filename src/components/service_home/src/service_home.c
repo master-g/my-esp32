@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "device_link.h"
 #include "net_manager.h"
 #include "service_claude.h"
 #include "service_time.h"
@@ -60,6 +61,8 @@ void home_service_get_snapshot(home_snapshot_t *out)
     out->weather_icon_id = weather_snap.icon_id;
     out->claude_connected = (claude_snap.conn_state == CLAUDE_CONN_CONNECTED);
     out->claude_unread = claude_snap.unread;
+    out->has_pending_prompt = claude_snap.has_pending_prompt;
+    out->has_pending_approval = device_link_get_pending_approval(NULL);
     out->claude_run_state = claude_snap.run_state;
     copy_text(out->claude_detail, sizeof(out->claude_detail), claude_snap.detail);
     copy_text(out->claude_emotion, sizeof(out->claude_emotion), claude_snap.emotion);

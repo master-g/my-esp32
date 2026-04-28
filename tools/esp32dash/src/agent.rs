@@ -122,6 +122,7 @@ struct AgentState {
     sessions: BTreeMap<String, PersistedSessionState>,
     emotions: BTreeMap<String, SessionEmotionEntry>,
     last_heartbeat_ts: u64,
+    has_pending_prompt: bool,
 }
 
 impl AgentState {
@@ -135,6 +136,7 @@ impl AgentState {
             sessions,
             emotions: BTreeMap::new(),
             last_heartbeat_ts: 0,
+            has_pending_prompt: false,
         }
     }
 }
@@ -558,6 +560,14 @@ impl AppState {
     }
 
     async fn sync_device_approvals(self: &Arc<Self>) {
+        let has_pending_prompt = self.prompts.has_device_backlog().await;
+        {
+            let mut guard = self.state.lock().await;
+            if guard.has_pending_prompt != has_pending_prompt {
+                guard.has_pending_prompt = has_pending_prompt;
+            }
+        }
+
         if !self.serial_status().connected {
             self.approvals.note_device_disconnected().await;
             self.prompts.note_device_disconnected().await;
@@ -611,25 +621,6 @@ impl AppState {
             );
             return;
         }
-
-        let Some(prompt) = self.prompts.claim_next_for_device().await else {
-            return;
-        };
-
-        if let Err(err) = self.send_device_prompt_request(&prompt) {
-            warn!(
-                prompt_id = prompt.id,
-                error = %err,
-                "failed to forward queued prompt to device"
-            );
-            return;
-        }
-
-        info!(
-            prompt_id = prompt.id,
-            prompt_kind = prompt.prompt.kind.as_str(),
-            "forwarded queued prompt to device"
-        );
     }
 
     fn send_device_approval_request(&self, approval: &DeviceApproval) -> Result<()> {
@@ -684,7 +675,8 @@ fn finalize_guard_state(
     fallback_ts: u64,
     sessions_changed: bool,
 ) -> (Option<PersistedState>, Option<Snapshot>) {
-    let next_snapshot = select_display_snapshot(&guard.sessions, fallback_ts);
+    let mut next_snapshot = select_display_snapshot(&guard.sessions, fallback_ts);
+    next_snapshot.has_pending_prompt = guard.has_pending_prompt;
     let mut snapshot_to_send = None;
     let snapshot_changed = !materially_equal(&next_snapshot, &guard.snapshot);
 
@@ -1776,9 +1768,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
+        // Prompt no longer sent as device_link event; state synced via snapshot
         let prompt_ids = prompt_request_ids(&writes);
-        assert_eq!(prompt_ids.len(), 1);
-        assert!(has_prompt_dismiss(&writes, &prompt_ids[0]));
+        assert_eq!(prompt_ids.len(), 0);
 
         Ok(())
     }
@@ -1859,12 +1851,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
+        // Prompt no longer sent as device_link event; only approval is forwarded
         let prompt_ids = prompt_request_ids(&writes);
-        assert_eq!(prompt_ids.len(), 2);
-        assert_eq!(prompt_ids[0], prompt_ids[1]);
+        assert_eq!(prompt_ids.len(), 0);
         let approval_ids = approval_request_ids(&writes);
         assert_eq!(approval_ids, vec!["approval-1".to_string()]);
-        assert!(has_prompt_dismiss(&writes, &prompt_ids[0]));
 
         Ok(())
     }

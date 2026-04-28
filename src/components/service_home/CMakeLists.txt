@@ -4,6 +4,7 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
+        device_link
         net_manager
         service_claude
         service_time

@@ -351,6 +351,36 @@ enum ChibiCommand {
         #[arg(long, help = "Serial port (default: autodiscover or running agent)")]
         port: Option<String>,
     },
+    #[command(
+        about = "Send a test approval request to the device via serial",
+        long_about = "Sends claude.approval.request directly to the device and blocks for a response. Use --clear to dismiss instead."
+    )]
+    Approval {
+        #[arg(long, default_value = "Bash", help = "Tool name to show")]
+        tool: String,
+        #[arg(long, default_value = "rm -rf /tmp/test", help = "Description to show")]
+        input: String,
+        #[arg(long, help = "Dismiss the approval instead of sending a request")]
+        clear: bool,
+        #[arg(long, help = "Serial port (default: autodiscover)")]
+        port: Option<String>,
+    },
+    #[command(
+        about = "Send a test prompt request to the device via serial",
+        long_about = "Sends claude.prompt.request directly to the device (non-blocking). Use --clear to dismiss instead."
+    )]
+    Prompt {
+        #[arg(long, default_value = "Execute,Cancel", help = "Comma-separated option labels")]
+        options: String,
+        #[arg(long, default_value = "Test prompt question?", help = "Question text")]
+        question: String,
+        #[arg(long, default_value = "Test Prompt", help = "Title text")]
+        title: String,
+        #[arg(long, help = "Dismiss the prompt instead of sending a request")]
+        clear: bool,
+        #[arg(long, help = "Serial port (default: autodiscover)")]
+        port: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -650,6 +680,89 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             );
             Ok(())
         }
+        ChibiCommand::Approval {
+            tool,
+            input,
+            clear,
+            port,
+        } => {
+            if clear {
+                send_protocol_event_direct(
+                    Arc::new(UnixSerialFactory),
+                    port.as_deref(),
+                    compat::serial_baud(),
+                    "claude.approval.dismiss",
+                    json!({
+                        "id": "chibi-approval-test",
+                    }),
+                )?;
+                println!("sent approval dismiss");
+                Ok(())
+            } else {
+                println!("sending approval request: tool={tool} input=\"{input}\"");
+                println!("waiting for user to tap a button on the device...");
+                let rpc = RpcRequest {
+                    method: "claude.approve".into(),
+                    params: json!({
+                        "id": "chibi-approval-test",
+                        "tool_name": tool,
+                        "description": input,
+                    }),
+                };
+                let app_config = AppConfig::load().unwrap_or_default();
+                let result = request_direct_with_timeout(
+                    Arc::new(UnixSerialFactory),
+                    port.as_deref(),
+                    compat::serial_baud(),
+                    rpc,
+                    std::time::Duration::from_secs(app_config.approval.timeout_secs),
+                )?;
+                let decision = result.get("decision").and_then(|v| v.as_str()).unwrap_or("unknown");
+                println!("device responded: decision={decision}");
+                Ok(())
+            }
+        }
+        ChibiCommand::Prompt {
+            options,
+            question,
+            title,
+            clear,
+            port,
+        } => {
+            if clear {
+                send_protocol_event_direct(
+                    Arc::new(UnixSerialFactory),
+                    port.as_deref(),
+                    compat::serial_baud(),
+                    "claude.prompt.dismiss",
+                    json!({
+                        "id": "chibi-prompt-test",
+                    }),
+                )?;
+                println!("sent prompt dismiss");
+                Ok(())
+            } else {
+                let option_labels: Vec<String> = options.split(',').map(|s| s.trim().to_string()).collect();
+                let option_count = option_labels.len();
+                println!("sending prompt request: title=\"{title}\" question=\"{question}\"");
+                send_protocol_event_direct(
+                    Arc::new(UnixSerialFactory),
+                    port.as_deref(),
+                    compat::serial_baud(),
+                    "claude.prompt.request",
+                    json!({
+                        "id": "chibi-prompt-test",
+                        "title": title,
+                        "question": question,
+                        "options_text": options,
+                        "option_count": option_count,
+                        "option_labels": option_labels,
+                    }),
+                )?;
+                println!("sent prompt request (non-blocking)");
+                Ok(())
+            }
+        }
     }
 }
 
@@ -699,6 +812,7 @@ fn build_test_snapshot(
         ts: now_epoch(),
         unread,
         attention,
+        has_pending_prompt: false,
     }
 }
 

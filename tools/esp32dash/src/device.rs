@@ -1116,6 +1116,7 @@ mod tests {
                 ts: 1,
                 unread: true,
                 attention: Attention::Medium,
+                has_pending_prompt: false,
             },
         )
         .unwrap();

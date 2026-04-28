@@ -123,6 +123,24 @@ claude_conn_state_t claude_service_get_conn_state(void)
     return state;
 }
 
+void claude_service_set_pending_prompt(bool pending)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_snapshot.has_pending_prompt = pending;
+    xSemaphoreGive(s_mutex);
+    publish_claude_event();
+}
+
+bool claude_service_get_pending_prompt(void)
+{
+    bool pending;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    pending = s_snapshot.has_pending_prompt;
+    xSemaphoreGive(s_mutex);
+    return pending;
+}
+
 bool claude_service_check_staleness(void)
 {
     bool became_stale = false;

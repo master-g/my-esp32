@@ -157,6 +157,8 @@ pub struct Snapshot {
     pub ts: u64,
     pub unread: bool,
     pub attention: Attention,
+    #[serde(default)]
+    pub has_pending_prompt: bool,
 }
 
 impl Snapshot {
@@ -175,6 +177,7 @@ impl Snapshot {
             ts,
             unread: false,
             attention: Attention::Low,
+            has_pending_prompt: false,
         }
     }
 }

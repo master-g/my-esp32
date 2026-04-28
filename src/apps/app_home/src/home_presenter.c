@@ -158,9 +158,22 @@ void home_presenter_build(home_present_model_t *out, const home_snapshot_t *snap
     }
     out->sprite_state = map_run_state(snapshot->claude_run_state, snapshot->claude_connected);
     out->sprite_emotion = emotion_from_text(snapshot->claude_emotion);
-    out->bubble_visible =
-        snapshot->claude_detail[0] != '\0' && out->sprite_state != SPRITE_STATE_SLEEPING;
-    snprintf(out->bubble_text, sizeof(out->bubble_text), "%s", snapshot->claude_detail);
+
+    if (snapshot->has_pending_approval) {
+        out->sprite_state = SPRITE_STATE_WORKING;
+        out->sprite_emotion = SPRITE_EMOTION_NEUTRAL;
+        out->bubble_visible = true;
+        snprintf(out->bubble_text, sizeof(out->bubble_text), "Need permission");
+    } else if (snapshot->has_pending_prompt) {
+        out->sprite_state = SPRITE_STATE_WAITING;
+        out->sprite_emotion = SPRITE_EMOTION_NEUTRAL;
+        out->bubble_visible = true;
+        snprintf(out->bubble_text, sizeof(out->bubble_text), "Need input");
+    } else {
+        out->bubble_visible =
+            snapshot->claude_detail[0] != '\0' && out->sprite_state != SPRITE_STATE_SLEEPING;
+        snprintf(out->bubble_text, sizeof(out->bubble_text), "%s", snapshot->claude_detail);
+    }
 
     if (snapshot->time_text[0] != '\0' && snapshot->time_text[0] != '-') {
         memcpy(out->screensaver_time_text, snapshot->time_text, 5);
