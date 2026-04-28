@@ -33,7 +33,6 @@ pub const PROTOCOL_PREFIX: &str = "@esp32dash ";
 const MAX_LINE_BUFFER: usize = 4096;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(2);
-const RPC_TIMEOUT_APPROVAL: Duration = Duration::from_secs(310);
 const RPC_TIMEOUT_SCREENSHOT_START: Duration = Duration::from_secs(10);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -59,6 +58,7 @@ pub trait SessionFactory: Send + Sync {
 pub struct DeviceConfig {
     pub preferred_port: Option<String>,
     pub baud: u32,
+    pub rpc_timeout_approval: Duration,
 }
 
 enum WorkerCommand {
@@ -78,6 +78,10 @@ pub enum DeviceEvent {
     ApprovalResolved {
         id: String,
         decision: ApprovalDecision,
+    },
+    PromptResolved {
+        id: String,
+        selection_index: u8,
     },
 }
 
@@ -322,7 +326,7 @@ fn worker_loop(
                             reply,
                         }) => {
                             let timeout = if request.method == "claude.approve" {
-                                RPC_TIMEOUT_APPROVAL
+                                config.rpc_timeout_approval
                             } else {
                                 RPC_TIMEOUT
                             };
@@ -708,25 +712,35 @@ fn send_named_event(session: &mut dyn DeviceSession, method: &str, payload: Valu
 }
 
 fn parse_device_event(method: &str, payload: &Value) -> Option<DeviceEvent> {
-    if method != "claude.approval.resolved" {
-        return None;
-    }
+    match method {
+        "claude.approval.resolved" => {
+            let id = payload.get("id")?.as_str()?.to_string();
+            let decision = match payload.get("decision")?.as_str()? {
+                "allow" => ApprovalDecision::Allow,
+                "deny" => ApprovalDecision::Deny,
+                "allow_always" | "yolo" => ApprovalDecision::AllowAlways,
+                other => {
+                    warn!(decision = other, "ignoring unknown approval decision from device");
+                    return None;
+                }
+            };
 
-    let id = payload.get("id")?.as_str()?.to_string();
-    let decision = match payload.get("decision")?.as_str()? {
-        "allow" => ApprovalDecision::Allow,
-        "deny" => ApprovalDecision::Deny,
-        "yolo" => ApprovalDecision::Yolo,
-        other => {
-            warn!(decision = other, "ignoring unknown approval decision from device");
-            return None;
+            Some(DeviceEvent::ApprovalResolved { id, decision })
         }
-    };
+        "claude.prompt.response" => {
+            let id = payload.get("id")?.as_str()?.to_string();
+            let selection_index = payload
+                .get("selection_index")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u8)?;
 
-    Some(DeviceEvent::ApprovalResolved {
-        id,
-        decision,
-    })
+            Some(DeviceEvent::PromptResolved {
+                id,
+                selection_index,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn set_connected(status: &Arc<Mutex<SerialConnectionStatus>>, port: &str, hello: &DeviceHello) {

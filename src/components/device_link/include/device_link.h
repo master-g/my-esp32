@@ -7,7 +7,7 @@
 typedef enum {
     APPROVAL_DECISION_ALLOW = 0,
     APPROVAL_DECISION_DENY,
-    APPROVAL_DECISION_YOLO,
+    APPROVAL_DECISION_ALLOW_ALWAYS,
 } approval_decision_t;
 
 typedef struct {
@@ -22,6 +22,8 @@ typedef struct {
     char title[40];
     char question[96];
     char options_text[120];
+    char option_labels[4][16]; // Individual option labels for button text
+    uint8_t option_count;
     bool pending;
 } prompt_request_t;
 
@@ -61,6 +63,12 @@ void device_link_dismiss_approval(void);
 /**
  * Clear a pending read-only prompt.
  */
+/**
+ * Submit a selection for the current pending prompt.
+ * Sends claude.prompt.response event with the selection index.
+ */
+void device_link_resolve_prompt(uint8_t selection_index);
+
 void device_link_dismiss_prompt(void);
 
 #endif

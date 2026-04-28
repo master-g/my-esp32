@@ -1,9 +1,11 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
-use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, Notify};
 
 use crate::model::{LocalHookEvent, WaitingPrompt, WaitingPromptKind};
 
@@ -21,13 +23,48 @@ pub struct DismissedPrompt {
     pub was_visible_on_device: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptStatus {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub question: String,
+    pub resolved: bool,
+    pub selection_index: Option<u8>,
+    pub dismissed: bool,
+    pub timed_out: bool,
+}
+
 #[derive(Debug)]
 struct Entry {
     transport_id: String,
     prompt: WaitingPrompt,
     session_id: String,
     tool_use_id: Option<String>,
+    resolution: Option<PromptResolution>,
+    created: Instant,
+    notify: Arc<Notify>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptResolution {
+    pub selection_index: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptError {
+    Timeout,
+}
+
+impl std::fmt::Display for PromptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptError::Timeout => write!(f, "prompt timed out"),
+        }
+    }
+}
+
+impl std::error::Error for PromptError {}
 
 #[derive(Debug, Default)]
 struct State {
@@ -39,12 +76,22 @@ struct State {
 #[derive(Debug, Clone)]
 pub struct PromptStore {
     inner: Arc<Mutex<State>>,
+    timeout: Duration,
 }
 
 impl PromptStore {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(State::default())),
+            timeout: Duration::from_secs(600),
+        }
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(State::default())),
+            timeout,
         }
     }
 
@@ -61,6 +108,9 @@ impl PromptStore {
             prompt,
             session_id,
             tool_use_id,
+            resolution: None,
+            created: Instant::now(),
+            notify: Arc::new(Notify::new()),
         };
         let mut guard = self.inner.lock().await;
         remove_existing_locked(&mut guard, &id);
@@ -75,7 +125,12 @@ impl PromptStore {
         let ids: Vec<String> = guard
             .entries
             .iter()
-            .filter_map(|(id, entry)| matches_event(entry, event).then_some(id.clone()))
+            .filter_map(|(id, entry)| {
+                if is_entry_expired(entry, self.timeout) {
+                    return None;
+                }
+                matches_event(entry, event).then_some(id.clone())
+            })
             .collect();
 
         if ids.is_empty() {
@@ -102,14 +157,14 @@ impl PromptStore {
         if dismissed.iter().any(|prompt| prompt.was_visible_on_device) {
             guard.device_visible = None;
         }
-        normalize_visible_locked(&mut guard);
+        normalize_visible_locked(&mut guard, self.timeout);
         dismissed
     }
 
     pub async fn claim_next_for_device(&self) -> Option<DevicePrompt> {
         let mut guard = self.inner.lock().await;
-        retain_pending_order_locked(&mut guard);
-        normalize_visible_locked(&mut guard);
+        retain_pending_order_locked(&mut guard, self.timeout);
+        normalize_visible_locked(&mut guard, self.timeout);
 
         if guard.device_visible.is_some() {
             return None;
@@ -118,6 +173,9 @@ impl PromptStore {
         let id = guard.pending_order.front()?.clone();
         let prompt = {
             let entry = guard.entries.get(&id)?;
+            if is_entry_expired(entry, self.timeout) {
+                return None;
+            }
             DevicePrompt {
                 id: id.clone(),
                 transport_id: entry.transport_id.clone(),
@@ -146,20 +204,169 @@ impl PromptStore {
 
     pub async fn has_device_backlog(&self) -> bool {
         let mut guard = self.inner.lock().await;
-        retain_pending_order_locked(&mut guard);
-        normalize_visible_locked(&mut guard);
+        retain_pending_order_locked(&mut guard, self.timeout);
+        normalize_visible_locked(&mut guard, self.timeout);
         guard.device_visible.is_some() || !guard.pending_order.is_empty()
+    }
+
+    pub async fn take_expired_visible_for_device(&self) -> Option<DismissedPrompt> {
+        let mut guard = self.inner.lock().await;
+        let expired_visible = guard.device_visible.as_ref().and_then(|id| {
+            let entry = guard.entries.get(id)?;
+            if entry.resolution.is_some() || !is_entry_expired(entry, self.timeout) {
+                return None;
+            }
+
+            Some(DismissedPrompt {
+                id: id.clone(),
+                transport_id: entry.transport_id.clone(),
+                was_visible_on_device: true,
+            })
+        });
+
+        if expired_visible.is_some() {
+            guard.device_visible = None;
+        }
+
+        retain_pending_order_locked(&mut guard, self.timeout);
+        normalize_visible_locked(&mut guard, self.timeout);
+        expired_visible
+    }
+
+    pub async fn resolve(&self, transport_id: &str, selection_index: u8) -> Option<String> {
+        let mut guard = self.inner.lock().await;
+        let (id, entry) = guard
+            .entries
+            .iter_mut()
+            .find(|(_, entry)| entry.transport_id == transport_id)?;
+        let id = id.clone();
+
+        if entry.resolution.is_some() || is_entry_expired(entry, self.timeout) {
+            return None;
+        }
+
+        entry.resolution = Some(PromptResolution { selection_index });
+        entry.notify.notify_waiters();
+        guard.pending_order.retain(|pending_id| pending_id != &id);
+        if guard.device_visible.as_deref() == Some(id.as_str()) {
+            guard.device_visible = None;
+        }
+
+        Some(id)
+    }
+
+    pub async fn status(&self, id: &str) -> Option<PromptStatus> {
+        let guard = self.inner.lock().await;
+        guard.entries.get(id).map(|entry| {
+            let resolved = entry.resolution.is_some();
+            let timed_out = entry.resolution.is_none() && is_entry_expired(entry, self.timeout);
+            let selection_index = entry.resolution.map(|r| r.selection_index);
+            PromptStatus {
+                id: id.to_string(),
+                kind: entry.prompt.kind.as_str().to_string(),
+                title: entry.prompt.title.clone(),
+                question: entry.prompt.question.clone(),
+                resolved: resolved || timed_out,
+                selection_index,
+                dismissed: false,
+                timed_out,
+            }
+        })
+    }
+
+    pub async fn wait_for_selection(
+        &self,
+        id: &str,
+        poll_interval: Duration,
+    ) -> Result<PromptResolution, PromptError> {
+        loop {
+            let notify = {
+                let guard = self.inner.lock().await;
+                let entry = guard.entries.get(id).ok_or(PromptError::Timeout)?;
+                if let Some(resolution) = entry.resolution {
+                    return Ok(resolution);
+                }
+                if is_entry_expired(entry, self.timeout) {
+                    return Err(PromptError::Timeout);
+                }
+                entry.notify.clone()
+            };
+
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+
+    pub async fn cleanup_expired(&self) -> Vec<DismissedPrompt> {
+        let mut guard = self.inner.lock().await;
+        let visible_id = guard.device_visible.clone();
+        let expired_ids: Vec<String> = guard
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                if entry.resolution.is_none() && is_entry_expired(entry, self.timeout) {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if expired_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let dismissed: Vec<DismissedPrompt> = expired_ids
+            .iter()
+            .filter_map(|id| {
+                let entry = guard.entries.get(id)?;
+                Some(DismissedPrompt {
+                    id: id.clone(),
+                    transport_id: entry.transport_id.clone(),
+                    was_visible_on_device: visible_id.as_deref() == Some(id.as_str()),
+                })
+            })
+            .collect();
+
+        for id in &expired_ids {
+            guard.entries.remove(id);
+        }
+        guard
+            .pending_order
+            .retain(|id| !expired_ids.contains(id));
+
+        if dismissed.iter().any(|p| p.was_visible_on_device) {
+            guard.device_visible = None;
+        }
+
+        dismissed
     }
 }
 
-fn retain_pending_order_locked(state: &mut State) {
-    let entries = &state.entries;
-    state.pending_order.retain(|id| entries.contains_key(id));
+fn is_entry_expired(entry: &Entry, timeout: Duration) -> bool {
+    entry.created.elapsed() > timeout
 }
 
-fn normalize_visible_locked(state: &mut State) {
-    let clear_visible =
-        state.device_visible.as_ref().is_some_and(|id| !state.entries.contains_key(id));
+fn retain_pending_order_locked(state: &mut State, timeout: Duration) {
+    let entries = &state.entries;
+    state.pending_order.retain(|id| {
+        matches!(
+            entries.get(id),
+            Some(entry) if entry.resolution.is_none() && !is_entry_expired(entry, timeout)
+        )
+    });
+}
+
+fn normalize_visible_locked(state: &mut State, timeout: Duration) {
+    let clear_visible = state.device_visible.as_ref().is_some_and(|id| {
+        !matches!(
+            state.entries.get(id),
+            Some(entry) if entry.resolution.is_none() && !is_entry_expired(entry, timeout)
+        )
+    });
+
     if clear_visible {
         state.device_visible = None;
     }
@@ -172,6 +379,7 @@ fn remove_existing_locked(state: &mut State, id: &str) {
         state.device_visible = None;
     }
 }
+
 
 fn matches_event(entry: &Entry, event: &LocalHookEvent) -> bool {
     if entry.session_id.is_empty() || event.session_id.is_empty() {
@@ -322,5 +530,85 @@ mod tests {
             .await;
         assert!(dismissed.is_empty());
         assert!(store.has_device_backlog().await);
+    }
+
+    #[tokio::test]
+    async fn prompt_times_out_and_is_cleaned_up() {
+        let store = PromptStore::with_timeout(Duration::from_millis(50));
+        store
+            .submit(
+                "prompt-1".into(),
+                "prompt-transport-1".into(),
+                prompt(WaitingPromptKind::Elicitation, "Awaiting input"),
+                "sess-1".into(),
+                None,
+            )
+            .await;
+
+        // Claim it for device
+        let claimed = store.claim_next_for_device().await.unwrap();
+        assert_eq!(claimed.id, "prompt-1");
+
+        // Wait for timeout
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Should be able to claim again after cleanup
+        let cleaned = store.take_expired_visible_for_device().await.unwrap();
+        assert_eq!(cleaned.id, "prompt-1");
+        assert!(cleaned.was_visible_on_device);
+
+        // Backlog should be empty
+        assert!(!store.has_device_backlog().await);
+    }
+
+    #[tokio::test]
+    async fn wait_for_selection_returns_timeout_error() {
+        let store = PromptStore::with_timeout(Duration::from_millis(50));
+        store
+            .submit(
+                "prompt-1".into(),
+                "prompt-transport-1".into(),
+                prompt(WaitingPromptKind::Elicitation, "Awaiting input"),
+                "sess-1".into(),
+                None,
+            )
+            .await;
+
+        let result = store
+            .wait_for_selection("prompt-1", Duration::from_millis(10))
+            .await;
+        assert!(matches!(result, Err(PromptError::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_removes_old_prompts() {
+        let store = PromptStore::with_timeout(Duration::from_millis(50));
+        store
+            .submit(
+                "prompt-1".into(),
+                "prompt-transport-1".into(),
+                prompt(WaitingPromptKind::Elicitation, "First"),
+                "sess-1".into(),
+                None,
+            )
+            .await;
+        store
+            .submit(
+                "prompt-2".into(),
+                "prompt-transport-2".into(),
+                prompt(WaitingPromptKind::Elicitation, "Second"),
+                "sess-1".into(),
+                None,
+            )
+            .await;
+
+        // Wait for timeout
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let dismissed = store.cleanup_expired().await;
+        assert_eq!(dismissed.len(), 2);
+
+        // Should not be in backlog anymore
+        assert!(!store.has_device_backlog().await);
     }
 }

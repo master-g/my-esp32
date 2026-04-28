@@ -18,6 +18,10 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 pub const DEFAULT_EMOTION_TIMEOUT_SECS: u64 = 3;
 pub const DEFAULT_EMOTION_MAX_TOKENS: u32 = 256;
 
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
+pub const DEFAULT_ELICITATION_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_QUESTION_TIMEOUT_SECS: u64 = 180;
+
 const APP_DIR_NAME: &str = "esp32dash";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -28,6 +32,7 @@ pub struct AppConfig {
     pub serial_port: Option<String>,
     pub serial_baud: Option<u32>,
     pub emotion: EmotionConfig,
+    pub approval: ApprovalConfig,
 }
 
 impl Default for AppConfig {
@@ -38,6 +43,7 @@ impl Default for AppConfig {
             serial_port: None,
             serial_baud: None,
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         }
     }
 }
@@ -90,6 +96,23 @@ impl EmotionConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalConfig {
+    pub timeout_secs: u64,
+    pub elicitation_timeout_secs: u64,
+    pub question_timeout_secs: u64,
+}
+
+impl Default for ApprovalConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
+            elicitation_timeout_secs: DEFAULT_ELICITATION_TIMEOUT_SECS,
+            question_timeout_secs: DEFAULT_QUESTION_TIMEOUT_SECS,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct FileAppConfig {
     #[serde(default)]
@@ -102,6 +125,8 @@ struct FileAppConfig {
     serial_baud: Option<u32>,
     #[serde(default)]
     emotion: FileEmotionConfig,
+    #[serde(default)]
+    approval: FileApprovalConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -118,6 +143,16 @@ struct FileEmotionConfig {
     timeout_secs: Option<u64>,
     #[serde(default)]
     max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileApprovalConfig {
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    elicitation_timeout_secs: Option<u64>,
+    #[serde(default)]
+    question_timeout_secs: Option<u64>,
 }
 
 impl AppConfig {
@@ -255,11 +290,19 @@ fn default_config_template() -> String {
          # model = \"claude-haiku-4-5-20251001\"\n\
          # api_key = \"replace-me\"\n\
          timeout_secs = {}\n\
-         max_tokens = {}\n",
+         max_tokens = {}\n\
+         \n\
+         [approval]\n\
+         # timeout_secs = {}          # PermissionRequest timeout (seconds)\n\
+         # elicitation_timeout_secs = {}  # Elicitation timeout (seconds)\n\
+         # question_timeout_secs = {}     # AskUserQuestion timeout (seconds)\n",
         compat::DEFAULT_ADMIN_ADDR,
         compat::DEFAULT_SERIAL_BAUD,
         DEFAULT_EMOTION_TIMEOUT_SECS,
         DEFAULT_EMOTION_MAX_TOKENS,
+        DEFAULT_APPROVAL_TIMEOUT_SECS,
+        DEFAULT_ELICITATION_TIMEOUT_SECS,
+        DEFAULT_QUESTION_TIMEOUT_SECS,
     )
 }
 
@@ -329,6 +372,16 @@ fn merge_file_config(resolved: &mut AppConfig, file: FileAppConfig) {
     }
     if let Some(max_tokens) = file.emotion.max_tokens {
         resolved.emotion.max_tokens = max_tokens;
+    }
+
+    if let Some(timeout_secs) = file.approval.timeout_secs {
+        resolved.approval.timeout_secs = timeout_secs;
+    }
+    if let Some(elicitation_timeout_secs) = file.approval.elicitation_timeout_secs {
+        resolved.approval.elicitation_timeout_secs = elicitation_timeout_secs;
+    }
+    if let Some(question_timeout_secs) = file.approval.question_timeout_secs {
+        resolved.approval.question_timeout_secs = question_timeout_secs;
     }
 }
 

@@ -436,8 +436,8 @@ static void send_approval_rpc_response(const char *rpc_id, approval_decision_t d
 
     if (decision == APPROVAL_DECISION_ALLOW) {
         decision_str = "allow";
-    } else if (decision == APPROVAL_DECISION_YOLO) {
-        decision_str = "yolo";
+    } else if (decision == APPROVAL_DECISION_ALLOW_ALWAYS) {
+        decision_str = "allow_always";
     }
 
     result = cJSON_CreateObject();
@@ -550,7 +550,8 @@ static esp_err_t set_pending_approval(const cJSON *req_id, const cJSON *tool, co
 }
 
 static esp_err_t set_pending_prompt(const cJSON *req_id, const cJSON *title, const cJSON *question,
-                                    const cJSON *options_text)
+                                    const cJSON *options_text, const cJSON *option_count,
+                                    const cJSON *option_labels)
 {
     ESP_RETURN_ON_FALSE(cJSON_IsString(req_id) && req_id->valuestring != NULL, ESP_ERR_INVALID_ARG,
                         TAG, "prompt request missing id");
@@ -572,6 +573,19 @@ static esp_err_t set_pending_prompt(const cJSON *req_id, const cJSON *title, con
     if (cJSON_IsString(options_text)) {
         strlcpy(s_prompt_req.options_text, options_text->valuestring,
                 sizeof(s_prompt_req.options_text));
+    }
+    if (cJSON_IsNumber(option_count)) {
+        s_prompt_req.option_count = (uint8_t)option_count->valueint;
+    }
+    if (cJSON_IsArray(option_labels)) {
+        int array_size = cJSON_GetArraySize(option_labels);
+        for (int i = 0; i < array_size && i < 4; i++) {
+            cJSON *label = cJSON_GetArrayItem(option_labels, i);
+            if (cJSON_IsString(label) && label->valuestring != NULL) {
+                strlcpy(s_prompt_req.option_labels[i], label->valuestring,
+                        sizeof(s_prompt_req.option_labels[i]));
+            }
+        }
     }
     s_prompt_req.pending = true;
     (void)xSemaphoreGive(s_state_mutex);
@@ -1230,10 +1244,13 @@ static void handle_event_frame(const cJSON *root)
         const cJSON *title = cJSON_GetObjectItemCaseSensitive(payload, "title");
         const cJSON *question = cJSON_GetObjectItemCaseSensitive(payload, "question");
         const cJSON *options_text = cJSON_GetObjectItemCaseSensitive(payload, "options_text");
+        const cJSON *option_count = cJSON_GetObjectItemCaseSensitive(payload, "option_count");
         const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
         esp_err_t err;
 
-        err = set_pending_prompt(req_id, title, question, options_text);
+        const cJSON *option_labels = cJSON_GetObjectItemCaseSensitive(payload, "option_labels");
+        err =
+            set_pending_prompt(req_id, title, question, options_text, option_count, option_labels);
         if (err == ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "prompt request ignored because approval is pending");
             return;
@@ -1733,8 +1750,8 @@ void device_link_resolve_approval(approval_decision_t decision)
 
         if (decision == APPROVAL_DECISION_ALLOW) {
             decision_str = "allow";
-        } else if (decision == APPROVAL_DECISION_YOLO) {
-            decision_str = "yolo";
+        } else if (decision == APPROVAL_DECISION_ALLOW_ALWAYS) {
+            decision_str = "allow_always";
         }
 
         if (payload != NULL) {
@@ -1746,6 +1763,32 @@ void device_link_resolve_approval(approval_decision_t decision)
     }
 
     xSemaphoreGive(s_approval_sem);
+}
+
+void device_link_resolve_prompt(uint8_t selection_index)
+{
+    char prompt_id[sizeof(s_prompt_req.id)] = {0};
+    cJSON *payload = NULL;
+
+    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (!s_prompt_req.pending) {
+        (void)xSemaphoreGive(s_state_mutex);
+        return;
+    }
+    strlcpy(prompt_id, s_prompt_req.id, sizeof(prompt_id));
+    reset_prompt_state_locked();
+
+    // Construct payload while holding mutex to prevent race conditions
+    payload = cJSON_CreateObject();
+    if (payload != NULL) {
+        cJSON_AddStringToObject(payload, "id", prompt_id);
+        cJSON_AddNumberToObject(payload, "selection_index", selection_index);
+    }
+    (void)xSemaphoreGive(s_state_mutex);
+
+    if (payload != NULL) {
+        send_event_frame("claude.prompt.response", payload);
+    }
 }
 
 void device_link_cancel_approval(void)

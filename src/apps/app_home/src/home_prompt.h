@@ -11,6 +11,9 @@ typedef struct {
     lv_obj_t *question_label;
     lv_obj_t *options_label;
     lv_obj_t *hint_label;
+    lv_obj_t *btn_row;
+    lv_obj_t *option_btns[4];
+    uint8_t option_count;
 } home_prompt_t;
 
 void home_prompt_create(home_prompt_t *prompt, lv_obj_t *root);

@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 use crate::{
     approvals::{ApprovalRequest, ApprovalStore, DeviceApproval, DismissedApproval},
     compat,
-    config::{AppConfig, EmotionConfig, default_state_dir},
+    config::{AppConfig, ApprovalConfig, EmotionConfig, default_state_dir},
     device::{DeviceConfig, DeviceEvent, DeviceManager, SessionFactory, UnixSerialFactory},
     emotion::{Emotion, EmotionAnalysis, EmotionAnalyzer},
     emotion_state::EmotionState,
@@ -39,7 +39,7 @@ use crate::{
     prompts::{DevicePrompt, DismissedPrompt, PromptStore},
     text_sanitize::{
         sanitize_approval_summary, sanitize_permission_mode, sanitize_snapshot_detail,
-        sanitize_tool_name, sanitize_transport_id,
+        sanitize_snapshot_title, sanitize_tool_name, sanitize_transport_id,
     },
 };
 
@@ -60,6 +60,7 @@ pub struct Config {
     pub state_path: PathBuf,
     pub device: DeviceConfig,
     pub emotion: EmotionConfig,
+    pub approval: ApprovalConfig,
 }
 
 impl Config {
@@ -88,8 +89,10 @@ impl Config {
             device: DeviceConfig {
                 preferred_port: compat::serial_port().or_else(|| app_config.serial_port.clone()),
                 baud: resolved_serial_baud(compat::serial_baud_env(), app_config.serial_baud),
+                rpc_timeout_approval: Duration::from_secs(app_config.approval.timeout_secs + 10),
             },
             emotion: app_config.emotion.clone(),
+            approval: app_config.approval.clone(),
         })
     }
 }
@@ -648,6 +651,12 @@ impl AppState {
     }
 
     fn send_device_prompt_request(&self, prompt: &DevicePrompt) -> Result<()> {
+        let option_labels: Vec<String> = prompt
+            .prompt
+            .options
+            .iter()
+            .map(|o| o.label.clone())
+            .collect();
         self.device_manager.send_protocol_event(
             "claude.prompt.request",
             serde_json::json!({
@@ -656,6 +665,8 @@ impl AppState {
                 "title": prompt.prompt.title,
                 "question": prompt.prompt.question,
                 "options_text": format_prompt_options_text(&prompt.prompt),
+                "option_count": prompt.prompt.options.len(),
+                "option_labels": option_labels,
             }),
         )
     }
@@ -977,6 +988,8 @@ struct SubmitApprovalBody {
     session_id: String,
     #[serde(default)]
     tool_use_id: Option<String>,
+    #[serde(default)]
+    permission_suggestions: Vec<serde_json::Value>,
 }
 
 fn default_permission_mode() -> String {
@@ -1007,6 +1020,7 @@ async fn post_approval(
             .tool_use_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        permission_suggestions: body.permission_suggestions,
     };
     let state = Arc::new(state);
     let id = state.approvals.submit(body.id, transport_id, request.clone()).await;
@@ -1033,6 +1047,72 @@ async fn get_approval(
             Json(serde_json::json!({
                 "ok": false,
                 "error": "approval not found",
+            })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmitPromptBody {
+    id: String,
+    kind: String,
+    title: String,
+    question: String,
+    #[serde(default)]
+    options: Vec<crate::model::WaitingPromptOption>,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    tool_use_id: Option<String>,
+}
+
+async fn post_prompt(
+    State(state): State<AppState>,
+    Json(body): Json<SubmitPromptBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let transport_id = sanitize_transport_id(&body.id);
+    let prompt = crate::model::WaitingPrompt {
+        kind: match body.kind.as_str() {
+            "elicitation" => crate::model::WaitingPromptKind::Elicitation,
+            _ => crate::model::WaitingPromptKind::AskUserQuestion,
+        },
+        title: sanitize_snapshot_title(&body.title),
+        question: sanitize_snapshot_detail(&body.question),
+        options: body.options.into_iter().take(4).collect(),
+    };
+    let id = state
+        .prompts
+        .submit(
+            body.id,
+            transport_id,
+            prompt,
+            body.session_id.trim().to_string(),
+            body.tool_use_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+        )
+        .await;
+    info!(prompt_id = id, "prompt submitted");
+    Arc::new(state).sync_device_approvals().await;
+
+    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+async fn get_prompt(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.prompts.status(&id).await {
+        Some(status) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "prompt": status,
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "prompt not found",
             })),
         ),
     }
@@ -1093,7 +1173,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
         .map(|state| state.snapshot.clone())
         .unwrap_or_else(|| Snapshot::empty(now_epoch()));
     let initial_sessions = restored_sessions(persisted.as_ref(), &initial_snapshot);
-    let approvals = ApprovalStore::new();
+    let approvals = ApprovalStore::with_timeout(Duration::from_secs(config.approval.timeout_secs));
     let prompts = PromptStore::new();
     let (device_event_tx, mut device_event_rx) = mpsc::unbounded_channel();
     let device_manager = DeviceManager::start(
@@ -1115,6 +1195,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
     };
 
     let approvals_for_device = app_state.approvals.clone();
+    let prompts_for_device = app_state.prompts.clone();
     let approval_sync_state = Arc::new(app_state.clone());
     tokio::spawn(async move {
         while let Some(event) = device_event_rx.recv().await {
@@ -1131,6 +1212,21 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
                             approval_id = id,
                             ?decision,
                             "dropping approval result for unknown request"
+                        );
+                    }
+                }
+                DeviceEvent::PromptResolved {
+                    id,
+                    selection_index,
+                } => {
+                    if let Some(prompt_id) = prompts_for_device.resolve(&id, selection_index).await {
+                        info!(prompt_id, selection_index, "device resolved prompt");
+                        approval_sync_state.sync_device_approvals().await;
+                    } else {
+                        warn!(
+                            prompt_id = id,
+                            selection_index,
+                            "dropping prompt result for unknown request"
                         );
                     }
                 }
@@ -1187,6 +1283,8 @@ fn build_router(app_state: AppState) -> Router {
         .route("/v1/device/rpc", post(post_device_rpc))
         .route("/v1/claude/approvals", post(post_approval))
         .route("/v1/claude/approvals/{id}", get(get_approval))
+        .route("/v1/claude/prompts", post(post_prompt))
+        .route("/v1/claude/prompts/{id}", get(get_prompt))
         .with_state(app_state)
 }
 
@@ -1420,8 +1518,10 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
+                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         };
 
         let app_state = build_app_state(
@@ -1468,8 +1568,10 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
+                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         };
 
         let app_state = build_app_state(
@@ -1538,8 +1640,10 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
+                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         };
 
         let app_state = build_app_state(
@@ -1628,8 +1732,10 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
+                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         };
 
         let app_state = Arc::new(build_app_state(
@@ -1692,8 +1798,10 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
+                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         };
 
         let app_state = Arc::new(build_app_state(
@@ -1733,6 +1841,7 @@ mod tests {
                     permission_mode: "default".into(),
                     session_id: "sess-approval".into(),
                     tool_use_id: Some("tool-approve".into()),
+                    permission_suggestions: Vec::new(),
                 },
             )
             .await;
@@ -1774,8 +1883,10 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
+                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         };
 
         let app_state = build_app_state(
@@ -1858,8 +1969,10 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
+                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
         };
 
         let app_state = build_app_state(
@@ -1898,6 +2011,7 @@ mod tests {
                     permission_mode: "default".into(),
                     session_id: "sess-1".into(),
                     tool_use_id: Some("tool-1".into()),
+                    permission_suggestions: Vec::new(),
                 },
             )
             .await;
@@ -2009,8 +2123,10 @@ mod tests {
                 device: DeviceConfig {
                     preferred_port: Some("/dev/fake".into()),
                     baud: 115_200,
+                    rpc_timeout_approval: Duration::from_secs(310),
                 },
                 emotion: EmotionConfig::default(),
+                approval: ApprovalConfig::default(),
             },
             Arc::new(FakeFactory {
                 writes: Arc::new(Mutex::new(Vec::new())),

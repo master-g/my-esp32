@@ -250,11 +250,19 @@ fi
 # Read stdin so we can inspect and re-pipe it
 INPUT=$(cat)
 
-# PermissionRequest needs the blocking approve path
+# Route user-input events through the blocking respond path
 EVENT_NAME=$(printf '%s' "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+TOOL_NAME=$(printf '%s' "$INPUT" | grep -o '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 
-if [ "$EVENT_NAME" = "PermissionRequest" ]; then
-  printf '%s' "$INPUT" | exec "$BIN" claude approve --event-from-stdin
+IS_RESPOND_EVENT=0
+if [ "$EVENT_NAME" = "PermissionRequest" ] || [ "$EVENT_NAME" = "Elicitation" ]; then
+  IS_RESPOND_EVENT=1
+elif [ "$EVENT_NAME" = "PreToolUse" ] && printf '%s' "$TOOL_NAME" | grep -q "AskUserQuestion"; then
+  IS_RESPOND_EVENT=1
+fi
+
+if [ "$IS_RESPOND_EVENT" = "1" ]; then
+  printf '%s' "$INPUT" | exec "$BIN" claude respond --event-from-stdin
 else
   printf '%s' "$INPUT" | "$BIN" claude ingest --event-from-stdin
   exit 0

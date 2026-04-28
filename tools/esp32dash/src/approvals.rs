@@ -8,15 +8,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
 use crate::model::LocalHookEvent;
+use serde_json::Value;
 
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const APPROVAL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     Allow,
     Deny,
-    Yolo,
+    #[serde(alias = "yolo")]
+    AllowAlways,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +29,8 @@ pub struct ApprovalRequest {
     pub permission_mode: String,
     pub session_id: String,
     pub tool_use_id: Option<String>,
+    #[serde(default)]
+    pub permission_suggestions: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +42,8 @@ pub struct ApprovalStatus {
     pub resolved: bool,
     pub timed_out: bool,
     pub dismissed: bool,
+    #[serde(default)]
+    pub permission_suggestions: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,12 +87,22 @@ struct State {
 #[derive(Debug, Clone)]
 pub struct ApprovalStore {
     inner: Arc<Mutex<State>>,
+    timeout: Duration,
 }
 
 impl ApprovalStore {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(State::default())),
+            timeout: Duration::from_secs(300),
+        }
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(State::default())),
+            timeout,
         }
     }
 
@@ -118,7 +135,7 @@ impl ApprovalStore {
 
         {
             let entry = guard.entries.get_mut(&id)?;
-            if entry.resolution.is_some() || is_entry_expired(entry) {
+            if entry.resolution.is_some() || is_entry_expired(entry, self.timeout) {
                 return None;
             }
             entry.resolution = Some(ApprovalResolution::Decision(decision));
@@ -139,7 +156,7 @@ impl ApprovalStore {
         let visible_id = guard.device_visible.clone();
 
         for (id, entry) in guard.entries.iter_mut() {
-            if entry.resolution.is_some() || is_entry_expired(entry) {
+            if entry.resolution.is_some() || is_entry_expired(entry, self.timeout) {
                 continue;
             }
             if !matches_event(entry, event) {
@@ -158,14 +175,14 @@ impl ApprovalStore {
         if dismissed.iter().any(|approval| approval.was_visible_on_device) {
             guard.device_visible = None;
         }
-        retain_pending_order_locked(&mut guard);
+        retain_pending_order_locked(&mut guard, self.timeout);
         dismissed
     }
 
     pub async fn claim_next_for_device(&self) -> Option<DeviceApproval> {
         let mut guard = self.inner.lock().await;
-        retain_pending_order_locked(&mut guard);
-        normalize_visible_locked(&mut guard);
+        retain_pending_order_locked(&mut guard, self.timeout);
+        normalize_visible_locked(&mut guard, self.timeout);
 
         if guard.device_visible.is_some() {
             return None;
@@ -174,7 +191,7 @@ impl ApprovalStore {
         let id = guard.pending_order.front()?.clone();
         let approval = {
             let entry = guard.entries.get(&id)?;
-            if entry.resolution.is_some() || is_entry_expired(entry) {
+            if entry.resolution.is_some() || is_entry_expired(entry, self.timeout) {
                 return None;
             }
 
@@ -196,8 +213,8 @@ impl ApprovalStore {
 
     pub async fn has_device_backlog(&self) -> bool {
         let mut guard = self.inner.lock().await;
-        retain_pending_order_locked(&mut guard);
-        normalize_visible_locked(&mut guard);
+        retain_pending_order_locked(&mut guard, self.timeout);
+        normalize_visible_locked(&mut guard, self.timeout);
         guard.device_visible.is_some() || !guard.pending_order.is_empty()
     }
 
@@ -205,7 +222,7 @@ impl ApprovalStore {
         let mut guard = self.inner.lock().await;
         let expired_visible = guard.device_visible.as_ref().and_then(|id| {
             let entry = guard.entries.get(id)?;
-            if entry.resolution.is_some() || !is_entry_expired(entry) {
+            if entry.resolution.is_some() || !is_entry_expired(entry, self.timeout) {
                 return None;
             }
 
@@ -220,8 +237,8 @@ impl ApprovalStore {
             guard.device_visible = None;
         }
 
-        retain_pending_order_locked(&mut guard);
-        normalize_visible_locked(&mut guard);
+        retain_pending_order_locked(&mut guard, self.timeout);
+        normalize_visible_locked(&mut guard, self.timeout);
         expired_visible
     }
 
@@ -229,7 +246,7 @@ impl ApprovalStore {
     pub async fn status(&self, id: &str) -> Option<ApprovalStatus> {
         let guard = self.inner.lock().await;
         guard.entries.get(id).map(|entry| {
-            let timed_out = entry.resolution.is_none() && is_entry_expired(entry);
+            let timed_out = entry.resolution.is_none() && is_entry_expired(entry, self.timeout);
             let decision = match entry.resolution {
                 Some(ApprovalResolution::Decision(decision)) => Some(decision),
                 _ => None,
@@ -243,11 +260,13 @@ impl ApprovalStore {
                 resolved: entry.resolution.is_some() || timed_out,
                 timed_out,
                 dismissed,
+                permission_suggestions: entry.request.permission_suggestions.clone(),
             }
         })
     }
 
     /// Wait until the approval is resolved or times out. Returns the decision.
+    #[allow(dead_code)]
     pub async fn wait_for_decision(
         &self,
         id: &str,
@@ -262,7 +281,7 @@ impl ApprovalStore {
                     Some(ApprovalResolution::Dismissed) => return None,
                     None => {}
                 }
-                if is_entry_expired(entry) {
+                if is_entry_expired(entry, self.timeout) {
                     return None; // timed out
                 }
                 entry.notify.clone()
@@ -276,25 +295,25 @@ impl ApprovalStore {
     }
 }
 
-fn is_entry_expired(entry: &Entry) -> bool {
-    entry.created.elapsed() > APPROVAL_TIMEOUT
+fn is_entry_expired(entry: &Entry, timeout: Duration) -> bool {
+    entry.created.elapsed() > timeout
 }
 
-fn retain_pending_order_locked(state: &mut State) {
+fn retain_pending_order_locked(state: &mut State, timeout: Duration) {
     let entries = &state.entries;
     state.pending_order.retain(|id| {
         matches!(
             entries.get(id),
-            Some(entry) if entry.resolution.is_none() && !is_entry_expired(entry)
+            Some(entry) if entry.resolution.is_none() && !is_entry_expired(entry, timeout)
         )
     });
 }
 
-fn normalize_visible_locked(state: &mut State) {
+fn normalize_visible_locked(state: &mut State, timeout: Duration) {
     let clear_visible = state.device_visible.as_ref().is_some_and(|id| {
         !matches!(
             state.entries.get(id),
-            Some(entry) if entry.resolution.is_none() && !is_entry_expired(entry)
+            Some(entry) if entry.resolution.is_none() && !is_entry_expired(entry, timeout)
         )
     });
 
@@ -338,6 +357,7 @@ mod tests {
             permission_mode: "default".into(),
             session_id: session_id.into(),
             tool_use_id: Some(tool_use_id.into()),
+            permission_suggestions: Vec::new(),
         }
     }
 
@@ -492,7 +512,7 @@ mod tests {
         {
             let mut guard = store.inner.lock().await;
             let entry = guard.entries.get_mut("approve-1").unwrap();
-            entry.created = Instant::now() - APPROVAL_TIMEOUT - Duration::from_secs(1);
+            entry.created = Instant::now() - APPROVAL_TIMEOUT_DEFAULT - Duration::from_secs(1);
         }
 
         let expired = store.take_expired_visible_for_device().await.unwrap();

@@ -106,8 +106,8 @@ void home_approval_create(home_approval_t *approval, lv_obj_t *root)
                                               APPROVAL_DECISION_ALLOW);
     approval->btn_deny = create_approval_btn(btn_row, LV_SYMBOL_CLOSE, "Decline",
                                              APPROVE_DENY_COLOR, APPROVAL_DECISION_DENY);
-    approval->btn_yolo = create_approval_btn(btn_row, LV_SYMBOL_WARNING, "YOLO", APPROVE_YOLO_COLOR,
-                                             APPROVAL_DECISION_YOLO);
+    approval->btn_always = create_approval_btn(btn_row, LV_SYMBOL_REFRESH, "Always",
+                                               APPROVE_YOLO_COLOR, APPROVAL_DECISION_ALLOW_ALWAYS);
 }
 
 void home_approval_show_pending(home_approval_t *approval)

@@ -34,6 +34,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
     agent::Config,
+    config::AppConfig,
     device::{
         UnixSerialFactory, capture_screenshot_direct, discover_devices, open_direct_session,
         request_direct, request_direct_with_timeout, send_event_direct, send_protocol_event_direct,
@@ -52,6 +53,7 @@ use crate::{
 };
 
 static NEXT_APPROVAL_ID_SEQ: AtomicU64 = AtomicU64::new(1);
+static NEXT_PROMPT_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 const CHIBI_SCREENSAVER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -134,9 +136,10 @@ enum ClaudeCommand {
         event_from_stdin: bool,
     },
     #[command(
-        about = "Handle a PermissionRequest hook event: submit to agent, wait for device approval, output decision JSON"
+        about = "Handle a user-input hook event (PermissionRequest, Elicitation, AskUserQuestion): submit to agent, wait for device response, output decision JSON",
+        alias = "approve"
     )]
-    Approve {
+    Respond {
         #[arg(long, help = "Read the hook event payload from stdin")]
         event_from_stdin: bool,
     },
@@ -376,14 +379,14 @@ async fn main() -> Result<()> {
             ingest_from_stdin().await
         }
         Command::Claude {
-            command: ClaudeCommand::Approve {
+            command: ClaudeCommand::Respond {
                 event_from_stdin,
             },
         } => {
             if !event_from_stdin {
-                return Err(anyhow!("approve requires --event-from-stdin"));
+                return Err(anyhow!("respond requires --event-from-stdin"));
             }
-            approve_from_stdin().await
+            respond_from_stdin().await
         }
         Command::Device {
             command,
@@ -579,12 +582,13 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 }),
             };
 
+            let app_config = AppConfig::load().unwrap_or_default();
             let result = request_direct_with_timeout(
                 Arc::new(UnixSerialFactory),
                 port.as_deref(),
                 compat::serial_baud(),
                 rpc,
-                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(app_config.approval.timeout_secs),
             )?;
 
             let decision = result.get("decision").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -1222,7 +1226,7 @@ fn json_escape_path(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-async fn approve_from_stdin() -> Result<()> {
+async fn respond_from_stdin() -> Result<()> {
     let mut stdin = String::new();
     io::stdin().read_to_string(&mut stdin).context("failed to read stdin")?;
 
@@ -1234,10 +1238,27 @@ async fn approve_from_stdin() -> Result<()> {
         }
     };
 
+    let event_name = raw
+        .get("hook_event_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    match event_name {
+        "PermissionRequest" => handle_permission_request(&stdin, &raw).await,
+        "Elicitation" => handle_elicitation(&stdin, &raw).await,
+        "PreToolUse" => handle_ask_user_question(&stdin, &raw).await,
+        _ => {
+            debug!("respond: unknown event type {event_name}, falling through");
+            Ok(())
+        }
+    }
+}
+
+async fn handle_permission_request(stdin: &str, raw: &Value) -> Result<()> {
     let tool_name = raw.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
     let display_tool_name = sanitize_tool_name(&tool_name).unwrap_or_else(|| "unknown".into());
 
-    let tool_input_summary = summarize_tool_input(&raw);
+    let tool_input_summary = summarize_tool_input(raw);
 
     let permission_mode = raw
         .get("permission_mode")
@@ -1247,7 +1268,7 @@ async fn approve_from_stdin() -> Result<()> {
         .unwrap_or_else(|| "default".into());
 
     let approval_id = next_approval_id();
-    let event = serde_json::from_str::<RawHookInput>(&stdin).ok().map(sanitize_raw_event);
+    let event = serde_json::from_str::<RawHookInput>(stdin).ok().map(sanitize_raw_event);
 
     // Also ingest as a normal event so the dashboard updates
     if let Some(event) = event.as_ref() {
@@ -1260,6 +1281,12 @@ async fn approve_from_stdin() -> Result<()> {
             .await;
     }
 
+    let permission_suggestions = raw
+        .get("permission_suggestions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
     // Submit approval to agent
     let client = Client::new();
     let submit_response = client
@@ -1271,6 +1298,7 @@ async fn approve_from_stdin() -> Result<()> {
             "permission_mode": permission_mode,
             "session_id": event.as_ref().map(|value| value.session_id.as_str()).unwrap_or_default(),
             "tool_use_id": event.as_ref().and_then(|value| value.tool_use_id.as_deref()),
+            "permission_suggestions": permission_suggestions,
         }))
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -1291,7 +1319,8 @@ async fn approve_from_stdin() -> Result<()> {
 
     // Poll for decision
     let poll_interval = std::time::Duration::from_millis(500);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let app_config = AppConfig::load().unwrap_or_default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(app_config.approval.timeout_secs);
 
     loop {
         if std::time::Instant::now() > deadline {
@@ -1300,6 +1329,7 @@ async fn approve_from_stdin() -> Result<()> {
                 "deny",
                 &tool_name,
                 Some("Approval timed out on ESP32 dashboard"),
+                &[],
             );
             println!("{}", serde_json::to_string(&output)?);
             return Ok(());
@@ -1334,11 +1364,323 @@ async fn approve_from_stdin() -> Result<()> {
         }
 
         let decision = approval.get("decision").and_then(|v| v.as_str()).unwrap_or("deny");
+        let permission_suggestions = approval
+            .get("permission_suggestions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let output = permission_request_output_for_decision(
             decision,
             &tool_name,
             Some("Denied from ESP32 dashboard"),
+            &permission_suggestions,
         );
+
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+}
+
+async fn handle_elicitation(stdin: &str, raw: &Value) -> Result<()> {
+    let prompt = parse_elicitation_prompt_from_raw(raw);
+    let app_config = AppConfig::load().unwrap_or_default();
+
+    // Check for form mode (complex schema that can't be rendered on device)
+    // Decline any schema with type: object — catches allOf, anyOf, oneOf compositions too
+    let is_form_mode = raw
+        .get("requested_schema")
+        .and_then(|v| v.get("type"))
+        .and_then(Value::as_str)
+        == Some("object");
+
+    if is_form_mode {
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "Elicitation",
+                "decision": {
+                    "behavior": "decline",
+                    "message": "Complex form input not supported on ESP32 dashboard. Please answer in the terminal."
+                }
+            }
+        });
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+
+    let Some(prompt) = prompt else {
+        // Empty options or failed to parse — show hint directing user to terminal
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "Elicitation",
+                "decision": {
+                    "behavior": "decline",
+                    "message": "This prompt requires terminal input. Please answer in the terminal."
+                }
+            }
+        });
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    };
+
+    let prompt_id = next_prompt_id();
+    let event = serde_json::from_str::<RawHookInput>(stdin).ok().map(sanitize_raw_event);
+
+    // Also ingest as a normal event so the dashboard updates
+    if let Some(event) = event.as_ref() {
+        let client = Client::new();
+        let _ = client
+            .post(format!("{}/v1/claude/events", admin_base_url()))
+            .json(&event)
+            .timeout(std::time::Duration::from_millis(100))
+            .send()
+            .await;
+    }
+
+    // Submit prompt to agent
+    let client = Client::new();
+    let submit_response = client
+        .post(format!("{}/v1/claude/prompts", admin_base_url()))
+        .json(&json!({
+            "id": prompt_id,
+            "kind": "elicitation",
+            "title": prompt.title,
+            "question": prompt.question,
+            "options": prompt.options,
+            "session_id": event.as_ref().map(|e| e.session_id.as_str()).unwrap_or_default(),
+            "tool_use_id": event.as_ref().and_then(|e| e.tool_use_id.as_deref()),
+        }))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
+    match submit_response {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => {
+            warn!("prompt submit failed with status {}", response.status());
+            return Ok(());
+        }
+        Err(err) => {
+            warn!("agent unavailable for prompt: {err}");
+            return Ok(());
+        }
+    }
+
+    // Poll for selection
+    let poll_interval = std::time::Duration::from_millis(500);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(app_config.approval.elicitation_timeout_secs);
+
+    loop {
+        if std::time::Instant::now() > deadline {
+            warn!("elicitation timed out");
+            let output = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "Elicitation",
+                    "decision": {
+                        "behavior": "decline",
+                        "message": "Elicitation timed out on ESP32 dashboard"
+                    }
+                }
+            });
+            println!("{}", serde_json::to_string(&output)?);
+            return Ok(());
+        }
+
+        tokio::time::sleep(poll_interval).await;
+
+        let response = client
+            .get(format!("{}/v1/claude/prompts/{}", admin_base_url(), prompt_id))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await;
+
+        let body: Value = match response {
+            Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
+            _ => continue,
+        };
+
+        let prompt_status = match body.get("prompt") {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let resolved = prompt_status.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !resolved {
+            continue;
+        }
+
+        let selection_index = prompt_status
+            .get("selection_index")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+
+        let output = match selection_index {
+            Some(index) => {
+                let selected_label = prompt
+                    .options
+                    .get(index)
+                    .map(|o| o.label.clone())
+                    .unwrap_or_default();
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "Elicitation",
+                        "decision": {
+                            "behavior": "accept",
+                            "updatedInput": {
+                                "value": selected_label
+                            }
+                        }
+                    }
+                })
+            }
+            None => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "Elicitation",
+                    "decision": {
+                        "behavior": "decline",
+                        "message": "Declined from ESP32 dashboard"
+                    }
+                }
+            }),
+        };
+
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+}
+
+async fn handle_ask_user_question(stdin: &str, raw: &Value) -> Result<()> {
+    let event = serde_json::from_str::<RawHookInput>(stdin).ok();
+    let tool_input = raw.get("tool_input");
+    let prompt = tool_input.and_then(parse_ask_user_question_prompt);
+
+    let Some(prompt) = prompt else {
+        warn!("AskUserQuestion: failed to parse prompt");
+        return Ok(());
+    };
+
+    let prompt_id = next_prompt_id();
+    let app_config = AppConfig::load().unwrap_or_default();
+
+    // Also ingest as a normal event so the dashboard updates
+    if let Some(event) = event.as_ref() {
+        let sanitized = sanitize_raw_event(event.clone());
+        let client = Client::new();
+        let _ = client
+            .post(format!("{}/v1/claude/events", admin_base_url()))
+            .json(&sanitized)
+            .timeout(std::time::Duration::from_millis(100))
+            .send()
+            .await;
+    }
+
+    // Submit prompt to agent
+    let client = Client::new();
+    let submit_response = client
+        .post(format!("{}/v1/claude/prompts", admin_base_url()))
+        .json(&json!({
+            "id": prompt_id,
+            "kind": "ask_user_question",
+            "title": prompt.title,
+            "question": prompt.question,
+            "options": prompt.options,
+            "session_id": event.as_ref().map(|e| e.session_id.as_str()).unwrap_or_default(),
+            "tool_use_id": event.as_ref().and_then(|e| e.tool_use_id.as_deref()),
+        }))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
+    match submit_response {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => {
+            warn!("prompt submit failed with status {}", response.status());
+            return Ok(());
+        }
+        Err(err) => {
+            warn!("agent unavailable for prompt: {err}");
+            return Ok(());
+        }
+    }
+
+    // Poll for selection
+    let poll_interval = std::time::Duration::from_millis(500);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(app_config.approval.question_timeout_secs);
+
+    loop {
+        if std::time::Instant::now() > deadline {
+            warn!("ask user question timed out");
+            let output = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "Question timed out on ESP32 dashboard"
+                    }
+                }
+            });
+            println!("{}", serde_json::to_string(&output)?);
+            return Ok(());
+        }
+
+        tokio::time::sleep(poll_interval).await;
+
+        let response = client
+            .get(format!("{}/v1/claude/prompts/{}", admin_base_url(), prompt_id))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await;
+
+        let body: Value = match response {
+            Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
+            _ => continue,
+        };
+
+        let prompt_status = match body.get("prompt") {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let resolved = prompt_status.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !resolved {
+            continue;
+        }
+
+        let selection_index = prompt_status
+            .get("selection_index")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+
+        let output = match selection_index {
+            Some(index) => {
+                let selected_label = prompt
+                    .options
+                    .get(index)
+                    .map(|o| o.label.clone())
+                    .unwrap_or_default();
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "decision": {
+                            "behavior": "allow",
+                            "updatedInput": {
+                                "answers": [{ "question": prompt.question, "answer": selected_label }]
+                            }
+                        }
+                    }
+                })
+            }
+            None => json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "Declined from ESP32 dashboard"
+                    }
+                }
+            }),
+        };
 
         println!("{}", serde_json::to_string(&output)?);
         return Ok(());
@@ -1350,10 +1692,48 @@ fn next_approval_id() -> String {
     build_approval_id(now_epoch_millis(), sequence)
 }
 
+fn next_prompt_id() -> String {
+    let sequence = NEXT_PROMPT_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("prompt-{}", build_approval_id(now_epoch_millis(), sequence))
+}
+
+fn parse_elicitation_prompt_from_raw(raw: &Value) -> Option<WaitingPrompt> {
+    let title = raw
+        .get("title")
+        .or_else(|| raw.get("header"))
+        .or_else(|| raw.get("label"))
+        .and_then(Value::as_str)
+        .and_then(sanitize_waiting_title)
+        .unwrap_or_else(|| "Awaiting input".into());
+    let question = raw
+        .get("question")
+        .or_else(|| raw.get("prompt"))
+        .or_else(|| raw.get("message"))
+        .and_then(Value::as_str)
+        .and_then(sanitize_waiting_detail)?;
+    let options = raw
+        .get("options")
+        .and_then(parse_waiting_options)
+        .or_else(|| raw.get("choices").and_then(parse_waiting_options))
+        .unwrap_or_default();
+
+    if options.is_empty() {
+        return None;
+    }
+
+    Some(WaitingPrompt {
+        kind: WaitingPromptKind::Elicitation,
+        title,
+        question,
+        options,
+    })
+}
+
 fn permission_request_output_for_decision(
     decision: &str,
     tool_name: &str,
     deny_message: Option<&str>,
+    permission_suggestions: &[Value],
 ) -> Value {
     match decision {
         "allow" => json!({
@@ -1364,20 +1744,27 @@ fn permission_request_output_for_decision(
                 }
             }
         }),
-        "yolo" => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
+        "allow_always" | "yolo" => {
+            let updated_permissions = if permission_suggestions.is_empty() {
+                json!([{
+                    "type": "addRules",
+                    "rules": [{ "toolName": tool_name }],
                     "behavior": "allow",
-                    "updatedPermissions": [{
-                        "type": "addRules",
-                        "rules": [{ "toolName": tool_name }],
+                    "destination": "localSettings"
+                }])
+            } else {
+                json!(permission_suggestions)
+            };
+            json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
                         "behavior": "allow",
-                        "destination": "localSettings"
-                    }]
+                        "updatedPermissions": updated_permissions
+                    }
                 }
-            }
-        }),
+            })
+        }
         _ => json!({
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
@@ -1547,8 +1934,8 @@ mod tests {
     }
 
     #[test]
-    fn yolo_output_adds_persistent_allow_rule_for_tool() {
-        let output = permission_request_output_for_decision("yolo", "Bash", None);
+    fn allow_always_output_adds_persistent_allow_rule_for_tool() {
+        let output = permission_request_output_for_decision("allow_always", "Bash", None, &[]);
         let decision = &output["hookSpecificOutput"]["decision"];
 
         assert_eq!(decision["behavior"], "allow");
@@ -1717,7 +2104,73 @@ mod tests {
     #[test]
     fn deny_output_uses_supplied_message() {
         let output =
-            permission_request_output_for_decision("deny", "Bash", Some("Approval timed out"));
+            permission_request_output_for_decision("deny", "Bash", Some("Approval timed out"), &[]);
         assert_eq!(output["hookSpecificOutput"]["decision"]["message"], "Approval timed out");
+    }
+
+    #[test]
+    fn prompt_and_approval_ids_use_separate_sequences() {
+        let approval1 = next_approval_id();
+        let prompt1 = next_prompt_id();
+        let approval2 = next_approval_id();
+        let prompt2 = next_prompt_id();
+
+        // Approval IDs should not contain "prompt-"
+        assert!(!approval1.contains("prompt-"));
+        assert!(!approval2.contains("prompt-"));
+
+        // Prompt IDs should contain "prompt-"
+        assert!(prompt1.starts_with("prompt-"));
+        assert!(prompt2.starts_with("prompt-"));
+
+        // Verify sequences are independent by checking that prompt IDs increment
+        // without affecting approval IDs and vice versa
+        let approval_seq1 = approval1.split('-').last().unwrap().parse::<u64>().unwrap();
+        let approval_seq2 = approval2.split('-').last().unwrap().parse::<u64>().unwrap();
+        let prompt_seq1 = prompt1.split('-').last().unwrap().parse::<u64>().unwrap();
+        let prompt_seq2 = prompt2.split('-').last().unwrap().parse::<u64>().unwrap();
+
+        // Approval sequence should increment by 1
+        assert_eq!(approval_seq2, approval_seq1 + 1);
+        // Prompt sequence should increment by 1
+        assert_eq!(prompt_seq2, prompt_seq1 + 1);
+        // They should not be interleaved (approval_seq1 and prompt_seq1 should be independent)
+        // The exact values don't matter, only that each sequence increments independently
+    }
+
+    #[test]
+    fn parse_elicitation_prompt_returns_none_for_empty_options() {
+        let raw = json!({
+            "title": "Test",
+            "question": "Choose one",
+            "options": []
+        });
+        let result = parse_elicitation_prompt_from_raw(&raw);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_elicitation_prompt_returns_none_when_no_options_field() {
+        let raw = json!({
+            "title": "Test",
+            "question": "Choose one"
+        });
+        let result = parse_elicitation_prompt_from_raw(&raw);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_elicitation_prompt_succeeds_with_valid_options() {
+        let raw = json!({
+            "title": "Test",
+            "question": "Choose one",
+            "options": ["A", "B"]
+        });
+        let result = parse_elicitation_prompt_from_raw(&raw);
+        assert!(result.is_some());
+        let prompt = result.unwrap();
+        assert_eq!(prompt.options.len(), 2);
+        assert_eq!(prompt.options[0].label, "A");
+        assert_eq!(prompt.options[1].label, "B");
     }
 }
