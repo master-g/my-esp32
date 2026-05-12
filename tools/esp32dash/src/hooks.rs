@@ -255,9 +255,7 @@ EVENT_NAME=$(printf '%s' "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:sp
 TOOL_NAME=$(printf '%s' "$INPUT" | grep -o '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 
 IS_RESPOND_EVENT=0
-if [ "$EVENT_NAME" = "PermissionRequest" ] || [ "$EVENT_NAME" = "Elicitation" ]; then
-  IS_RESPOND_EVENT=1
-elif [ "$EVENT_NAME" = "PreToolUse" ] && printf '%s' "$TOOL_NAME" | grep -q "AskUserQuestion"; then
+if [ "$EVENT_NAME" = "PermissionRequest" ]; then
   IS_RESPOND_EVENT=1
 fi
 
@@ -520,6 +518,30 @@ mod tests {
         assert!(!updated.iter().any(|item| item == "SessionStart"));
         let hooks = root["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
         assert_eq!(hooks.len(), 1);
+    }
+
+    #[test]
+    fn render_hook_script_routes_only_permission_request_to_respond() {
+        let script = render_hook_script(Path::new("/tmp/esp32dash"));
+
+        // PermissionRequest must route to respond
+        assert!(
+            script.contains(r#"[ "$EVENT_NAME" = "PermissionRequest" ]"#),
+            "script must contain PermissionRequest condition"
+        );
+
+        // Elicitation must NOT appear in the IS_RESPOND_EVENT block
+        let respond_block_start = script.find("IS_RESPOND_EVENT=0").unwrap();
+        let respond_block_end = script.find("if [ \"$IS_RESPOND_EVENT\" = \"1\" ]").unwrap();
+        let respond_block = &script[respond_block_start..respond_block_end];
+        assert!(
+            !respond_block.contains("Elicitation"),
+            "Elicitation must not appear in the IS_RESPOND_EVENT logic"
+        );
+        assert!(
+            !respond_block.contains("AskUserQuestion"),
+            "AskUserQuestion must not appear in the IS_RESPOND_EVENT logic"
+        );
     }
 
     #[test]
