@@ -402,3 +402,223 @@ Notchi 选 Haiku 是因为桌面 app 有稳定网络和充足资源。在 host a
 `EmotionState` 的累积衰减模型不依赖任何 Apple 框架，是一个纯数值算法，可以直接在 Rust（host agent 侧）中实现。它的价值在于避免了"单次判断决定情绪"的抖动问题——用户偶尔抱怨一句不会立刻让角色哭起来，需要持续的情绪信号才能改变角色的表情。
 
 核心参数（dampen、decay rate、threshold）可以通过 serial 作为配置项下发给 host agent，用户在 ESP32 的设置页面可以调节情绪灵敏度。但初期建议直接硬编码 Notchi 的参数，经过验证再考虑可配置性。
+
+## 九、多 Provider 架构（Codex 集成）★ 2026年4月新增
+
+这是本次更新最大的架构变化。Notchi 从单 provider（仅 Claude Code）演进为双 provider 系统，同时支持 Claude Code 和 Codex CLI（OpenAI 的 coding agent）。
+
+### Provider 抽象层
+
+`AgentProviderAdapter` 协议定义了统一的 provider 接口：
+
+```swift
+protocol AgentProviderAdapter {
+    func installIfNeeded() -> Bool
+    func isProviderAvailable() -> Bool
+    func isInstalled() -> Bool
+    func configureForLaunch()
+    func normalize(_ envelope: AgentHookEnvelope) -> HookEvent?
+}
+```
+
+每个 provider 实现自己的 hook 安装、可用性检测、事件规范化逻辑。`ClaudeProviderAdapter` 和 `CodexProviderAdapter` 各自封装差异，上层 `IntegrationCoordinator` 通过字典 `[AgentProvider: any AgentProviderAdapter]` 统一调度。
+
+### ProviderCapabilities：用能力标记代替类型检查
+
+`ProviderCapabilities` 结构体用四个 bool 标记编码 provider 间的功能差异，而非到处写 `if provider == .claude`：
+
+| 标记 | Claude | Codex | 含义 |
+|------|--------|-------|------|
+| `supportsPermissionPrompts` | ✅ | ✅ | 是否发出权限请求事件 |
+| `supportsUsageResumeTriggers` | ✅ | ❌ | 是否通过 resume 事件触发用量刷新 |
+| `supportsPromptEmotionAnalysis` | ✅ | ❌ | 是否做 prompt 情感分析 |
+| `supportsDerivedTranscriptFallback` | ✅ | ❌ | 是否从转录内容派生事件 |
+
+下游代码用 `provider.capabilities.supportsX` 查询，不需要知道具体是哪个 provider。这比枚举 switch 更灵活——将来添加第三个 provider 只需要填一个 struct 实例，不用改现有代码。
+
+### 事件规范化管线
+
+`IntegrationCoordinator` 的核心流水线：
+
+```
+Socket 原始数据 → AgentHookEnvelope
+  → 遍历所有 adapter.normalize()
+    → nil（未知事件）→ 丢弃
+    → HookEvent → enqueue 到 AsyncStream
+      → serial DispatchQueue 串行化
+        → MainActor 上调用 onEvent 闭包 → UI 层
+```
+
+关键设计：`AsyncStream<HookEvent>` + 专用串行队列 `"com.ruban.notchi.integration.delivery"`。套接字在自己的并发上下文中读取，规范化是同步的，投递在串行队列上序列化，UI 回调在主 actor 上执行。四个并发域各司其职。
+
+### Codex 的 3-event 钩子模型
+
+Codex 只注册 3 个 hook（对比 Claude 的 9 个）：`SessionStart`（匹配器 `startup|resume`）、`UserPromptSubmit`、`Stop`。缺失的 `PreToolUse` / `PostToolUse` / `PreCompact` 等事件通过以下方式弥补：
+
+- **Transcript 驱动的事件合成**：`CodexProviderAdapter` 解析 Codex 的 transcript JSONL 文件，从 `assistant_message` 类型的行中提取 `tool_calls` 字段，合成 `preToolUse` / `postToolUse` 事件
+- **Transcript 路径门控**：`CodexProviderAdapter` 维护一个 `transcriptBackedSessionIDs` 集合。只有带 `transcriptPath` 的 `SessionStart` 才会创建 session；`SessionStart` 不带路径的（resume/continue 模式）被抑制。但如果一个 session 曾经有过路径（在集合中），后续不带路径的事件仍可通过——防止中途丢失 transcript 引用导致 session 异常终止
+- **Compaction 检测**：通过解析 Codex 的日志输出搜索 compaction 特征行来检测压缩状态。带 stale signal 过滤和去重
+
+### Process 生命周期跟踪
+
+Codex hook 脚本（`notchi-codex-hook.sh`）内联了一段 Python，它遍历进程树（`/bin/ps -axo pid=,ppid=,tty=,comm=`）向上查找 8 层，找到包含 "codex" 的进程。输出 JSON 中带上 `codex_process_id` 和 `codex_origin`（`cli` 或 `desktop`）。Notchi app 利用这个 PID 来检测进程退出——Codex session 随进程消亡而结束，比纯超时淘汰更精确。
+
+Codex 的 hook installer 写入 `~/.codex/hooks.json`（注册 3 个 hook 事件）和 `~/.codex/config.toml`（启用 `codex_hooks = true` 功能开关），清理逻辑会先 `pruneManagedHooks` 移除旧条目再写入新条目。
+
+## 十、Session 生命周期防御（更新）
+
+上次分析我们批评 Notchi "对 session 积累没有任何防御"。这次更新中 Codex provider 引入了实质性的防御机制，Claude provider 的积累问题仍然存在：
+
+### Codex 侧已实现的防御
+
+- **Transcript 门控**：Session 只在有 `transcriptPath` 时才创建，过滤掉 resume/continue 模式的无 transcript 假 session
+- **Process 存活检测**：Session 随 codex 进程退出自动结束
+- **Abort 检测**：Codex 会话在 turn 被 abort（没有用户 prompt）时自动 idle
+- **Archived session 终结**：Codex 的 archived session 不再报告为活跃
+
+### Claude 侧仍然缺失的防御
+
+Claude provider 依然没有超时淘汰、PID 检查或上限熔断。两个 provider 的防御水平不一致。
+
+### 对 ESP32 的影响
+
+我们的 host agent (esp32dash) 设计要同时支持 Claude Code 和 opencode，所以 provider 差异防御是必经之路。上次提出的三层防御策略（PID 存活检查 > 超时淘汰 > 上限熔断）仍然有效，但需要跟 ProviderCapabilities 模式结合——不同 provider 能提供的防御信息不同。例如，opencode 如果像 Codex 一样只发 3 个 hook，我们也要做 transcript 事件合成和进程跟踪。
+
+## 十一、Emotion 分析多 Provider 支持
+
+### 双 LLM Provider 策略
+
+Emotion 分析从纯 Anthropic 扩展为支持两种 API：
+
+```swift
+protocol EmotionAnalysisProviding {
+    func analyze(prompt: String, systemPrompt: String) async throws -> EmotionAnalysisResult
+}
+```
+
+`resolveProvider()` 根据 `AppSettings.emotionAnalysisProvider` 分发到 `ClaudeEmotionAnalysisProvider` 或 `OpenAIEmotionAnalysisProvider`。两种 provider 的请求差异由各自实现封装，上层调用者无感。
+
+### OpenAI Structured Output 的启发
+
+OpenAI 路径的关键差异：使用 `response_format: json_schema` + `strict: true`，模型被强制输出符合 schema 的结构化数据，而不是靠 prompt 引导。Claude 路径仍然靠文本 JSON 提取 + 容错解析。
+
+对 esp32dash 的启示：如果 host agent 使用 OpenAI 兼容的 API 做 emotion 分析，structured output 模式更可靠。解析侧不需要 `extractJSON` 那一套剥离 markdown code block 的逻辑。
+
+### API Key 解析链
+
+| 来源 | Claude | OpenAI |
+|------|--------|--------|
+| Keychain（用户手动输入） | ✅ 优先 | ✅ 唯一 |
+| 本地 settings.json | ✅ 回退 | ❌ |
+
+Claude 有双重认证路径——如果 Keychain 中没有 key，自动读取 `~/.claude/settings.json` 的 `ANTHROPIC_AUTH_TOKEN`。用户不需要手动输入 API key 就能启用 emotion 分析（只要 Claude Code 已经认证过）。这种"零配置"体验值得借鉴。
+
+### 设置 UI 的智能默认
+
+`emotionAnalysisProvider` 的 getter 有自动回退逻辑：检查两个 Keychain 哪个有 key，优先选有 key 的。两者都有或都没有则默认 claude。测试功能用 snapshot 模式避免竞态——启动测试时捕获当前参数，异步返回后比对是否为同一组，防止用户中途切换配置导致结果错位。
+
+## 十二、启动动画设计
+
+### Iridescent Glow
+
+Notchi 在启动时播放一个 6.5 秒的刘海屏轮廓光效动画：淡入 1s → 保持 4s → 淡出 1.5s。视觉分四层 stroke 叠加：
+
+| 层 | 线宽 | 模糊 | 效果 |
+|---|---|---|---|
+| 外光晕 | 18pt | 12pt | AngularGradient 彩虹色 |
+| 中间层 | 8pt | 4pt | 同上 |
+| 高光扫动 | 5pt | 2pt | LinearGradient 金属色 |
+| 内芯 | 1.6pt | 无 | 白色半透明 |
+
+高光扫动通过 `LaunchIridescentGlowMotion` 驱动，包含三个独立的循环动画：颜色旋转（6s）、高光位置（3.8s）、呼吸效果（4.5s）。通过 mask 裁剪，光效只出现在刘海屏轮廓外侧。
+
+### Timing 与 Motion 分离
+
+`LaunchIridescentGlowTiming`（opacity 三段缓动，由 `Animatable` protocol 的 `animatableData: progress` 驱动）和 `LaunchIridescentGlowMotion`（相位动画，由 SwiftUI `withAnimation` 驱动）被拆成两个独立的 enum。这种分离让每个动画维度独立演进，互不干扰。
+
+### 对 ESP32 的启示
+
+ESP32 固件可以做简化版的启动动画：LVGL 的 `lv_anim` 支持 opacity 渐变，配合 `lv_canvas` 可以画径向渐变光晕。但 ESP32 的计算能力有限，做不到 4 层模糊叠加。可行方案：预设一张光晕图片，用 `lv_img_set_angle` 做旋转动画 + opacity 淡入淡出。或者干脆跳过——嵌入式设备的"启动"已经是硬件级冷启动，屏幕点亮本身就是最大的启动动画。
+
+## 十三、设置 UI 模式
+
+### Master/Detail 导航
+
+Emotion Analysis 设置在设置面板中是一个入口行，点击后滑入二级页面。转场用 `ZStack` + `@State` 手工实现推入效果，不依赖 NavigationStack：
+
+```
+HStack（一级列表）向左滑出
+EmotionAnalysisSettingsView（二级页面）从右滑入
+```
+
+### 内联下拉选择器
+
+Provider 和 Model 选择器都是手工实现的内联下拉列表（`isProviderPickerExpanded` / `isModelPickerExpanded`），而非系统 Picker。选中项用绿色圆点指示，hover 高亮。Picker 高度按 `28pt × 行数` 动态计算，最多显示 6 行。
+
+### 焦点感知的 Affordance
+
+API key 输入框获得焦点时，旁边的 "Get API Key" 外链按钮会高亮（背景 + 边框），同时触发 `HorizontalShake` 动画（用 `GeometryEffect` + sin 做的微小水平抖动）来引导注意力。多个操作（切换 provider、切换 model、保存 key、开始测试、点击外链）都会自动收起键盘。
+
+### Provider-Specific 文案
+
+`apiKeyPlaceholder` 和 `apiKeyURL` 是 `EmotionAnalysisProvider` 枚举的计算属性。切换 provider 时，placeholder 文字（如 "sk-..." / "sk-ant-..."）和 "Get API Key" 的 URL 自动跟随变化。状态 badge 的显示逻辑也有层次：有存储 key → 显示 provider 名 + 绿色；Claude 且有本地 settings.json → 显示 "Claude Code" + 绿色；否则 "No Key" + 红色。
+
+## 十四、Shimmer 指示器与 Provider-Specific 细节
+
+### ProcessingSpinner
+
+一个 24 行的通用指示器组件：6 个 Unicode 符号（`·✢✳∗✻✽`）每 150ms 循环切换，通过 `Timer.publish(every: 0.15)` + `@State phase` 驱动。特点是极简、无外部依赖、视觉上与终端主题融合。
+
+### Provider-Specific Spinner Verbs
+
+Session 启动时，Spinner 旁的文本用 provider-specific 的动词种子："thinking"（Claude）和 "coding"（Codex）。这是个很小的细节，但体现了 provider 差异不仅体现在架构层，也渗透到 UX 的微观层面。
+
+## 十五、对 ESP32 项目的新借鉴点
+
+### 1. Provider 抽象层应立即实施
+
+我们的 host agent（esp32dash）需要同时支持 Claude Code 和 opencode，两边的 hook 事件格式、数量、字段名可能不同。Notchi 的 `AgentProviderAdapter` 协议 + `ProviderCapabilities` 能力标记模式是最佳实践。
+
+Rust 中的等价实现：
+
+```rust
+trait AgentProvider {
+    fn install_hooks(&self) -> Result<()>;
+    fn is_available(&self) -> bool;
+    fn normalize(&self, raw: &RawHookPayload) -> Option<AppEvent>;
+}
+
+struct ProviderCapabilities {
+    supports_permission_prompts: bool,
+    supports_emotion_analysis: bool,
+    // ...
+}
+```
+
+### 2. 事件合成模式
+
+opencode 的 hook 事件可能比 Claude Code 少（类似 Codex 只发 3 个事件）。Notchi 展示了从 transcript 文件合成缺失事件的模式。esp32dash 应该为每个 provider 实现独立的 normalize 逻辑——Claude provider 直接透传丰富的 hook 事件，opencode provider 从 transcript 或 log 中补充缺失的工具执行 / 压缩等事件。
+
+### 3. Process 跟踪替代纯超时
+
+Codex hook 脚本的进程树查找（`/bin/ps` 向上追溯 8 层）是比纯超时更精确的 session 存活判断。我们的上次分析已经提到 PID 存活检查，Notchi 的实际实现验证了这个方向的可行性。esp32dash 可以在 hook 脚本中加入类似的进程查找逻辑，把 PID 附加到事件 payload 中。
+
+### 4. Transcript 路径门控
+
+`transcriptBackedSessionIDs` 集合的设计很精妙——它区分了"有持久 transcript 的真 session"和"resume/continue 的临时 session"。opencode 也可能有类似的 resume 模式，我们应该在 host agent 中实现类似的 gating 逻辑，避免临时 session 干扰 UI。
+
+### 5. 设置 UI 的模式可迁移
+
+ESP32 的设置页面（app_settings）目前功能简单。Notchi 的 master/detail 导航、内联下拉选择器、smart defaults（自动检测哪个 provider 有 API key）、snapshot 测试防竞态——这些模式可以直接指导 ESP32 设置页面的设计。
+
+### 6. 零配置优先
+
+Notchi 的 emotion 分析对 Claude 用户是零配置——自动从 settings.json 读取 token。esp32dash 也应该对 Claude Code 用户做到开箱即用：检测 `~/.claude/settings.json` 中的认证信息，不需要用户在 ESP32 上手动输入任何 key。
+
+### 7. Capability-Driven UI
+
+ESP32 的三个 app 页面在面对不同 agent 时应该有不同的表现能力。例如，如果当前连接的 agent 不支持 permission prompt，设置页面中的权限相关选项就应该灰掉或隐藏。`ProviderCapabilities` 的 bool 标记模式可以直接指导这个逻辑。
+
+---
+
+*本文档基于 Notchi 代码库截至 2026-04-30 的状态更新。新增第九至第十五节。*
