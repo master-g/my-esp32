@@ -270,18 +270,17 @@ static void time_service_task(void *arg)
     (void)arg;
 
     for (;;) {
-        if (xQueueReceive(s_command_queue, &cmd, portMAX_DELAY) != pdTRUE) {
-            continue;
+        if (xQueueReceive(s_command_queue, &cmd, pdMS_TO_TICKS(60000)) == pdTRUE) {
+            if (cmd != TIME_CMD_SYNC_NTP) {
+                continue;
+            }
         }
 
-        if (cmd != TIME_CMD_SYNC_NTP) {
-            continue;
-        }
         if (!net_manager_is_connected()) {
             continue;
         }
         xSemaphoreTake(s_mutex, portMAX_DELAY);
-        if (s_sync_in_progress) {
+        if (s_sync_in_progress || s_ntp_synced) {
             xSemaphoreGive(s_mutex);
             continue;
         }
