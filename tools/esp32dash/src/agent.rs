@@ -20,7 +20,7 @@ use axum::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, mpsc},
+    sync::Mutex,
 };
 use tracing::{debug, info, warn};
 
@@ -28,7 +28,7 @@ use crate::{
     approvals::{ApprovalRequest, ApprovalStore, DeviceApproval, DismissedApproval},
     compat,
     config::{AppConfig, ApprovalConfig, EmotionConfig, default_state_dir},
-    device::{DeviceConfig, DeviceEvent, DeviceManager, SessionFactory, UnixSerialFactory},
+    device::{DeviceConfig, DeviceManager, SessionFactory, UnixSerialFactory},
     emotion::{Emotion, EmotionAnalysis, EmotionAnalyzer},
     emotion_state::EmotionState,
     model::{
@@ -89,7 +89,6 @@ impl Config {
             device: DeviceConfig {
                 preferred_port: compat::serial_port().or_else(|| app_config.serial_port.clone()),
                 baud: resolved_serial_baud(compat::serial_baud_env(), app_config.serial_baud),
-                rpc_timeout_approval: Duration::from_secs(app_config.approval.timeout_secs + 10),
             },
             emotion: app_config.emotion.clone(),
             approval: app_config.approval.clone(),
@@ -1167,15 +1166,13 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
     let initial_sessions = restored_sessions(persisted.as_ref(), &initial_snapshot);
     let approvals = ApprovalStore::with_timeout(Duration::from_secs(config.approval.timeout_secs));
     let prompts = PromptStore::new();
-    let (device_event_tx, mut device_event_rx) = mpsc::unbounded_channel();
     let device_manager = DeviceManager::start(
         config.device.clone(),
         factory,
         Some(initial_snapshot.clone()),
-        device_event_tx,
     );
 
-    let app_state = AppState {
+    AppState {
         emotion_analyzer: EmotionAnalyzer::from_config(&config.emotion),
         config,
         state: Arc::new(Mutex::new(AgentState::new(initial_snapshot, initial_sessions))),
@@ -1184,49 +1181,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
         device_manager,
         approvals,
         prompts,
-    };
-
-    let approvals_for_device = app_state.approvals.clone();
-    let prompts_for_device = app_state.prompts.clone();
-    let approval_sync_state = Arc::new(app_state.clone());
-    tokio::spawn(async move {
-        while let Some(event) = device_event_rx.recv().await {
-            match event {
-                DeviceEvent::ApprovalResolved {
-                    id,
-                    decision,
-                } => {
-                    if let Some(approval_id) = approvals_for_device.resolve(&id, decision).await {
-                        info!(approval_id, ?decision, "device resolved approval");
-                        approval_sync_state.sync_device_approvals().await;
-                    } else {
-                        warn!(
-                            approval_id = id,
-                            ?decision,
-                            "dropping approval result for unknown request"
-                        );
-                    }
-                }
-                DeviceEvent::PromptResolved {
-                    id,
-                    selection_index,
-                } => {
-                    if let Some(prompt_id) = prompts_for_device.resolve(&id, selection_index).await {
-                        info!(prompt_id, selection_index, "device resolved prompt");
-                        approval_sync_state.sync_device_approvals().await;
-                    } else {
-                        warn!(
-                            prompt_id = id,
-                            selection_index,
-                            "dropping prompt result for unknown request"
-                        );
-                    }
-                }
-            }
-        }
-    });
-
-    app_state
+    }
 }
 
 fn restored_sessions(
@@ -1510,7 +1465,6 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
-                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
             approval: ApprovalConfig::default(),
@@ -1560,7 +1514,6 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
-                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
             approval: ApprovalConfig::default(),
@@ -1632,7 +1585,6 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
-                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
             approval: ApprovalConfig::default(),
@@ -1724,7 +1676,6 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
-                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
             approval: ApprovalConfig::default(),
@@ -1776,177 +1727,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_preempts_visible_prompt_and_prompt_returns_after_resolution() -> Result<()> {
-        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
-        let state_dir =
-            std::env::temp_dir().join(format!("esp32dash-prompt-priority-test-{unique}"));
-        fs::create_dir_all(&state_dir)?;
-        let writes = Arc::new(Mutex::new(Vec::new()));
-
-        let config = Config {
-            admin_addr: "127.0.0.1:0".parse()?,
-            admin_addr_raw: "127.0.0.1:0".into(),
-            state_path: state_dir.join("state.json"),
-            device: DeviceConfig {
-                preferred_port: Some("/dev/fake".into()),
-                baud: 115_200,
-                rpc_timeout_approval: Duration::from_secs(310),
-            },
-            emotion: EmotionConfig::default(),
-            approval: ApprovalConfig::default(),
-        };
-
-        let app_state = Arc::new(build_app_state(
-            config,
-            Arc::new(FakeFactory {
-                writes: writes.clone(),
-            }),
-        ));
-
-        for _ in 0..20 {
-            if app_state.serial_status().connected {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(app_state.serial_status().connected);
-
-        app_state
-            .ingest(waiting_prompt_event(
-                "sess-prompt",
-                "Elicitation",
-                None,
-                None,
-                Some(sample_waiting_prompt(WaitingPromptKind::Elicitation)),
-            ))
-            .await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        app_state
-            .approvals
-            .submit(
-                "approve-1".into(),
-                "approval-1".into(),
-                ApprovalRequest {
-                    tool_name: "Bash".into(),
-                    tool_input_summary: "rm -rf /tmp/test".into(),
-                    permission_mode: "default".into(),
-                    session_id: "sess-approval".into(),
-                    tool_use_id: Some("tool-approve".into()),
-                    permission_suggestions: Vec::new(),
-                },
-            )
-            .await;
-        app_state.sync_device_approvals().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert_eq!(
-            app_state
-                .approvals
-                .resolve("approval-1", crate::approvals::ApprovalDecision::Allow)
-                .await,
-            Some("approve-1".into())
-        );
-        app_state.sync_device_approvals().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let writes = writes.lock().expect("writes mutex poisoned");
-        // Prompt no longer sent as device_link event; only approval is forwarded
-        let prompt_ids = prompt_request_ids(&writes);
-        assert_eq!(prompt_ids.len(), 0);
-        let approval_ids = approval_request_ids(&writes);
-        assert_eq!(approval_ids, vec!["approval-1".to_string()]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn host_serializes_multiple_approvals_until_current_resolves() -> Result<()> {
-        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
-        let state_dir = std::env::temp_dir().join(format!("esp32dash-queue-test-{unique}"));
-        fs::create_dir_all(&state_dir)?;
-        let writes = Arc::new(Mutex::new(Vec::new()));
-
-        let config = Config {
-            admin_addr: "127.0.0.1:0".parse()?,
-            admin_addr_raw: "127.0.0.1:0".into(),
-            state_path: state_dir.join("state.json"),
-            device: DeviceConfig {
-                preferred_port: Some("/dev/fake".into()),
-                baud: 115_200,
-                rpc_timeout_approval: Duration::from_secs(310),
-            },
-            emotion: EmotionConfig::default(),
-            approval: ApprovalConfig::default(),
-        };
-
-        let app_state = build_app_state(
-            config,
-            Arc::new(FakeFactory {
-                writes: writes.clone(),
-            }),
-        );
-        let approval_state = Arc::new(app_state.clone());
-        let router = build_router(app_state);
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
-        let server = tokio::spawn(async move { axum::serve(listener, router).await });
-
-        Client::new()
-            .post(format!("http://{addr}/v1/claude/approvals"))
-            .json(&serde_json::json!({
-                "id": "approval-1",
-                "tool_name": "Bash",
-                "tool_input_summary": "rm -rf /tmp/test",
-                "permission_mode": "default",
-                "session_id": "sess-1",
-                "tool_use_id": "tool-1",
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Client::new()
-            .post(format!("http://{addr}/v1/claude/approvals"))
-            .json(&serde_json::json!({
-                "id": "approval-2",
-                "tool_name": "Edit",
-                "tool_input_summary": "edit src/main.rs",
-                "permission_mode": "default",
-                "session_id": "sess-2",
-                "tool_use_id": "tool-2",
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        {
-            let writes = writes.lock().expect("writes mutex poisoned");
-            let request_ids = approval_request_ids(&writes);
-            assert_eq!(request_ids, vec!["approval-1".to_string()]);
-        }
-
-        assert_eq!(
-            approval_state
-                .approvals
-                .resolve("approval-1", crate::approvals::ApprovalDecision::Allow)
-                .await,
-            Some("approval-1".into())
-        );
-        approval_state.sync_device_approvals().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let writes = writes.lock().expect("writes mutex poisoned");
-        let request_ids = approval_request_ids(&writes);
-        assert_eq!(request_ids, vec!["approval-1".to_string(), "approval-2".to_string()]);
-
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn failed_device_forward_does_not_immediately_requeue_claim() -> Result<()> {
         let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
         let state_dir = std::env::temp_dir().join(format!("esp32dash-approval-fail-{unique}"));
@@ -1960,7 +1740,6 @@ mod tests {
             device: DeviceConfig {
                 preferred_port: Some("/dev/fake".into()),
                 baud: 115_200,
-                rpc_timeout_approval: Duration::from_secs(310),
             },
             emotion: EmotionConfig::default(),
             approval: ApprovalConfig::default(),
@@ -2114,7 +1893,6 @@ mod tests {
                 device: DeviceConfig {
                     preferred_port: Some("/dev/fake".into()),
                     baud: 115_200,
-                    rpc_timeout_approval: Duration::from_secs(310),
                 },
                 emotion: EmotionConfig::default(),
                 approval: ApprovalConfig::default(),

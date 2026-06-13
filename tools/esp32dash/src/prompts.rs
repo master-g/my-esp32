@@ -51,21 +51,6 @@ pub struct PromptResolution {
     pub selection_index: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PromptError {
-    Timeout,
-}
-
-impl std::fmt::Display for PromptError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PromptError::Timeout => write!(f, "prompt timed out"),
-        }
-    }
-}
-
-impl std::error::Error for PromptError {}
-
 #[derive(Debug, Default)]
 struct State {
     entries: HashMap<String, Entry>,
@@ -233,28 +218,6 @@ impl PromptStore {
         expired_visible
     }
 
-    pub async fn resolve(&self, transport_id: &str, selection_index: u8) -> Option<String> {
-        let mut guard = self.inner.lock().await;
-        let (id, entry) = guard
-            .entries
-            .iter_mut()
-            .find(|(_, entry)| entry.transport_id == transport_id)?;
-        let id = id.clone();
-
-        if entry.resolution.is_some() || is_entry_expired(entry, self.timeout) {
-            return None;
-        }
-
-        entry.resolution = Some(PromptResolution { selection_index });
-        entry.notify.notify_waiters();
-        guard.pending_order.retain(|pending_id| pending_id != &id);
-        if guard.device_visible.as_deref() == Some(id.as_str()) {
-            guard.device_visible = None;
-        }
-
-        Some(id)
-    }
-
     pub async fn status(&self, id: &str) -> Option<PromptStatus> {
         let guard = self.inner.lock().await;
         guard.entries.get(id).map(|entry| {
@@ -272,31 +235,6 @@ impl PromptStore {
                 timed_out,
             }
         })
-    }
-
-    pub async fn wait_for_selection(
-        &self,
-        id: &str,
-        poll_interval: Duration,
-    ) -> Result<PromptResolution, PromptError> {
-        loop {
-            let notify = {
-                let guard = self.inner.lock().await;
-                let entry = guard.entries.get(id).ok_or(PromptError::Timeout)?;
-                if let Some(resolution) = entry.resolution {
-                    return Ok(resolution);
-                }
-                if is_entry_expired(entry, self.timeout) {
-                    return Err(PromptError::Timeout);
-                }
-                entry.notify.clone()
-            };
-
-            tokio::select! {
-                _ = notify.notified() => {}
-                _ = tokio::time::sleep(poll_interval) => {}
-            }
-        }
     }
 
     pub async fn cleanup_expired(&self) -> Vec<DismissedPrompt> {
@@ -559,25 +497,6 @@ mod tests {
 
         // Backlog should be empty
         assert!(!store.has_device_backlog().await);
-    }
-
-    #[tokio::test]
-    async fn wait_for_selection_returns_timeout_error() {
-        let store = PromptStore::with_timeout(Duration::from_millis(50));
-        store
-            .submit(
-                "prompt-1".into(),
-                "prompt-transport-1".into(),
-                prompt(WaitingPromptKind::Elicitation, "Awaiting input"),
-                "sess-1".into(),
-                None,
-            )
-            .await;
-
-        let result = store
-            .wait_for_selection("prompt-1", Duration::from_millis(10))
-            .await;
-        assert!(matches!(result, Err(PromptError::Timeout)));
     }
 
     #[tokio::test]

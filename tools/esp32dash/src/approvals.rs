@@ -63,7 +63,6 @@ pub struct DismissedApproval {
 
 #[derive(Debug, Clone, Copy)]
 enum ApprovalResolution {
-    Decision(ApprovalDecision),
     Dismissed,
 }
 
@@ -126,28 +125,6 @@ impl ApprovalStore {
         guard.pending_order.push_back(id.clone());
         guard.entries.insert(id.clone(), entry);
         id
-    }
-
-    /// Resolve a pending approval sent to the device. Returns the approval id if found.
-    pub async fn resolve(&self, transport_id: &str, decision: ApprovalDecision) -> Option<String> {
-        let mut guard = self.inner.lock().await;
-        let id = guard.transport_index.get(transport_id)?.clone();
-
-        {
-            let entry = guard.entries.get_mut(&id)?;
-            if entry.resolution.is_some() || is_entry_expired(entry, self.timeout) {
-                return None;
-            }
-            entry.resolution = Some(ApprovalResolution::Decision(decision));
-            entry.notify.notify_waiters();
-        }
-
-        guard.pending_order.retain(|pending_id| pending_id != &id);
-        if guard.device_visible.as_deref() == Some(id.as_str()) {
-            guard.device_visible = None;
-        }
-
-        Some(id)
     }
 
     pub async fn dismiss_matching(&self, event: &LocalHookEvent) -> Vec<DismissedApproval> {
@@ -247,16 +224,12 @@ impl ApprovalStore {
         let guard = self.inner.lock().await;
         guard.entries.get(id).map(|entry| {
             let timed_out = entry.resolution.is_none() && is_entry_expired(entry, self.timeout);
-            let decision = match entry.resolution {
-                Some(ApprovalResolution::Decision(decision)) => Some(decision),
-                _ => None,
-            };
             let dismissed = matches!(entry.resolution, Some(ApprovalResolution::Dismissed));
             ApprovalStatus {
                 id: id.to_string(),
                 tool_name: entry.request.tool_name.clone(),
                 tool_input_summary: entry.request.tool_input_summary.clone(),
-                decision,
+                decision: None,
                 resolved: entry.resolution.is_some() || timed_out,
                 timed_out,
                 dismissed,
@@ -265,34 +238,6 @@ impl ApprovalStore {
         })
     }
 
-    /// Wait until the approval is resolved or times out. Returns the decision.
-    #[allow(dead_code)]
-    pub async fn wait_for_decision(
-        &self,
-        id: &str,
-        poll_interval: Duration,
-    ) -> Option<ApprovalDecision> {
-        loop {
-            let notify = {
-                let guard = self.inner.lock().await;
-                let entry = guard.entries.get(id)?;
-                match entry.resolution {
-                    Some(ApprovalResolution::Decision(decision)) => return Some(decision),
-                    Some(ApprovalResolution::Dismissed) => return None,
-                    None => {}
-                }
-                if is_entry_expired(entry, self.timeout) {
-                    return None; // timed out
-                }
-                entry.notify.clone()
-            };
-
-            tokio::select! {
-                _ = notify.notified() => {}
-                _ = tokio::time::sleep(poll_interval) => {}
-            }
-        }
-    }
 }
 
 fn is_entry_expired(entry: &Entry, timeout: Duration) -> bool {
@@ -359,43 +304,6 @@ mod tests {
             tool_use_id: Some(tool_use_id.into()),
             permission_suggestions: Vec::new(),
         }
-    }
-
-    #[tokio::test]
-    async fn submit_and_resolve() {
-        let store = ApprovalStore::new();
-        let id = store
-            .submit("test-1".into(), "transport-1".into(), request("sess-1", "tool-1", "Bash"))
-            .await;
-
-        let status = store.status(&id).await.unwrap();
-        assert!(!status.resolved);
-        assert!(status.decision.is_none());
-        assert!(!status.dismissed);
-
-        assert_eq!(store.resolve("transport-1", ApprovalDecision::Allow).await, Some(id.clone()));
-
-        let status = store.status(&id).await.unwrap();
-        assert!(status.resolved);
-        assert_eq!(status.decision, Some(ApprovalDecision::Allow));
-        assert!(!status.dismissed);
-    }
-
-    #[tokio::test]
-    async fn wait_resolves_on_notify() {
-        let store = ApprovalStore::new();
-        let id = store
-            .submit("test-2".into(), "transport-2".into(), request("sess-1", "tool-2", "Edit"))
-            .await;
-
-        let store2 = store.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            store2.resolve("transport-2", ApprovalDecision::Deny).await;
-        });
-
-        let decision = store.wait_for_decision(&id, Duration::from_millis(10)).await;
-        assert_eq!(decision, Some(ApprovalDecision::Deny));
     }
 
     #[tokio::test]
@@ -469,10 +377,23 @@ mod tests {
         );
         assert!(store.claim_next_for_device().await.is_none());
 
-        assert_eq!(
-            store.resolve("approval-1", ApprovalDecision::Allow).await,
-            Some("approve-1".into())
-        );
+        let dismissed = store
+            .dismiss_matching(&LocalHookEvent {
+                session_id: "sess-1".into(),
+                cwd: "/tmp/project".into(),
+                hook_event_name: "PreToolUse".into(),
+                message: None,
+                prompt_preview: None,
+                prompt_raw: None,
+                tool_name: Some("Bash".into()),
+                tool_use_id: Some("tool-1".into()),
+                permission_mode: "default".into(),
+                waiting_prompt: None,
+                recv_ts: 1,
+                claude_pid: None,
+            })
+            .await;
+        assert_eq!(dismissed.first().map(|approval| approval.id.as_str()), Some("approve-1"));
 
         let second = store.claim_next_for_device().await.unwrap();
         assert_eq!(second.id, "approve-2");
