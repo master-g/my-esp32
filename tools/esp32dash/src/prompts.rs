@@ -23,6 +23,15 @@ pub struct DismissedPrompt {
     pub was_visible_on_device: bool,
 }
 
+/// One step of supersede-aware device sync: an older overlay to clear because a
+/// newer prompt replaced it, and/or the overlay to show. The freshest live
+/// pending prompt always wins the single device overlay.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PromptOverlayStep {
+    pub dismiss: Option<DismissedPrompt>,
+    pub show: Option<DevicePrompt>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptStatus {
     pub id: String,
@@ -146,30 +155,44 @@ impl PromptStore {
         dismissed
     }
 
-    pub async fn claim_next_for_device(&self) -> Option<DevicePrompt> {
+    /// Supersede-aware claim: the freshest live pending prompt wins the single
+    /// device overlay. If a different (older) prompt is currently shown, it is
+    /// returned in `dismiss` so the caller can clear it before showing `show`.
+    pub async fn next_device_overlay(&self) -> PromptOverlayStep {
         let mut guard = self.inner.lock().await;
         retain_pending_order_locked(&mut guard, self.timeout);
         normalize_visible_locked(&mut guard, self.timeout);
 
-        if guard.device_visible.is_some() {
-            return None;
+        let Some(target_id) = guard.pending_order.back().cloned() else {
+            return PromptOverlayStep::default();
+        };
+        if guard.device_visible.as_deref() == Some(target_id.as_str()) {
+            return PromptOverlayStep::default();
         }
 
-        let id = guard.pending_order.front()?.clone();
-        let prompt = {
-            let entry = guard.entries.get(&id)?;
-            if is_entry_expired(entry, self.timeout) {
-                return None;
+        // Clear whatever older overlay is currently shown.
+        let mut dismiss = None;
+        if let Some(old_id) = guard.device_visible.take() {
+            if let Some(entry) = guard.entries.get(&old_id) {
+                dismiss = Some(DismissedPrompt {
+                    id: old_id.clone(),
+                    transport_id: entry.transport_id.clone(),
+                    was_visible_on_device: true,
+                });
             }
-            DevicePrompt {
-                id: id.clone(),
-                transport_id: entry.transport_id.clone(),
-                prompt: entry.prompt.clone(),
-            }
-        };
+        }
 
-        guard.device_visible = Some(id);
-        Some(prompt)
+        // Show the freshest pending prompt.
+        let show = guard.entries.get(&target_id).map(|entry| DevicePrompt {
+            id: target_id.clone(),
+            transport_id: entry.transport_id.clone(),
+            prompt: entry.prompt.clone(),
+        });
+        if show.is_some() {
+            guard.device_visible = Some(target_id);
+        }
+
+        PromptOverlayStep { dismiss, show }
     }
 
     pub async fn requeue_visible_for_device(&self) -> Option<DismissedPrompt> {
@@ -394,9 +417,11 @@ mod tests {
             )
             .await;
 
-        let first = store.claim_next_for_device().await.unwrap();
+        let first = store.next_device_overlay().await.show.expect("pending should be shown");
         assert_eq!(first.id, "prompt-1");
-        assert!(store.claim_next_for_device().await.is_none());
+        // Already showing it: idempotent no-op.
+        let repeat = store.next_device_overlay().await;
+        assert!(repeat.show.is_none() && repeat.dismiss.is_none());
 
         let dismissed = store.requeue_visible_for_device().await.unwrap();
         assert_eq!(
@@ -408,7 +433,7 @@ mod tests {
             }
         );
 
-        let retried = store.claim_next_for_device().await.unwrap();
+        let retried = store.next_device_overlay().await.show.expect("pending should be shown again");
         assert_eq!(retried.id, "prompt-1");
     }
 
@@ -425,7 +450,7 @@ mod tests {
             )
             .await;
 
-        let visible = store.claim_next_for_device().await.unwrap();
+        let visible = store.next_device_overlay().await.show.expect("pending should be shown");
         assert_eq!(visible.id, "prompt-1");
 
         let dismissed = store
@@ -483,8 +508,8 @@ mod tests {
             )
             .await;
 
-        // Claim it for device
-        let claimed = store.claim_next_for_device().await.unwrap();
+        // Show it on the device
+        let claimed = store.next_device_overlay().await.show.expect("pending should be shown");
         assert_eq!(claimed.id, "prompt-1");
 
         // Wait for timeout

@@ -573,21 +573,28 @@ impl AppState {
             return;
         }
 
+        // Host-side timeout: the device no longer self-times-out via the removed
+        // decision RPC, so clear any overlay whose request expired before a dismiss
+        // arrived. (The device keeps a coarser self-timeout of its own; see U5.)
         if let Some(expired) = self.approvals.take_expired_visible_for_device().await {
             info!(
                 approval_id = expired.id,
-                "approval timed out before device response, dismissing device overlay"
+                "approval timed out before dismiss, clearing device overlay"
             );
             if let Err(err) = self.send_device_dismiss(&expired) {
-                warn!(
-                    approval_id = expired.id,
-                    error = %err,
-                    "failed to dismiss timed-out approval on device"
-                );
+                warn!(approval_id = expired.id, error = %err, "failed to clear timed-out approval");
+                return;
+            }
+        }
+        if let Some(expired) = self.prompts.take_expired_visible_for_device().await {
+            info!(prompt_id = expired.id, "prompt timed out before dismiss, clearing device overlay");
+            if let Err(err) = self.send_device_prompt_dismiss(&expired) {
+                warn!(prompt_id = expired.id, error = %err, "failed to clear timed-out prompt");
                 return;
             }
         }
 
+        // Cross-store priority: a pending approval preempts the prompt overlay.
         if self.approvals.has_device_backlog().await {
             if let Some(prompt) = self.prompts.requeue_visible_for_device().await {
                 if let Err(err) = self.send_device_prompt_dismiss(&prompt) {
@@ -600,25 +607,39 @@ impl AppState {
                 }
             }
 
-            let Some(approval) = self.approvals.claim_next_for_device().await else {
-                return;
-            };
+            let step = self.approvals.next_device_overlay().await;
+            if let Some(dismissed) = step.dismiss {
+                if let Err(err) = self.send_device_dismiss(&dismissed) {
+                    warn!(approval_id = dismissed.id, error = %err, "failed to dismiss superseded approval");
+                    return;
+                }
+            }
+            if let Some(approval) = step.show {
+                if let Err(err) = self.send_device_approval_request(&approval) {
+                    warn!(approval_id = approval.id, error = %err, "failed to forward approval to device");
+                    return;
+                }
+                info!(approval_id = approval.id, tool = approval.tool_name, "forwarded approval to device");
+            }
+            return;
+        }
 
-            if let Err(err) = self.send_device_approval_request(&approval) {
-                warn!(
-                    approval_id = approval.id,
-                    error = %err,
-                    "failed to forward queued approval to device"
-                );
+        // No approval backlog: drive the prompt overlay (Elicitation / AskUserQuestion).
+        // This is the host-side emit that the prompt paths previously lacked, so those
+        // interactions reach the read-only overlay instead of only sprite emotion.
+        let step = self.prompts.next_device_overlay().await;
+        if let Some(dismissed) = step.dismiss {
+            if let Err(err) = self.send_device_prompt_dismiss(&dismissed) {
+                warn!(prompt_id = dismissed.id, error = %err, "failed to dismiss superseded prompt");
                 return;
             }
-
-            info!(
-                approval_id = approval.id,
-                tool = approval.tool_name,
-                "forwarded queued approval to device"
-            );
-            return;
+        }
+        if let Some(prompt) = step.show {
+            if let Err(err) = self.send_device_prompt_request(&prompt) {
+                warn!(prompt_id = prompt.id, error = %err, "failed to forward prompt to device");
+                return;
+            }
+            info!(prompt_id = prompt.id, "forwarded prompt to device");
         }
     }
 
@@ -1719,9 +1740,95 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
-        // Prompt no longer sent as device_link event; state synced via snapshot
+        // The waiting prompt is forwarded to the read-only device overlay as a
+        // claude.prompt.request, then cleared by a claude.prompt.dismiss when the
+        // follow-up PostToolUse event resolves it.
         let prompt_ids = prompt_request_ids(&writes);
-        assert_eq!(prompt_ids.len(), 0);
+        assert_eq!(prompt_ids.len(), 1);
+        assert!(has_prompt_dismiss(&writes, &prompt_ids[0]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_approval_preempts_visible_prompt_overlay() -> Result<()> {
+        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
+        let state_dir = std::env::temp_dir().join(format!("esp32dash-preempt-test-{unique}"));
+        fs::create_dir_all(&state_dir)?;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+
+        let config = Config {
+            admin_addr: "127.0.0.1:0".parse()?,
+            admin_addr_raw: "127.0.0.1:0".into(),
+            state_path: state_dir.join("state.json"),
+            device: DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+            emotion: EmotionConfig::default(),
+            approval: ApprovalConfig::default(),
+        };
+
+        let app_state = Arc::new(build_app_state(
+            config,
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+        ));
+
+        for _ in 0..20 {
+            if app_state.serial_status().connected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(app_state.serial_status().connected);
+
+        // A waiting prompt reaches the read-only overlay first.
+        app_state
+            .ingest(waiting_prompt_event(
+                "sess-1",
+                "PreToolUse",
+                Some("AskUserQuestion"),
+                Some("tool-1"),
+                Some(sample_waiting_prompt(WaitingPromptKind::AskUserQuestion)),
+            ))
+            .await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+
+        // A tool permission then arrives. Cross-store priority: the approval preempts
+        // the prompt overlay — the prompt is dismissed and the approval is shown, with
+        // no double display.
+        app_state
+            .approvals
+            .submit(
+                "approve-1".into(),
+                "approval-1".into(),
+                ApprovalRequest {
+                    tool_name: "Bash".into(),
+                    tool_input_summary: "ls".into(),
+                    permission_mode: "default".into(),
+                    session_id: "sess-1".into(),
+                    tool_use_id: Some("tool-2".into()),
+                    permission_suggestions: Vec::new(),
+                },
+            )
+            .await;
+        app_state.sync_device_approvals().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let writes = writes.lock().expect("writes mutex poisoned");
+        let prompt_ids = prompt_request_ids(&writes);
+        assert_eq!(prompt_ids.len(), 1, "the prompt overlay was shown exactly once");
+        assert!(
+            has_prompt_dismiss(&writes, &prompt_ids[0]),
+            "the prompt overlay is dismissed when the approval preempts it"
+        );
+        assert_eq!(
+            approval_request_ids(&writes).len(),
+            1,
+            "the approval overlay is shown after preempting the prompt"
+        );
 
         Ok(())
     }
@@ -1787,10 +1894,17 @@ mod tests {
             .await;
 
         approval_state.sync_device_approvals().await;
-        assert!(approval_state.approvals.claim_next_for_device().await.is_none());
+        // Already showing it on the device: repeat overlay is a no-op.
+        let repeat = approval_state.approvals.next_device_overlay().await;
+        assert!(repeat.show.is_none() && repeat.dismiss.is_none());
 
         approval_state.approvals.note_device_disconnected().await;
-        let retried = approval_state.approvals.claim_next_for_device().await.unwrap();
+        let retried = approval_state
+            .approvals
+            .next_device_overlay()
+            .await
+            .show
+            .expect("pending should be shown again after disconnect");
         assert_eq!(retried.id, "approve-1");
         assert_eq!(retried.transport_id, "approval-1");
 

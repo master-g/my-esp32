@@ -61,6 +61,15 @@ pub struct DismissedApproval {
     pub was_visible_on_device: bool,
 }
 
+/// One step of supersede-aware device sync: an older overlay to clear because a
+/// newer request replaced it, and/or the overlay to show. The freshest live
+/// pending request always wins the single device overlay.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ApprovalOverlayStep {
+    pub dismiss: Option<DismissedApproval>,
+    pub show: Option<DeviceApproval>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ApprovalResolution {
     Dismissed,
@@ -156,32 +165,45 @@ impl ApprovalStore {
         dismissed
     }
 
-    pub async fn claim_next_for_device(&self) -> Option<DeviceApproval> {
+    /// Supersede-aware claim: the freshest live pending request wins the single
+    /// device overlay. If a different (older) request is currently shown, it is
+    /// returned in `dismiss` so the caller can clear it before showing `show`.
+    pub async fn next_device_overlay(&self) -> ApprovalOverlayStep {
         let mut guard = self.inner.lock().await;
         retain_pending_order_locked(&mut guard, self.timeout);
         normalize_visible_locked(&mut guard, self.timeout);
 
-        if guard.device_visible.is_some() {
-            return None;
+        let Some(target_id) = guard.pending_order.back().cloned() else {
+            return ApprovalOverlayStep::default();
+        };
+        if guard.device_visible.as_deref() == Some(target_id.as_str()) {
+            return ApprovalOverlayStep::default();
         }
 
-        let id = guard.pending_order.front()?.clone();
-        let approval = {
-            let entry = guard.entries.get(&id)?;
-            if entry.resolution.is_some() || is_entry_expired(entry, self.timeout) {
-                return None;
+        // Clear whatever older overlay is currently shown.
+        let mut dismiss = None;
+        if let Some(old_id) = guard.device_visible.take() {
+            if let Some(entry) = guard.entries.get(&old_id) {
+                dismiss = Some(DismissedApproval {
+                    id: old_id.clone(),
+                    transport_id: entry.transport_id.clone(),
+                    was_visible_on_device: true,
+                });
             }
+        }
 
-            DeviceApproval {
-                id: id.clone(),
-                transport_id: entry.transport_id.clone(),
-                tool_name: entry.request.tool_name.clone(),
-                tool_input_summary: entry.request.tool_input_summary.clone(),
-            }
-        };
+        // Show the freshest pending request.
+        let show = guard.entries.get(&target_id).map(|entry| DeviceApproval {
+            id: target_id.clone(),
+            transport_id: entry.transport_id.clone(),
+            tool_name: entry.request.tool_name.clone(),
+            tool_input_summary: entry.request.tool_input_summary.clone(),
+        });
+        if show.is_some() {
+            guard.device_visible = Some(target_id);
+        }
 
-        guard.device_visible = Some(id);
-        Some(approval)
+        ApprovalOverlayStep { dismiss, show }
     }
 
     pub async fn note_device_disconnected(&self) {
@@ -309,15 +331,18 @@ mod tests {
     #[tokio::test]
     async fn dismisses_matching_pending_approvals() {
         let store = ApprovalStore::new();
-        let matching = store
-            .submit("approve-1".into(), "approval-1".into(), request("sess-1", "tool-1", "Bash"))
-            .await;
         let other = store
             .submit("approve-2".into(), "approval-2".into(), request("sess-2", "tool-2", "Edit"))
             .await;
+        let matching = store
+            .submit("approve-1".into(), "approval-1".into(), request("sess-1", "tool-1", "Bash"))
+            .await;
 
-        let visible = store.claim_next_for_device().await.unwrap();
+        // Freshest pending (matching) wins the device overlay.
+        let step = store.next_device_overlay().await;
+        let visible = step.show.expect("freshest pending should be shown");
         assert_eq!(visible.id, matching);
+        assert!(step.dismiss.is_none());
 
         let dismissed = store
             .dismiss_matching(&LocalHookEvent {
@@ -356,48 +381,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claims_device_approvals_in_fifo_order() {
+    async fn supersedes_to_freshest_pending_approval() {
         let store = ApprovalStore::new();
         store
             .submit("approve-1".into(), "approval-1".into(), request("sess-1", "tool-1", "Bash"))
             .await;
-        store
-            .submit("approve-2".into(), "approval-2".into(), request("sess-1", "tool-2", "Edit"))
-            .await;
 
-        let first = store.claim_next_for_device().await.unwrap();
+        // First request shows with nothing to dismiss.
+        let first_step = store.next_device_overlay().await;
         assert_eq!(
-            first,
-            DeviceApproval {
+            first_step.show,
+            Some(DeviceApproval {
                 id: "approve-1".into(),
                 transport_id: "approval-1".into(),
                 tool_name: "Bash".into(),
                 tool_input_summary: "Bash input".into(),
-            }
-        );
-        assert!(store.claim_next_for_device().await.is_none());
-
-        let dismissed = store
-            .dismiss_matching(&LocalHookEvent {
-                session_id: "sess-1".into(),
-                cwd: "/tmp/project".into(),
-                hook_event_name: "PreToolUse".into(),
-                message: None,
-                prompt_preview: None,
-                prompt_raw: None,
-                tool_name: Some("Bash".into()),
-                tool_use_id: Some("tool-1".into()),
-                permission_mode: "default".into(),
-                waiting_prompt: None,
-                recv_ts: 1,
-                claude_pid: None,
             })
-            .await;
-        assert_eq!(dismissed.first().map(|approval| approval.id.as_str()), Some("approve-1"));
+        );
+        assert!(first_step.dismiss.is_none());
 
-        let second = store.claim_next_for_device().await.unwrap();
-        assert_eq!(second.id, "approve-2");
-        assert_eq!(second.transport_id, "approval-2");
+        // A newer request supersedes the visible one.
+        store
+            .submit("approve-2".into(), "approval-2".into(), request("sess-1", "tool-2", "Edit"))
+            .await;
+        let second_step = store.next_device_overlay().await;
+        assert_eq!(
+            second_step.dismiss,
+            Some(DismissedApproval {
+                id: "approve-1".into(),
+                transport_id: "approval-1".into(),
+                was_visible_on_device: true,
+            })
+        );
+        let shown = second_step.show.expect("freshest pending should be shown");
+        assert_eq!(shown.id, "approve-2");
+        assert_eq!(shown.transport_id, "approval-2");
+
+        // Already showing the freshest: idempotent no-op.
+        let third_step = store.next_device_overlay().await;
+        assert!(third_step.show.is_none());
+        assert!(third_step.dismiss.is_none());
     }
 
     #[tokio::test]
@@ -407,12 +430,16 @@ mod tests {
             .submit("approve-1".into(), "approval-1".into(), request("sess-1", "tool-1", "Bash"))
             .await;
 
-        let first = store.claim_next_for_device().await.unwrap();
+        let first = store.next_device_overlay().await.show.expect("pending should be shown");
         assert_eq!(first.id, "approve-1");
+
+        // Already showing it: repeat is a no-op.
+        let repeat = store.next_device_overlay().await;
+        assert!(repeat.show.is_none() && repeat.dismiss.is_none());
 
         store.note_device_disconnected().await;
 
-        let retried = store.claim_next_for_device().await.unwrap();
+        let retried = store.next_device_overlay().await.show.expect("pending should be shown again");
         assert_eq!(retried.id, "approve-1");
         assert_eq!(retried.transport_id, "approval-1");
     }
@@ -421,13 +448,14 @@ mod tests {
     async fn visible_timeout_requests_device_dismissal_and_advances_queue() {
         let store = ApprovalStore::new();
         store
-            .submit("approve-1".into(), "approval-1".into(), request("sess-1", "tool-1", "Bash"))
-            .await;
-        store
             .submit("approve-2".into(), "approval-2".into(), request("sess-1", "tool-2", "Edit"))
             .await;
+        store
+            .submit("approve-1".into(), "approval-1".into(), request("sess-1", "tool-1", "Bash"))
+            .await;
 
-        let first = store.claim_next_for_device().await.unwrap();
+        // Freshest pending (approve-1) is the one shown on the device.
+        let first = store.next_device_overlay().await.show.expect("freshest pending should be shown");
         assert_eq!(first.id, "approve-1");
 
         {
@@ -446,7 +474,8 @@ mod tests {
             }
         );
 
-        let next = store.claim_next_for_device().await.unwrap();
+        // The next-freshest remaining pending advances onto the device.
+        let next = store.next_device_overlay().await.show.expect("next pending should be shown");
         assert_eq!(next.id, "approve-2");
 
         let expired_status = store.status("approve-1").await.unwrap();
