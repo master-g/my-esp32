@@ -1431,76 +1431,18 @@ async fn handle_permission_request(stdin: &str, raw: &Value) -> Result<()> {
         }
     }
 
-    // Poll for decision
-    let poll_interval = std::time::Duration::from_millis(500);
-    let app_config = AppConfig::load().unwrap_or_default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(app_config.approval.timeout_secs);
-
-    loop {
-        if std::time::Instant::now() > deadline {
-            warn!("approval timed out, denying");
-            let output = permission_request_output_for_decision(
-                "deny",
-                &tool_name,
-                Some("Approval timed out on ESP32 dashboard"),
-                &[],
-            );
-            println!("{}", serde_json::to_string(&output)?);
-            return Ok(());
-        }
-
-        tokio::time::sleep(poll_interval).await;
-
-        let response = client
-            .get(format!("{}/v1/claude/approvals/{}", admin_base_url(), approval_id))
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await;
-
-        let body: Value = match response {
-            Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
-            _ => continue,
-        };
-
-        let approval = match body.get("approval") {
-            Some(a) => a,
-            None => continue,
-        };
-
-        let resolved = approval.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !resolved {
-            continue;
-        }
-
-        let dismissed = approval.get("dismissed").and_then(|v| v.as_bool()).unwrap_or(false);
-        if dismissed {
-            return Ok(());
-        }
-
-        let decision = approval.get("decision").and_then(|v| v.as_str()).unwrap_or("deny");
-        let permission_suggestions = approval
-            .get("permission_suggestions")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let output = permission_request_output_for_decision(
-            decision,
-            &tool_name,
-            Some("Denied from ESP32 dashboard"),
-            &permission_suggestions,
-        );
-
-        println!("{}", serde_json::to_string(&output)?);
-        return Ok(());
-    }
+    // Read-only device: the request was pushed for display only. Return without emitting
+    // a decision so Claude Code falls through to its native prompt — a locked Mac withholds
+    // that prompt, which is the security property. The device cannot resolve any request.
+    Ok(())
 }
 
 async fn handle_elicitation(stdin: &str, raw: &Value) -> Result<()> {
     let prompt = parse_elicitation_prompt_from_raw(raw);
-    let app_config = AppConfig::load().unwrap_or_default();
 
-    // Check for form mode (complex schema that can't be rendered on device)
-    // Decline any schema with type: object — catches allOf, anyOf, oneOf compositions too
+    // Read-only device: never emit a decision. Complex object schemas (allOf/anyOf/oneOf
+    // compositions included) can't be summarized as a coarse type, so skip the device
+    // notify and let Claude Code's native prompt handle them.
     let is_form_mode = raw
         .get("requested_schema")
         .and_then(|v| v.get("type"))
@@ -1508,31 +1450,11 @@ async fn handle_elicitation(stdin: &str, raw: &Value) -> Result<()> {
         == Some("object");
 
     if is_form_mode {
-        let output = json!({
-            "hookSpecificOutput": {
-                "hookEventName": "Elicitation",
-                "decision": {
-                    "behavior": "decline",
-                    "message": "Complex form input not supported on ESP32 dashboard. Please answer in the terminal."
-                }
-            }
-        });
-        println!("{}", serde_json::to_string(&output)?);
         return Ok(());
     }
 
     let Some(prompt) = prompt else {
-        // Empty options or failed to parse — show hint directing user to terminal
-        let output = json!({
-            "hookSpecificOutput": {
-                "hookEventName": "Elicitation",
-                "decision": {
-                    "behavior": "decline",
-                    "message": "This prompt requires terminal input. Please answer in the terminal."
-                }
-            }
-        });
-        println!("{}", serde_json::to_string(&output)?);
+        // Unparseable prompt — nothing to display; the native prompt handles it.
         return Ok(());
     };
 
@@ -1579,88 +1501,9 @@ async fn handle_elicitation(stdin: &str, raw: &Value) -> Result<()> {
         }
     }
 
-    // Poll for selection
-    let poll_interval = std::time::Duration::from_millis(500);
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(app_config.approval.elicitation_timeout_secs);
-
-    loop {
-        if std::time::Instant::now() > deadline {
-            warn!("elicitation timed out");
-            let output = json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "Elicitation",
-                    "decision": {
-                        "behavior": "decline",
-                        "message": "Elicitation timed out on ESP32 dashboard"
-                    }
-                }
-            });
-            println!("{}", serde_json::to_string(&output)?);
-            return Ok(());
-        }
-
-        tokio::time::sleep(poll_interval).await;
-
-        let response = client
-            .get(format!("{}/v1/claude/prompts/{}", admin_base_url(), prompt_id))
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await;
-
-        let body: Value = match response {
-            Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
-            _ => continue,
-        };
-
-        let prompt_status = match body.get("prompt") {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let resolved = prompt_status.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !resolved {
-            continue;
-        }
-
-        let selection_index = prompt_status
-            .get("selection_index")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize);
-
-        let output = match selection_index {
-            Some(index) => {
-                let selected_label = prompt
-                    .options
-                    .get(index)
-                    .map(|o| o.label.clone())
-                    .unwrap_or_default();
-                json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "Elicitation",
-                        "decision": {
-                            "behavior": "accept",
-                            "updatedInput": {
-                                "value": selected_label
-                            }
-                        }
-                    }
-                })
-            }
-            None => json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "Elicitation",
-                    "decision": {
-                        "behavior": "decline",
-                        "message": "Declined from ESP32 dashboard"
-                    }
-                }
-            }),
-        };
-
-        println!("{}", serde_json::to_string(&output)?);
-        return Ok(());
-    }
+    // Read-only device: the prompt was pushed for display only. Return without a decision
+    // so Claude Code's native prompt resolves it.
+    Ok(())
 }
 
 async fn handle_ask_user_question(stdin: &str, raw: &Value) -> Result<()> {
@@ -1674,7 +1517,6 @@ async fn handle_ask_user_question(stdin: &str, raw: &Value) -> Result<()> {
     };
 
     let prompt_id = next_prompt_id();
-    let app_config = AppConfig::load().unwrap_or_default();
 
     // Also ingest as a normal event so the dashboard updates
     if let Some(event) = event.as_ref() {
@@ -1717,88 +1559,9 @@ async fn handle_ask_user_question(stdin: &str, raw: &Value) -> Result<()> {
         }
     }
 
-    // Poll for selection
-    let poll_interval = std::time::Duration::from_millis(500);
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(app_config.approval.question_timeout_secs);
-
-    loop {
-        if std::time::Instant::now() > deadline {
-            warn!("ask user question timed out");
-            let output = json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "decision": {
-                        "behavior": "deny",
-                        "message": "Question timed out on ESP32 dashboard"
-                    }
-                }
-            });
-            println!("{}", serde_json::to_string(&output)?);
-            return Ok(());
-        }
-
-        tokio::time::sleep(poll_interval).await;
-
-        let response = client
-            .get(format!("{}/v1/claude/prompts/{}", admin_base_url(), prompt_id))
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await;
-
-        let body: Value = match response {
-            Ok(resp) if resp.status().is_success() => resp.json().await.unwrap_or_default(),
-            _ => continue,
-        };
-
-        let prompt_status = match body.get("prompt") {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let resolved = prompt_status.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !resolved {
-            continue;
-        }
-
-        let selection_index = prompt_status
-            .get("selection_index")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize);
-
-        let output = match selection_index {
-            Some(index) => {
-                let selected_label = prompt
-                    .options
-                    .get(index)
-                    .map(|o| o.label.clone())
-                    .unwrap_or_default();
-                json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "decision": {
-                            "behavior": "allow",
-                            "updatedInput": {
-                                "answers": [{ "question": prompt.question, "answer": selected_label }]
-                            }
-                        }
-                    }
-                })
-            }
-            None => json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "decision": {
-                        "behavior": "deny",
-                        "message": "Declined from ESP32 dashboard"
-                    }
-                }
-            }),
-        };
-
-        println!("{}", serde_json::to_string(&output)?);
-        return Ok(());
-    }
+    // Read-only device: the question was pushed for display only. Return without a decision
+    // so Claude Code's native prompt resolves it.
+    Ok(())
 }
 
 fn next_approval_id() -> String {
@@ -1841,54 +1604,6 @@ fn parse_elicitation_prompt_from_raw(raw: &Value) -> Option<WaitingPrompt> {
         question,
         options,
     })
-}
-
-fn permission_request_output_for_decision(
-    decision: &str,
-    tool_name: &str,
-    deny_message: Option<&str>,
-    permission_suggestions: &[Value],
-) -> Value {
-    match decision {
-        "allow" => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "allow"
-                }
-            }
-        }),
-        "allow_always" | "yolo" => {
-            let updated_permissions = if permission_suggestions.is_empty() {
-                json!([{
-                    "type": "addRules",
-                    "rules": [{ "toolName": tool_name }],
-                    "behavior": "allow",
-                    "destination": "localSettings"
-                }])
-            } else {
-                json!(permission_suggestions)
-            };
-            json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PermissionRequest",
-                    "decision": {
-                        "behavior": "allow",
-                        "updatedPermissions": updated_permissions
-                    }
-                }
-            })
-        }
-        _ => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "deny",
-                    "message": deny_message.unwrap_or("Denied from ESP32 dashboard")
-                }
-            }
-        }),
-    }
 }
 
 fn summarize_tool_input(raw: &Value) -> String {
@@ -2048,18 +1763,6 @@ mod tests {
     }
 
     #[test]
-    fn allow_always_output_adds_persistent_allow_rule_for_tool() {
-        let output = permission_request_output_for_decision("allow_always", "Bash", None, &[]);
-        let decision = &output["hookSpecificOutput"]["decision"];
-
-        assert_eq!(decision["behavior"], "allow");
-        assert_eq!(decision["updatedPermissions"][0]["type"], "addRules");
-        assert_eq!(decision["updatedPermissions"][0]["rules"][0]["toolName"], "Bash");
-        assert_eq!(decision["updatedPermissions"][0]["behavior"], "allow");
-        assert_eq!(decision["updatedPermissions"][0]["destination"], "localSettings");
-    }
-
-    #[test]
     fn sanitize_raw_event_preserves_ask_user_question_prompt() {
         let event = sanitize_raw_event(RawHookInput {
             session_id: "sess-1".into(),
@@ -2213,13 +1916,6 @@ mod tests {
         assert_eq!(snapshot.event, "Notification");
         assert_eq!(snapshot.detail, "Heads up");
         assert_eq!(snapshot.attention, Attention::High);
-    }
-
-    #[test]
-    fn deny_output_uses_supplied_message() {
-        let output =
-            permission_request_output_for_decision("deny", "Bash", Some("Approval timed out"), &[]);
-        assert_eq!(output["hookSpecificOutput"]["decision"]["message"], "Approval timed out");
     }
 
     #[test]
