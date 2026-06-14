@@ -345,8 +345,12 @@ void home_runtime_handle_event(home_runtime_t *runtime, const app_event_t *event
         home_approval_hide(&runtime->approval);
         break;
     case APP_EVENT_PROMPT_REQUEST:
+        home_screensaver_poke_activity(&runtime->screensaver);
+        exit_screensaver(runtime);
+        home_approval_show_pending(&runtime->approval);
+        break;
     case APP_EVENT_PROMPT_DISMISS:
-        /* Prompt overlays removed; state now reflected via sprite emotion in snapshot */
+        home_approval_hide(&runtime->approval);
         break;
     default:
         break;

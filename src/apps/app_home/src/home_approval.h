@@ -5,13 +5,14 @@
 
 #include "lvgl.h"
 
+/* Read-only "Claude is waiting" status overlay. The device never returns a
+ * decision; this only displays the coarse interaction type for every waiting
+ * type (tool permission, Elicitation, AskUserQuestion). */
 typedef struct {
     lv_obj_t *overlay;
-    lv_obj_t *tool_label;
-    lv_obj_t *desc_label;
-    lv_obj_t *btn_allow;
-    lv_obj_t *btn_deny;
-    lv_obj_t *btn_always;
+    lv_obj_t *status_label;
+    lv_obj_t *type_label;
+    lv_timer_t *timeout_timer;
 } home_approval_t;
 
 void home_approval_create(home_approval_t *approval, lv_obj_t *root);
