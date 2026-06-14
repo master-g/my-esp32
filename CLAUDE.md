@@ -152,7 +152,9 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 - Service layer handles all external data, broadcasts via event bus
 - Power policy controls data collection frequency based on power source and foreground app
 - Display uses partial double buffering (not full screen buffer) due to memory constraints
-- Apps support explicit pause/resume; Home also owns the single-overlay approval/prompt UX for Claude interactions
+- Apps support explicit pause/resume; Home owns a single **read-only** overlay that shows the coarse type of any waiting Claude interaction (tool permission, Elicitation, AskUserQuestion) — it never returns a decision
+- The ESP32 is a read-only status notifier for Claude authorizations: every decision (allow / deny / allow_always, Elicitation, AskUserQuestion) is made on the Mac's native prompt, so a locked Mac cannot be bypassed from the device. `device_link` carries only one-way request/dismiss notifications; the inbound decision frames (`claude.approval.resolved`, `claude.prompt.response`), the `claude.approve` RPC, and the approval generation check are removed. The overlay shows only a coarse interaction type — never command, argument, or option content
+- `protocol.error` and the serial line-overflow guard are unrelated to approvals and stay load-bearing — do not revert them
 - Lock order: LVGL lock → service mutex. No service task may call LVGL directly
 
 ## 语言风格
