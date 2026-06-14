@@ -644,12 +644,13 @@ impl AppState {
     }
 
     fn send_device_approval_request(&self, approval: &DeviceApproval) -> Result<()> {
+        // Read-only device: send only a coarse interaction type, never the tool name's
+        // arguments or the input summary (R2 — no command/argument content crosses).
         self.device_manager.send_protocol_event(
             "claude.approval.request",
             serde_json::json!({
                 "id": approval.transport_id,
-                "tool_name": approval.tool_name,
-                "description": approval.tool_input_summary,
+                "type": coarse_tool_type(&approval.tool_name),
             }),
         )
     }
@@ -662,22 +663,13 @@ impl AppState {
     }
 
     fn send_device_prompt_request(&self, prompt: &DevicePrompt) -> Result<()> {
-        let option_labels: Vec<String> = prompt
-            .prompt
-            .options
-            .iter()
-            .map(|o| o.label.clone())
-            .collect();
+        // Read-only device: send only a coarse interaction type, never the question,
+        // option labels, or any other prompt content (R2).
         self.device_manager.send_protocol_event(
             "claude.prompt.request",
             serde_json::json!({
                 "id": prompt.transport_id,
-                "kind": prompt.prompt.kind.as_str(),
-                "title": prompt.prompt.title,
-                "question": prompt.prompt.question,
-                "options_text": format_prompt_options_text(&prompt.prompt),
-                "option_count": prompt.prompt.options.len(),
-                "option_labels": option_labels,
+                "type": coarse_prompt_type(prompt.prompt.kind),
             }),
         )
     }
@@ -929,20 +921,28 @@ fn build_prompt_id(event: &LocalHookEvent, prompt: &crate::model::WaitingPrompt)
     }
 }
 
-fn format_prompt_options_text(prompt: &crate::model::WaitingPrompt) -> String {
-    let text = prompt
-        .options
-        .iter()
-        .enumerate()
-        .map(|(index, option)| match option.description.as_deref() {
-            Some(description) if !description.is_empty() => {
-                format!("{}. {} - {}", index + 1, option.label, description)
-            }
-            _ => format!("{}. {}", index + 1, option.label),
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-    sanitize_snapshot_detail(&text)
+/// Map a tool name to a coarse interaction type for the read-only device. Never
+/// returns tool arguments or input content (R2); unknown tools collapse to a generic
+/// label so arbitrary (e.g. MCP) tool names don't leak to the always-on screen.
+fn coarse_tool_type(tool_name: &str) -> &'static str {
+    match tool_name {
+        "Bash" => "Bash command",
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => "File edit",
+        "Read" | "NotebookRead" => "File read",
+        "Glob" | "Grep" | "LS" => "File search",
+        "WebFetch" | "WebSearch" => "Web request",
+        "Task" => "Subagent task",
+        _ => "Tool request",
+    }
+}
+
+/// Map a prompt kind to a coarse interaction type. No question or option text crosses
+/// to the device (R2).
+fn coarse_prompt_type(kind: crate::model::WaitingPromptKind) -> &'static str {
+    match kind {
+        crate::model::WaitingPromptKind::Elicitation => "Input request",
+        crate::model::WaitingPromptKind::AskUserQuestion => "Question",
+    }
 }
 
 async fn post_event(
@@ -1283,6 +1283,19 @@ mod tests {
             WaitingPromptOption, WireFrame,
         },
     };
+
+    #[test]
+    fn coarse_types_map_to_fixed_labels_without_leaking_content() {
+        // Known tools map to a friendly category; unknown (e.g. MCP) tools collapse to a
+        // generic label so arbitrary tool names never reach the always-on screen (R2).
+        assert_eq!(coarse_tool_type("Bash"), "Bash command");
+        assert_eq!(coarse_tool_type("Write"), "File edit");
+        assert_eq!(coarse_tool_type("Read"), "File read");
+        assert_eq!(coarse_tool_type("mcp__github__create_issue"), "Tool request");
+        // Prompt kinds map to coarse labels, never the question or option text.
+        assert_eq!(coarse_prompt_type(WaitingPromptKind::AskUserQuestion), "Question");
+        assert_eq!(coarse_prompt_type(WaitingPromptKind::Elicitation), "Input request");
+    }
 
     #[test]
     fn resolved_serial_baud_prefers_env_override() {
