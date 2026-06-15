@@ -339,9 +339,9 @@ void weather_service_request_refresh(void)
         return;
     }
     s_last_request_us = now_us;
-    s_snapshot.state = WEATHER_REFRESHING;
     xSemaphoreGive(s_mutex);
-    publish_weather_event();
+    /* REFRESHING / s_refresh_in_progress are owned by weather_service_task (set at
+     * fetch start, cleared on completion); writing state here would desync the flag. */
     (void)xQueueSend(s_command_queue, &cmd, 0);
 }
 
