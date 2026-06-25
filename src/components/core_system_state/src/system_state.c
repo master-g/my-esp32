@@ -13,28 +13,21 @@ static uint32_t s_user_activity_seq;
 static SemaphoreHandle_t s_mutex;
 static bool s_initialized;
 
-// 在持 s_mutex 时调用:若策略输入有变化则填 output 并返回 true。
+// 在持 s_mutex 时调用:返回策略输入是否有变化。
 // 故意不在此发事件——event_bus_publish 同步派发给订阅者,若订阅者回调反向调
 // system_state_set_*(),持锁内 publish 会在二次 take(s_mutex) 处死锁。改为算完放锁后再发。
-static bool recompute_locked(power_policy_output_t *output)
+static bool recompute_locked(void)
 {
-    if (!s_initialized) {
-        return false;
-    }
-
-    if (power_policy_on_input_changed(&s_input)) {
-        power_policy_get_output(output);
-        return true;
-    }
-    return false;
+    return s_initialized && power_policy_on_input_changed(&s_input);
 }
 
-// 在 s_mutex 已释放后调用,发布 power-changed 事件。
-static void publish_power_changed(const power_policy_output_t *output)
+// 在 s_mutex 已释放后调用,发布 power-changed 信号。
+// payload 为 NULL,遵循事件总线约定:订阅者以事件类型为信号,自行 query 最新状态。
+static void publish_power_changed(void)
 {
     app_event_t event = {
         .type = APP_EVENT_POWER_CHANGED,
-        .payload = (void *)output,
+        .payload = NULL,
     };
     event_bus_publish(&event);
 }
@@ -54,9 +47,8 @@ esp_err_t system_state_init(void)
     s_initialized = true;
 
     // init 跑在启动期单线程,无竞争;直接算并发布初始状态。
-    power_policy_output_t output;
-    if (recompute_locked(&output)) {
-        publish_power_changed(&output);
+    if (recompute_locked()) {
+        publish_power_changed();
     }
     return ESP_OK;
 }
@@ -84,76 +76,71 @@ uint32_t system_state_get_user_activity_seq(void)
 
 void system_state_set_power_source(power_source_t power_source)
 {
-    power_policy_output_t output;
     bool changed;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.power_source = power_source;
-    changed = recompute_locked(&output);
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
 
     if (changed) {
-        publish_power_changed(&output);
+        publish_power_changed();
     }
 }
 
 void system_state_set_display_state(display_state_t display_state)
 {
-    power_policy_output_t output;
     bool changed;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.display_state = display_state;
-    changed = recompute_locked(&output);
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
 
     if (changed) {
-        publish_power_changed(&output);
+        publish_power_changed();
     }
 }
 
 void system_state_set_foreground_app(app_id_t app_id)
 {
-    power_policy_output_t output;
     bool changed;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.foreground_app = app_id;
-    changed = recompute_locked(&output);
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
 
     if (changed) {
-        publish_power_changed(&output);
+        publish_power_changed();
     }
 }
 
 void system_state_set_wifi_connected(bool wifi_connected)
 {
-    power_policy_output_t output;
     bool changed;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.wifi_connected = wifi_connected;
-    changed = recompute_locked(&output);
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
 
     if (changed) {
-        publish_power_changed(&output);
+        publish_power_changed();
     }
 }
 
 void system_state_set_user_interacting(bool user_interacting)
 {
-    power_policy_output_t output;
     bool changed;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.user_interacting = user_interacting;
-    changed = recompute_locked(&output);
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
 
     if (changed) {
-        publish_power_changed(&output);
+        publish_power_changed();
     }
 }
 

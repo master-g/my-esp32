@@ -33,6 +33,8 @@
 #error "CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID must be set when HMAC-based NVS encryption is enabled."
 #endif
 
+#define DROP_LOG_INTERVAL_S 30
+
 static const char *TAG = "bootstrap";
 static esp_timer_handle_t s_tick_timer;
 
@@ -50,7 +52,7 @@ static void tick_1s_cb(void *arg)
     // 每 30s 把队列丢弃计数打到串口(非零才打,避免刷屏)。让设备本地也能看到丢事件,
     // 不必接 host 工具——这些计数本就已统计、并经 device_link 导出到 host JSON。
     static uint32_t s_drop_log_ticks;
-    if (++s_drop_log_ticks >= 30) {
+    if (++s_drop_log_ticks >= DROP_LOG_INTERVAL_S) {
         s_drop_log_ticks = 0;
         app_manager_debug_stats_t ui_stats;
         market_debug_stats_t market_stats;

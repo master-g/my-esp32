@@ -8,26 +8,30 @@
 #include "freertos/task.h"
 
 #define BOOT_FAIL_RESTART_LIMIT 3
+#define BOOT_FAIL_MAGIC 0xB00710ADu
 
 static const char *TAG = "main";
 
-// 跨重启保留的启动失败计数。RTC_NOINIT 段在软复位后保留、冷启动后是垃圾值,
-// 故下面用复位原因归一化。
+// 跨重启保留的启动失败计数。RTC_NOINIT 段在复位后保留、冷启动后是垃圾值。
+// 用 magic word 检测其有效性,而不依赖枚举复位原因(panic/WDT/brownout 易漏判)。
 static RTC_NOINIT_ATTR uint32_t s_boot_fail_count;
+static RTC_NOINIT_ATTR uint32_t s_boot_fail_magic;
 
 void app_main(void)
 {
     esp_err_t err = bootstrap_start();
     if (err == ESP_OK) {
         s_boot_fail_count = 0;
+        s_boot_fail_magic = BOOT_FAIL_MAGIC;
         for (;;) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 
-    // 仅当上次复位是本函数主动触发的软复位时才累加;其他原因(上电/panic/外部)
-    // 视为本轮第一次失败,把垃圾计数归一化。
-    if (esp_reset_reason() != ESP_RST_SW) {
+    // 冷启动垃圾值在此归一化为本轮第一次失败;此后无论复位原因(主动 esp_restart、
+    // panic、WDT)失败都累加,直到上限——保证有界,不会被 panic/WDT 误清零而无限重启。
+    if (s_boot_fail_magic != BOOT_FAIL_MAGIC) {
+        s_boot_fail_magic = BOOT_FAIL_MAGIC;
         s_boot_fail_count = 0;
     }
     s_boot_fail_count++;

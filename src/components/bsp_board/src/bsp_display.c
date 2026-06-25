@@ -44,6 +44,7 @@ static const char *TAG = "bsp_display";
 #define BSP_EDGE_GESTURE_ZONE_PX 20
 #define BSP_EDGE_GESTURE_TRIGGER_PX 72
 #define BSP_EDGE_GESTURE_MAX_OFF_AXIS_PX 48
+#define BSP_FATAL_SCREEN_COLOR_RGB565 0xF800u // 纯红
 
 static SemaphoreHandle_t s_lvgl_mutex;
 static TaskHandle_t s_lvgl_task_handle;
@@ -624,7 +625,7 @@ bool bsp_display_show_fatal_screen(void)
     // 逐行推送,缓冲只需一行(panel_push_rows_blocking 会 memcpy 到 DMA buffer)。
     static uint16_t red_row[BSP_LCD_PANEL_H_RES];
     for (size_t i = 0; i < BSP_LCD_PANEL_H_RES; i++) {
-        red_row[i] = 0xF800; // RGB565 红
+        red_row[i] = BSP_FATAL_SCREEN_COLOR_RGB565;
     }
 
     bool ok = true;
@@ -635,7 +636,7 @@ bool bsp_display_show_fatal_screen(void)
         }
     }
 
-    bsp_display_end_direct_mode();
-    bsp_display_unlock();
+    // 终态专用:故意不 end_direct_mode、不 unlock,保持独占 panel,防止 LVGL 任务
+    // 在调用方重启/halt 前用 lv_timer_handler 把界面重绘覆盖掉红屏。
     return ok;
 }
