@@ -12,6 +12,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "screensaver_glyphs.h"
 #include "screensaver_renderer.h"
 
 #define TAG "screensaver_direct"
@@ -33,47 +34,10 @@
 #define DIRECT_PUSH_STOP_TOKEN 0xFFU
 
 typedef struct {
-    char ch;
-    uint8_t rows[7];
-} glyph_t;
-
-static const glyph_t s_glyphs[] = {
-    {' ', {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
-    {'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
-    {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}},
-    {':', {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00}},
-    {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
-    {'1', {0x04, 0x0C, 0x14, 0x04, 0x04, 0x04, 0x1F}},
-    {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
-    {'3', {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E}},
-    {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
-    {'5', {0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E}},
-    {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
-    {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
-    {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
-    {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x1C}},
-    {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
-    {'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
-    {'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
-    {'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
-    {'I', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}},
-    {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
-    {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
-    {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
-    {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
-    {'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
-    {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
-    {'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}},
-    {'X', {0x11, 0x0A, 0x04, 0x04, 0x04, 0x0A, 0x11}},
-};
-
-typedef struct {
     int64_t frame_start_us;
     uint32_t compose_us;
     uint32_t text_us;
 } direct_frame_perf_t;
-
-typedef void (*pixel_writer_t)(void *ctx, int32_t x, int32_t y, uint16_t color);
 
 static uint16_t *s_framebufs[DIRECT_FRAMEBUF_COUNT];
 static uint16_t *s_framebuf;
@@ -230,52 +194,6 @@ static void put_pixel_logical_buffer(void *ctx, int32_t x, int32_t y, uint16_t c
     }
 
     pixels[(size_t)y * DIRECT_LOGICAL_W + x] = color;
-}
-
-static const uint8_t *find_glyph_rows(char c)
-{
-    for (size_t i = 0; i < sizeof(s_glyphs) / sizeof(s_glyphs[0]); i++) {
-        if (s_glyphs[i].ch == c) {
-            return s_glyphs[i].rows;
-        }
-    }
-
-    return s_glyphs[0].rows;
-}
-
-static void draw_char_with_writer(pixel_writer_t writer, void *ctx, int32_t x, int32_t y,
-                                  int32_t scale, char ch, uint16_t color)
-{
-    const uint8_t *rows = find_glyph_rows(ch);
-
-    for (int32_t row = 0; row < 7; row++) {
-        for (int32_t col = 0; col < 5; col++) {
-            if ((rows[row] & (1U << (4 - col))) == 0) {
-                continue;
-            }
-
-            for (int32_t dy = 0; dy < scale; dy++) {
-                for (int32_t dx = 0; dx < scale; dx++) {
-                    writer(ctx, x + col * scale + dx, y + row * scale + dy, color);
-                }
-            }
-        }
-    }
-}
-
-static void draw_text_with_writer(pixel_writer_t writer, void *ctx, int32_t x, int32_t y,
-                                  int32_t scale, const char *text, uint16_t color)
-{
-    int32_t cursor = x;
-
-    if (writer == NULL || text == NULL) {
-        return;
-    }
-
-    for (size_t i = 0; text[i] != '\0'; i++) {
-        draw_char_with_writer(writer, ctx, cursor, y, scale, text[i], color);
-        cursor += 6 * scale;
-    }
 }
 
 static void fill_background_lowres(uint32_t time_ms)
@@ -469,6 +387,7 @@ bool screensaver_direct_init(void)
     init_native_scale_maps();
     screensaver_direct_reset();
     s_ready = true;
+    ESP_LOGI(TAG, "glyph selftest %s", ss_glyph_selftest() ? "pass" : "FAIL");
     return true;
 }
 
@@ -622,8 +541,8 @@ esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_
     compose_us = (uint32_t)(esp_timer_get_time() - compose_start_us);
 
     text_start_us = esp_timer_get_time();
-    draw_text_with_writer(put_pixel_native, NULL, (DIRECT_LOGICAL_W - time_width) / 2, time_y,
-                          time_scale, (time_text != NULL) ? time_text : "--:--", time_color);
+    ss_glyph_draw_text(put_pixel_native, NULL, (DIRECT_LOGICAL_W - time_width) / 2, time_y,
+                       time_scale, (time_text != NULL) ? time_text : "--:--", time_color);
     text_us = (uint32_t)(esp_timer_get_time() - text_start_us);
     xSemaphoreGive(s_render_mutex);
 
@@ -665,9 +584,8 @@ esp_err_t screensaver_direct_render_snapshot_rgb565(uint32_t time_ms, const char
 
     fill_background_lowres(time_ms);
     upscale_background_to_logical(pixels);
-    draw_text_with_writer(put_pixel_logical_buffer, pixels, (DIRECT_LOGICAL_W - time_width) / 2,
-                          time_y, time_scale, (time_text != NULL) ? time_text : "--:--",
-                          time_color);
+    ss_glyph_draw_text(put_pixel_logical_buffer, pixels, (DIRECT_LOGICAL_W - time_width) / 2,
+                       time_y, time_scale, (time_text != NULL) ? time_text : "--:--", time_color);
     xSemaphoreGive(s_render_mutex);
 
     if (out_width != NULL) {

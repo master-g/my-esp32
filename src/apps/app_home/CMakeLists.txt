@@ -7,6 +7,7 @@ idf_component_register(
         "src/home_screensaver.c"
         "src/home_view.c"
         "src/screensaver_direct.c"
+        "src/screensaver_glyphs.c"
         "src/screensaver_renderer.c"
         "src/generated/app_home_status_font.c"
         "src/generated/departure_mono_55.c"
