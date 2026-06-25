@@ -2,9 +2,11 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "bsp_board.h"
+#include "bsp_display.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -576,6 +578,13 @@ void app_manager_process_ui_events(void)
 
     if (!s_initialized) {
         return;
+    }
+
+    // 该函数读 s_foreground_app 等共享状态时不加锁,正确性依赖"只在 LVGL 任务执行"。
+    // 当前调用点唯一(经 bsp_display_set_ui_callback 注册),断言防止未来从别处误调。
+    if (!bsp_display_is_in_lvgl_task()) {
+        ESP_LOGE(TAG, "app_manager_process_ui_events must run on the LVGL task");
+        abort();
     }
 
     while (xQueueReceive(s_ui_control_queue, &control_request, 0) == pdTRUE) {

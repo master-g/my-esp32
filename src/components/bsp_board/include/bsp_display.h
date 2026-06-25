@@ -27,6 +27,8 @@ void bsp_display_unlock(void);
 lv_obj_t *bsp_display_get_app_root(void);
 void bsp_display_set_backlight_percent(uint8_t percent);
 void bsp_display_set_ui_callback(bsp_display_ui_cb_t cb);
+// 当前任务是否为 LVGL 端口任务。用于断言"只能在 LVGL 任务调用"的约定。
+bool bsp_display_is_in_lvgl_task(void);
 void bsp_display_get_perf_snapshot(bsp_display_perf_snapshot_t *out);
 bool bsp_display_begin_direct_mode(void);
 void bsp_display_end_direct_mode(void);

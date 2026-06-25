@@ -46,6 +46,7 @@ static const char *TAG = "bsp_display";
 #define BSP_EDGE_GESTURE_MAX_OFF_AXIS_PX 48
 
 static SemaphoreHandle_t s_lvgl_mutex;
+static TaskHandle_t s_lvgl_task_handle;
 static SemaphoreHandle_t s_flush_done_semaphore;
 static esp_lcd_panel_handle_t s_panel;
 static lv_display_t *s_display;
@@ -512,7 +513,7 @@ static esp_err_t init_lvgl(void)
     {
         BaseType_t ret =
             xTaskCreatePinnedToCore(lvgl_port_task, "bsp_lvgl", BSP_LVGL_TASK_STACK_SIZE, NULL,
-                                    BSP_LVGL_TASK_PRIORITY, NULL, 0);
+                                    BSP_LVGL_TASK_PRIORITY, &s_lvgl_task_handle, 0);
         ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "lvgl task create failed");
     }
 
@@ -551,6 +552,11 @@ void bsp_display_unlock(void)
     if (s_lvgl_mutex != NULL) {
         xSemaphoreGive(s_lvgl_mutex);
     }
+}
+
+bool bsp_display_is_in_lvgl_task(void)
+{
+    return s_lvgl_task_handle != NULL && xTaskGetCurrentTaskHandle() == s_lvgl_task_handle;
 }
 
 lv_obj_t *bsp_display_get_app_root(void) { return s_app_root; }
