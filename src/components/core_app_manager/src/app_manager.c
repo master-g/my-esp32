@@ -18,6 +18,8 @@
 #define UI_EVENT_QUEUE_LEN 16
 #define UI_CONTROL_QUEUE_LEN 4
 #define UI_CONTROL_NOTIFY_INDEX 0
+// 有限超时,避免在 LVGL 任务卡住时无限阻塞调用方;取值与 device_link 的 UI 控制超时同量级。
+#define UI_SWITCH_LOCK_TIMEOUT_MS 2000
 
 typedef struct {
     app_event_type_t type;
@@ -458,7 +460,8 @@ esp_err_t app_manager_register(const app_descriptor_t *descriptor)
 
 esp_err_t app_manager_switch_to(app_id_t app_id)
 {
-    if (!bsp_board_lock(UINT32_MAX)) {
+    // 拿不到锁就放弃本次切换(下一拍可重试),不死等。
+    if (!bsp_board_lock(UI_SWITCH_LOCK_TIMEOUT_MS)) {
         return ESP_ERR_TIMEOUT;
     }
     esp_err_t err = switch_to_locked(app_id);
