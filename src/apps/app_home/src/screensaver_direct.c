@@ -12,6 +12,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "screensaver_effects.h"
 #include "screensaver_glyphs.h"
 #include "screensaver_renderer.h"
 
@@ -194,6 +195,39 @@ static void put_pixel_logical_buffer(void *ctx, int32_t x, int32_t y, uint16_t c
     }
 
     pixels[(size_t)y * DIRECT_LOGICAL_W + x] = color;
+}
+
+#define SS_CLOCK_MARGIN 10
+
+/* Halve each RGB565 channel twice -> ~25% brightness scrim. */
+static inline uint16_t rgb565_darken(uint16_t c)
+{
+    c = (uint16_t)((c >> 1) & 0x7BEFU);
+    return (uint16_t)((c >> 1) & 0x7BEFU);
+}
+
+/* Darken the native framebuffer under the clock so it stays legible over any
+ * effect. Rectangle is in logical coords; mapped per pixel to native. */
+static void scrim_clock_region(int32_t x0, int32_t y0, int32_t w, int32_t h)
+{
+    for (int32_t y = y0; y < y0 + h; y++) {
+        for (int32_t x = x0; x < x0 + w; x++) {
+            if (x < 0 || y < 0 || x >= DIRECT_LOGICAL_W || y >= DIRECT_LOGICAL_H ||
+                s_framebuf == NULL) {
+                continue;
+            }
+            uint32_t idx = native_index_from_logical(x, y);
+            s_framebuf[idx] = rgb565_darken(s_framebuf[idx]);
+        }
+    }
+}
+
+/* Clear the native framebuffer and render the selected effect's background. */
+static void effects_render_native(uint32_t time_ms)
+{
+    memset(s_framebuf, 0, (size_t)BSP_LCD_PANEL_H_RES * BSP_LCD_PANEL_V_RES * sizeof(uint16_t));
+    screensaver_effects_render(put_pixel_native, NULL, DIRECT_LOGICAL_W / SS_CELL_W,
+                               DIRECT_LOGICAL_H / SS_CELL_H, time_ms);
 }
 
 static void fill_background_lowres(uint32_t time_ms)
@@ -536,11 +570,13 @@ esp_err_t screensaver_direct_render_and_push(uint32_t time_ms, const char *time_
     }
 
     compose_start_us = frame_start_us;
-    fill_background_lowres(time_ms);
-    upscale_background_to_native();
+    effects_render_native(time_ms);
     compose_us = (uint32_t)(esp_timer_get_time() - compose_start_us);
 
     text_start_us = esp_timer_get_time();
+    scrim_clock_region((DIRECT_LOGICAL_W - time_width) / 2 - SS_CLOCK_MARGIN,
+                       time_y - SS_CLOCK_MARGIN, time_width + 2 * SS_CLOCK_MARGIN,
+                       time_height + 2 * SS_CLOCK_MARGIN);
     ss_glyph_draw_text(put_pixel_native, NULL, (DIRECT_LOGICAL_W - time_width) / 2, time_y,
                        time_scale, (time_text != NULL) ? time_text : "--:--", time_color);
     text_us = (uint32_t)(esp_timer_get_time() - text_start_us);
@@ -582,8 +618,24 @@ esp_err_t screensaver_direct_render_snapshot_rgb565(uint32_t time_ms, const char
         return ESP_ERR_INVALID_STATE;
     }
 
-    fill_background_lowres(time_ms);
-    upscale_background_to_logical(pixels);
+    memset(pixels, 0, required_bytes);
+    screensaver_effects_render(put_pixel_logical_buffer, pixels, DIRECT_LOGICAL_W / SS_CELL_W,
+                               DIRECT_LOGICAL_H / SS_CELL_H, time_ms);
+    {
+        int32_t cx = (DIRECT_LOGICAL_W - time_width) / 2 - SS_CLOCK_MARGIN;
+        int32_t cy = time_y - SS_CLOCK_MARGIN;
+        int32_t cw = time_width + 2 * SS_CLOCK_MARGIN;
+        int32_t ch = time_height + 2 * SS_CLOCK_MARGIN;
+        for (int32_t y = cy; y < cy + ch; y++) {
+            for (int32_t x = cx; x < cx + cw; x++) {
+                if (x < 0 || y < 0 || x >= DIRECT_LOGICAL_W || y >= DIRECT_LOGICAL_H) {
+                    continue;
+                }
+                pixels[(size_t)y * DIRECT_LOGICAL_W + x] =
+                    rgb565_darken(pixels[(size_t)y * DIRECT_LOGICAL_W + x]);
+            }
+        }
+    }
     ss_glyph_draw_text(put_pixel_logical_buffer, pixels, (DIRECT_LOGICAL_W - time_width) / 2,
                        time_y, time_scale, (time_text != NULL) ? time_text : "--:--", time_color);
     xSemaphoreGive(s_render_mutex);

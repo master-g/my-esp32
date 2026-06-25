@@ -71,6 +71,30 @@ static void update_time_label(home_screensaver_t *screensaver, const char *time_
     }
 }
 
+typedef struct {
+    lv_color32_t *pixels;
+    uint32_t stride;
+    uint16_t w;
+    uint16_t h;
+} ss_canvas_ctx_t;
+
+/* RGB565 -> ARGB8888 pixel writer for the live LVGL fallback canvas. */
+static void put_pixel_canvas(void *ctx, int32_t x, int32_t y, uint16_t color)
+{
+    ss_canvas_ctx_t *cc = (ss_canvas_ctx_t *)ctx;
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+
+    if (x < 0 || y < 0 || x >= (int32_t)cc->w || y >= (int32_t)cc->h) {
+        return;
+    }
+    r = (uint8_t)((color >> 8) & 0xF8U);
+    g = (uint8_t)((color >> 3) & 0xFCU);
+    b = (uint8_t)((color << 3) & 0xF8U);
+    cc->pixels[(uint32_t)y * cc->stride + (uint32_t)x] = lv_color32_make(r, g, b, 0xFF);
+}
+
 static void render_background(home_screensaver_t *screensaver)
 {
     lv_draw_buf_t *draw_buf;
@@ -100,7 +124,12 @@ static void render_background(home_screensaver_t *screensaver)
 
     pixels = (lv_color32_t *)draw_buf->data;
     stride_px = draw_buf->header.stride / sizeof(lv_color32_t);
-    screensaver_renderer_render(pixels, stride_px, screensaver->fx.time_ms);
+    memset(pixels, 0, (size_t)draw_buf->header.stride * HOME_SCREENSAVER_FX_H);
+    {
+        ss_canvas_ctx_t cc = {pixels, stride_px, HOME_SCREENSAVER_FX_W, HOME_SCREENSAVER_FX_H};
+        screensaver_effects_render(put_pixel_canvas, &cc, HOME_SCREENSAVER_FX_W / SS_CELL_W,
+                                   HOME_SCREENSAVER_FX_H / SS_CELL_H, screensaver->fx.time_ms);
+    }
 
     if (screensaver->fx.image != NULL) {
         lv_obj_invalidate(screensaver->fx.image);
@@ -296,12 +325,6 @@ static void start_fx(home_screensaver_t *screensaver)
         return;
     }
 
-    {
-        int idx = screensaver_effects_select(BSP_LCD_H_RES / SS_CELL_W, BSP_LCD_V_RES / SS_CELL_H);
-        ESP_LOGI(TAG, "screensaver effect: %s (%d/%d)", screensaver_effects_current_name(), idx,
-                 screensaver_effects_count());
-    }
-
     screensaver->fx.fps_x10 = 0;
     screensaver->fx.interval_ms_x10 = 0;
     screensaver->fx.render_ms_x10 = 0;
@@ -323,6 +346,15 @@ static void start_fx(home_screensaver_t *screensaver)
     }
     if (screensaver->fx.direct_active) {
         screensaver_direct_reset();
+    }
+    {
+        uint16_t cols = screensaver->fx.direct_active ? (BSP_LCD_H_RES / SS_CELL_W)
+                                                      : (HOME_SCREENSAVER_FX_W / SS_CELL_W);
+        uint16_t rows = screensaver->fx.direct_active ? (BSP_LCD_V_RES / SS_CELL_H)
+                                                      : (HOME_SCREENSAVER_FX_H / SS_CELL_H);
+        int idx = screensaver_effects_select(cols, rows);
+        ESP_LOGI(TAG, "screensaver effect: %s (%d/%d)", screensaver_effects_current_name(), idx,
+                 screensaver_effects_count());
     }
     set_overlay_children_hidden(screensaver, screensaver->fx.direct_active);
     if (screensaver->fx.direct_active) {
