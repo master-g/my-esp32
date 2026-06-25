@@ -5,40 +5,217 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "lvgl.h"
 
 #define TAG "ss_effects"
 
-/*
- * Bring-up placeholder effect. Proves the grid -> glyph -> writer -> color path
- * end to end before the real effects land. Replaced by the lightweight effects
- * in U4 (this entry is removed there).
- */
-static void dots_render(void *ctx, pixel_writer_t writer, void *wctx, uint16_t cols, uint16_t rows,
-                        uint32_t time_ms)
-{
-    uint32_t phase = time_ms / 80U;
-    uint16_t color = 0x4208U; /* dim gray (RGB565) */
+#define SS_MAX_COLS 80
+#define SS_STARS 110
+#define SS_DROPS 70
 
-    (void)ctx;
-    for (uint16_t r = 0; r < rows; r++) {
-        for (uint16_t c = 0; c < cols; c++) {
-            if (((c + r + phase) & 7U) == 0U) {
-                ss_glyph_draw_char(writer, wctx, (int32_t)c * SS_CELL_W, (int32_t)r * SS_CELL_H, 1,
-                                   '.', color);
+/* 10 density levels for plasma / flow shading. */
+static const char SS_RAMP[] = " .:-=+*#%@";
+
+static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    return (uint16_t)(((r & 0xF8U) << 8) | ((g & 0xFCU) << 3) | (b >> 3));
+}
+
+static inline int16_t wrap360(int32_t d)
+{
+    d %= 360;
+    if (d < 0) {
+        d += 360;
+    }
+    return (int16_t)d;
+}
+
+/* --- 1. Matrix character rain (per-column heads, time-based) --- */
+static const char MATRIX_CH[] = "01<>*/=+#$&AMRX0123456789";
+
+typedef struct {
+    uint16_t offset[SS_MAX_COLS];
+    uint8_t speed[SS_MAX_COLS];
+} matrix_state_t;
+
+static void matrix_reset(void *ctx, uint16_t cols, uint16_t rows)
+{
+    matrix_state_t *s = (matrix_state_t *)ctx;
+
+    (void)cols;
+    (void)rows;
+    for (uint16_t c = 0; c < SS_MAX_COLS; c++) {
+        s->offset[c] = (uint16_t)(esp_random() % 512U);
+        s->speed[c] = (uint8_t)(4U + esp_random() % 12U);
+    }
+}
+
+static void matrix_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
+                          uint32_t t)
+{
+    matrix_state_t *s = (matrix_state_t *)ctx;
+    uint16_t period = (uint16_t)(rows + 8U);
+
+    for (uint16_t col = 0; col < cols && col < SS_MAX_COLS; col++) {
+        int32_t head = (int32_t)(((t * s->speed[col]) / 120U + s->offset[col]) % period);
+
+        for (int32_t tail = 0; tail < 8; tail++) {
+            int32_t r = head - tail;
+            char ch;
+            uint16_t color;
+
+            if (r < 0 || r >= rows) {
+                continue;
             }
+            color =
+                (tail == 0) ? rgb565(216, 255, 224) : rgb565(40, (uint8_t)(200 - tail * 22), 80);
+            ch = MATRIX_CH[(t / 90U + col * 3U + (uint32_t)r) % (sizeof(MATRIX_CH) - 1U)];
+            ss_glyph_draw_char(w, wctx, col * SS_CELL_W, r * SS_CELL_H, 1, ch, color);
         }
     }
 }
 
-static const screensaver_effect_t k_dots = {
-    .name = "dots",
-    .ctx_size = 0,
-    .reset = NULL,
-    .render = dots_render,
-};
+/* --- 2. ASCII plasma / flow field (stateless) --- */
+static void plasma_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
+                          uint32_t t)
+{
+    int32_t tt = (int32_t)(t / 16U);
+
+    (void)ctx;
+    for (uint16_t r = 0; r < rows; r++) {
+        for (uint16_t col = 0; col < cols; col++) {
+            int32_t v = lv_trigo_sin(wrap360(col * 14 + tt)) + lv_trigo_sin(wrap360(r * 20 - tt)) +
+                        lv_trigo_sin(wrap360((col + r) * 9 + tt));
+            int32_t norm = (v + 3 * 32767) / (6 * 32767 / 9 + 1);
+            uint8_t g;
+
+            if (norm <= 0) {
+                continue;
+            }
+            if (norm > 9) {
+                norm = 9;
+            }
+            g = (uint8_t)(80 + norm * 17);
+            ss_glyph_draw_char(w, wctx, col * SS_CELL_W, r * SS_CELL_H, 1, SS_RAMP[norm],
+                               rgb565(40, g, (uint8_t)(g - 20)));
+        }
+    }
+}
+
+/* --- 3. Sine wave bands (stateless) --- */
+static void sine_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
+                        uint32_t t)
+{
+    static const char band[] = {'~', '-', '='};
+    int32_t tt = (int32_t)(t / 24U);
+
+    (void)ctx;
+    for (int layer = 0; layer < 3; layer++) {
+        for (uint16_t col = 0; col < cols; col++) {
+            int32_t y = rows / 2 + (lv_trigo_sin(wrap360(col * 8 + tt + layer * 40)) * 3) / 32767 +
+                        (lv_trigo_sin(wrap360(col * 3 - tt)) * 3) / 32767;
+
+            if (y < 0 || y >= rows) {
+                continue;
+            }
+            ss_glyph_draw_char(w, wctx, col * SS_CELL_W, (int32_t)y * SS_CELL_H, 1, band[layer],
+                               rgb565((uint8_t)(60 + layer * 30), (uint8_t)(120 + layer * 40),
+                                      (uint8_t)(200 - layer * 30)));
+        }
+    }
+}
+
+/* --- 4. Starfield: stars emanate from center (time-based radius) --- */
+typedef struct {
+    uint16_t angle[SS_STARS];
+    uint16_t phase[SS_STARS];
+} star_state_t;
+
+static void star_reset(void *ctx, uint16_t cols, uint16_t rows)
+{
+    star_state_t *s = (star_state_t *)ctx;
+
+    (void)cols;
+    (void)rows;
+    for (int i = 0; i < SS_STARS; i++) {
+        s->angle[i] = (uint16_t)(esp_random() % 360U);
+        s->phase[i] = (uint16_t)(esp_random() % 1024U);
+    }
+}
+
+static void star_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
+                        uint32_t t)
+{
+    star_state_t *s = (star_state_t *)ctx;
+    int32_t cx = cols / 2;
+    int32_t cy = rows / 2;
+    int32_t rmax = (cols > rows ? cols : rows);
+
+    for (int i = 0; i < SS_STARS; i++) {
+        int32_t rad = (int32_t)(((t / 14U) + s->phase[i]) % (uint32_t)(rmax + 1));
+        int32_t col = cx + (lv_trigo_sin(wrap360(s->angle[i] + 90)) * rad) / 32767;
+        int32_t row = cy + (lv_trigo_sin(wrap360(s->angle[i])) * rad) / 32767;
+        char ch;
+
+        if (col < 0 || row < 0 || col >= cols || row >= rows) {
+            continue;
+        }
+        ch = (rad * 3 > rmax * 2) ? '*' : ((rad * 3 > rmax) ? '+' : '.');
+        ss_glyph_draw_char(w, wctx, col * SS_CELL_W, row * SS_CELL_H, 1, ch, rgb565(200, 220, 255));
+    }
+}
+
+/* --- 5. Diagonal rain (time-based drops) --- */
+typedef struct {
+    uint8_t x[SS_DROPS];
+    uint8_t speed[SS_DROPS];
+    uint16_t phase[SS_DROPS];
+} rain_state_t;
+
+static void rain_reset(void *ctx, uint16_t cols, uint16_t rows)
+{
+    rain_state_t *s = (rain_state_t *)ctx;
+
+    (void)rows;
+    for (int i = 0; i < SS_DROPS; i++) {
+        s->x[i] = (uint8_t)(esp_random() % (cols > 0 ? cols : 1U));
+        s->speed[i] = (uint8_t)(6U + esp_random() % 10U);
+        s->phase[i] = (uint16_t)(esp_random() % 256U);
+    }
+}
+
+static void rain_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
+                        uint32_t t)
+{
+    rain_state_t *s = (rain_state_t *)ctx;
+    uint16_t period = (uint16_t)(rows + 2U);
+
+    for (int i = 0; i < SS_DROPS; i++) {
+        int32_t y = (int32_t)(((t * s->speed[i]) / 260U + s->phase[i]) % period);
+        int32_t col = (int32_t)s->x[i] - y / 4;
+
+        if (col < 0 || y < 0 || col >= cols || y >= rows) {
+            continue;
+        }
+        ss_glyph_draw_char(w, wctx, col * SS_CELL_W, y * SS_CELL_H, 1, '/', rgb565(150, 180, 220));
+    }
+}
+
+static const screensaver_effect_t k_matrix = {.name = "matrix",
+                                              .ctx_size = sizeof(matrix_state_t),
+                                              .reset = matrix_reset,
+                                              .render = matrix_render};
+static const screensaver_effect_t k_plasma = {
+    .name = "plasma", .ctx_size = 0, .reset = NULL, .render = plasma_render};
+static const screensaver_effect_t k_sine = {
+    .name = "sine", .ctx_size = 0, .reset = NULL, .render = sine_render};
+static const screensaver_effect_t k_stars = {
+    .name = "stars", .ctx_size = sizeof(star_state_t), .reset = star_reset, .render = star_render};
+static const screensaver_effect_t k_rain = {
+    .name = "rain", .ctx_size = sizeof(rain_state_t), .reset = rain_reset, .render = rain_render};
 
 static const screensaver_effect_t *const s_registry[] = {
-    &k_dots,
+    &k_matrix, &k_plasma, &k_sine, &k_stars, &k_rain,
 };
 
 static void *s_ctx; /* shared per-effect state buffer (max ctx_size) */
