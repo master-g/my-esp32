@@ -12,7 +12,6 @@
 #include "home_internal.h"
 #include "screensaver_direct.h"
 #include "screensaver_effects.h"
-#include "screensaver_renderer.h"
 #include "service_home.h"
 
 #define TAG "home_screensaver"
@@ -360,7 +359,6 @@ static void start_fx(home_screensaver_t *screensaver)
     if (screensaver->fx.direct_active) {
         if (!start_direct_task(screensaver)) {
             bsp_display_end_direct_mode();
-            screensaver_direct_restore_background();
             screensaver->fx.direct_active = false;
             set_overlay_children_hidden(screensaver, false);
             render_background(screensaver);
@@ -387,7 +385,6 @@ static void stop_fx(home_screensaver_t *screensaver)
         ESP_LOGW(TAG, "screensaver direct pipeline idle wait timeout");
     }
     bsp_display_end_direct_mode();
-    screensaver_direct_restore_background();
     screensaver->fx.direct_active = false;
     screensaver->fx.direct_stop_requested = false;
     set_overlay_children_hidden(screensaver, false);
@@ -448,7 +445,6 @@ void home_screensaver_create(home_screensaver_t *screensaver, lv_obj_t *root,
         lv_image_set_scale(screensaver->fx.image, HOME_SCREENSAVER_FX_SCALE);
         lv_obj_center(screensaver->fx.image);
 
-        screensaver_renderer_init(HOME_SCREENSAVER_FX_W, HOME_SCREENSAVER_FX_H);
         if (!screensaver_direct_init()) {
             ESP_LOGW(TAG, "screensaver direct buffer alloc failed; using LVGL fallback");
         }

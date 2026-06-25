@@ -17,7 +17,6 @@ typedef struct {
 bool screensaver_direct_init(void);
 bool screensaver_direct_is_ready(void);
 void screensaver_direct_reset(void);
-void screensaver_direct_restore_background(void);
 bool screensaver_direct_wait_idle(uint32_t timeout_ms);
 void screensaver_direct_deinit(void);
 void screensaver_direct_get_perf_snapshot(screensaver_direct_perf_snapshot_t *out);

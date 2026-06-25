@@ -14,15 +14,10 @@
 #include "freertos/task.h"
 #include "screensaver_effects.h"
 #include "screensaver_glyphs.h"
-#include "screensaver_renderer.h"
 
 #define TAG "screensaver_direct"
 #define DIRECT_LOGICAL_W BSP_LCD_H_RES
 #define DIRECT_LOGICAL_H BSP_LCD_V_RES
-#define DIRECT_BG_W 136
-#define DIRECT_BG_H 36
-#define DIRECT_BG_VIEW_W_PCT 84U
-#define DIRECT_BG_VIEW_H_PCT 90U
 #define DIRECT_TIME_SCALE 7
 #define DIRECT_TIME_CHAR_W 5
 #define DIRECT_TIME_CHAR_H 7
@@ -42,11 +37,6 @@ typedef struct {
 
 static uint16_t *s_framebufs[DIRECT_FRAMEBUF_COUNT];
 static uint16_t *s_framebuf;
-static lv_color32_t *s_bg_buf;
-static uint8_t s_bg_x_from_native_y[BSP_LCD_PANEL_V_RES];
-static uint16_t s_bg_row_offset_from_native_x[BSP_LCD_PANEL_H_RES];
-static uint16_t s_base_renderer_w;
-static uint16_t s_base_renderer_h;
 static QueueHandle_t s_free_queue;
 static QueueHandle_t s_ready_queue;
 static TaskHandle_t s_push_task;
@@ -93,87 +83,6 @@ static inline uint32_t native_index_from_logical(int32_t x, int32_t y)
     uint32_t native_y = (uint32_t)(BSP_LCD_PANEL_V_RES - 1 - x);
 #endif
     return native_y * BSP_LCD_PANEL_H_RES + native_x;
-}
-
-static void compute_bg_view(uint32_t *view_w, uint32_t *view_h, uint32_t *margin_x,
-                            uint32_t *margin_y)
-{
-    uint32_t resolved_view_w = ((uint32_t)DIRECT_BG_W * DIRECT_BG_VIEW_W_PCT + 50U) / 100U;
-    uint32_t resolved_view_h = ((uint32_t)DIRECT_BG_H * DIRECT_BG_VIEW_H_PCT + 50U) / 100U;
-
-    if (resolved_view_w == 0 || resolved_view_w > DIRECT_BG_W) {
-        resolved_view_w = DIRECT_BG_W;
-    }
-    if (resolved_view_h == 0 || resolved_view_h > DIRECT_BG_H) {
-        resolved_view_h = DIRECT_BG_H;
-    }
-
-    if (view_w != NULL) {
-        *view_w = resolved_view_w;
-    }
-    if (view_h != NULL) {
-        *view_h = resolved_view_h;
-    }
-    if (margin_x != NULL) {
-        *margin_x = (DIRECT_BG_W - resolved_view_w) / 2U;
-    }
-    if (margin_y != NULL) {
-        *margin_y = (DIRECT_BG_H - resolved_view_h) / 2U;
-    }
-}
-
-static void init_native_scale_maps(void)
-{
-    uint32_t view_w;
-    uint32_t view_h;
-    uint32_t margin_x;
-    uint32_t margin_y;
-
-    compute_bg_view(&view_w, &view_h, &margin_x, &margin_y);
-
-    for (uint16_t native_y = 0; native_y < BSP_LCD_PANEL_V_RES; native_y++) {
-        int32_t logical_x;
-        uint32_t bg_x;
-
-#if BSP_UI_ROTATION == BSP_UI_ROTATION_LANDSCAPE_270
-        logical_x = native_y;
-#else
-        logical_x = DIRECT_LOGICAL_W - 1 - native_y;
-#endif
-        if (logical_x < 0) {
-            logical_x = 0;
-        }
-        if (logical_x >= DIRECT_LOGICAL_W) {
-            logical_x = DIRECT_LOGICAL_W - 1;
-        }
-        bg_x = margin_x + ((uint32_t)logical_x * view_w) / DIRECT_LOGICAL_W;
-        if (bg_x >= DIRECT_BG_W) {
-            bg_x = DIRECT_BG_W - 1;
-        }
-        s_bg_x_from_native_y[native_y] = (uint8_t)bg_x;
-    }
-
-    for (uint16_t native_x = 0; native_x < BSP_LCD_PANEL_H_RES; native_x++) {
-        int32_t logical_y;
-        uint32_t bg_y;
-
-#if BSP_UI_ROTATION == BSP_UI_ROTATION_LANDSCAPE_270
-        logical_y = DIRECT_LOGICAL_H - 1 - native_x;
-#else
-        logical_y = native_x;
-#endif
-        if (logical_y < 0) {
-            logical_y = 0;
-        }
-        if (logical_y >= DIRECT_LOGICAL_H) {
-            logical_y = DIRECT_LOGICAL_H - 1;
-        }
-        bg_y = margin_y + ((uint32_t)logical_y * view_h) / DIRECT_LOGICAL_H;
-        if (bg_y >= DIRECT_BG_H) {
-            bg_y = DIRECT_BG_H - 1;
-        }
-        s_bg_row_offset_from_native_x[native_x] = (uint16_t)(bg_y * DIRECT_BG_W);
-    }
 }
 
 static void put_pixel_native(void *ctx, int32_t x, int32_t y, uint16_t color)
@@ -228,60 +137,6 @@ static void effects_render_native(uint32_t time_ms)
     memset(s_framebuf, 0, (size_t)BSP_LCD_PANEL_H_RES * BSP_LCD_PANEL_V_RES * sizeof(uint16_t));
     screensaver_effects_render(put_pixel_native, NULL, DIRECT_LOGICAL_W / SS_CELL_W,
                                DIRECT_LOGICAL_H / SS_CELL_H, time_ms);
-}
-
-static void fill_background_lowres(uint32_t time_ms)
-{
-    screensaver_renderer_render(s_bg_buf, DIRECT_BG_W, time_ms);
-}
-
-static void upscale_background_to_native(void)
-{
-    for (uint16_t native_y = 0; native_y < BSP_LCD_PANEL_V_RES; native_y++) {
-        uint16_t *dst = &s_framebuf[(size_t)native_y * BSP_LCD_PANEL_H_RES];
-        uint16_t bg_x = s_bg_x_from_native_y[native_y];
-
-        for (uint16_t native_x = 0; native_x < BSP_LCD_PANEL_H_RES; native_x++) {
-            lv_color32_t bg = s_bg_buf[s_bg_row_offset_from_native_x[native_x] + bg_x];
-            dst[native_x] = rgb565(bg.red, bg.green, bg.blue);
-        }
-    }
-}
-
-static void upscale_background_to_logical(uint16_t *pixels)
-{
-    uint32_t view_w;
-    uint32_t view_h;
-    uint32_t margin_x;
-    uint32_t margin_y;
-    uint16_t logical_y;
-
-    if (pixels == NULL) {
-        return;
-    }
-
-    compute_bg_view(&view_w, &view_h, &margin_x, &margin_y);
-    for (logical_y = 0; logical_y < DIRECT_LOGICAL_H; logical_y++) {
-        uint16_t *dst = &pixels[(size_t)logical_y * DIRECT_LOGICAL_W];
-        uint32_t bg_y = margin_y + ((uint32_t)logical_y * view_h) / DIRECT_LOGICAL_H;
-        uint16_t logical_x;
-
-        if (bg_y >= DIRECT_BG_H) {
-            bg_y = DIRECT_BG_H - 1U;
-        }
-
-        for (logical_x = 0; logical_x < DIRECT_LOGICAL_W; logical_x++) {
-            uint32_t bg_x = margin_x + ((uint32_t)logical_x * view_w) / DIRECT_LOGICAL_W;
-            lv_color32_t bg;
-
-            if (bg_x >= DIRECT_BG_W) {
-                bg_x = DIRECT_BG_W - 1U;
-            }
-
-            bg = s_bg_buf[bg_y * DIRECT_BG_W + bg_x];
-            dst[logical_x] = rgb565(bg.red, bg.green, bg.blue);
-        }
-    }
 }
 
 static void note_direct_perf(int64_t frame_start_us, int64_t frame_end_us, uint32_t compose_us,
@@ -358,7 +213,6 @@ static void screensaver_direct_push_task(void *arg)
 bool screensaver_direct_init(void)
 {
     size_t frame_bytes;
-    size_t bg_bytes;
 
     if (s_ready) {
         return true;
@@ -378,18 +232,6 @@ bool screensaver_direct_init(void)
         memset(s_framebufs[i], 0, frame_bytes);
     }
 
-    bg_bytes = (size_t)DIRECT_BG_W * DIRECT_BG_H * sizeof(lv_color32_t);
-    s_bg_buf = heap_caps_malloc(bg_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_bg_buf == NULL) {
-        s_bg_buf = heap_caps_malloc(bg_bytes, MALLOC_CAP_8BIT);
-    }
-    if (s_bg_buf == NULL) {
-        screensaver_direct_deinit();
-        return false;
-    }
-
-    memset(s_bg_buf, 0, bg_bytes);
-    screensaver_renderer_get_dimensions(&s_base_renderer_w, &s_base_renderer_h);
     s_free_queue = xQueueCreate(DIRECT_FRAMEBUF_COUNT, sizeof(uint8_t));
     s_ready_queue = xQueueCreate(DIRECT_FRAMEBUF_COUNT, sizeof(uint8_t));
     s_push_task_done = xSemaphoreCreateBinary();
@@ -418,7 +260,6 @@ bool screensaver_direct_init(void)
         return false;
     }
 
-    init_native_scale_maps();
     screensaver_direct_reset();
     s_ready = true;
     ESP_LOGI(TAG, "glyph selftest %s", ss_glyph_selftest() ? "pass" : "FAIL");
@@ -427,15 +268,12 @@ bool screensaver_direct_init(void)
 
 bool screensaver_direct_is_ready(void)
 {
-    return s_ready && s_framebufs[0] != NULL && s_framebufs[1] != NULL && s_bg_buf != NULL &&
-           s_free_queue != NULL && s_ready_queue != NULL && s_push_task != NULL;
+    return s_ready && s_framebufs[0] != NULL && s_framebufs[1] != NULL && s_free_queue != NULL &&
+           s_ready_queue != NULL && s_push_task != NULL;
 }
 
 void screensaver_direct_reset(void)
 {
-    if (!screensaver_renderer_init(DIRECT_BG_W, DIRECT_BG_H)) {
-        ESP_LOGW(TAG, "screensaver direct init failed; renderer will use fallback pattern");
-    }
     memset(&s_perf_snapshot, 0, sizeof(s_perf_snapshot));
     s_perf_frames = 0;
     s_perf_compose_total_us = 0;
@@ -443,17 +281,6 @@ void screensaver_direct_reset(void)
     s_perf_wait_total_us = 0;
     s_perf_push_total_us = 0;
     s_perf_window_start_us = 0;
-}
-
-void screensaver_direct_restore_background(void)
-{
-    if (s_base_renderer_w == 0 || s_base_renderer_h == 0) {
-        return;
-    }
-    if (!screensaver_renderer_init(s_base_renderer_w, s_base_renderer_h)) {
-        ESP_LOGW(TAG, "renderer restore init failed for %ux%u", s_base_renderer_w,
-                 s_base_renderer_h);
-    }
 }
 
 bool screensaver_direct_wait_idle(uint32_t timeout_ms)
@@ -521,10 +348,6 @@ void screensaver_direct_deinit(void)
     if (s_render_mutex != NULL) {
         vSemaphoreDelete(s_render_mutex);
         s_render_mutex = NULL;
-    }
-    if (s_bg_buf != NULL) {
-        heap_caps_free(s_bg_buf);
-        s_bg_buf = NULL;
     }
     for (size_t i = 0; i < DIRECT_FRAMEBUF_COUNT; i++) {
         if (s_framebufs[i] != NULL) {
