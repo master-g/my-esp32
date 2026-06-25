@@ -44,7 +44,7 @@ typedef struct {
     uint16_t request_id;
     union {
         app_id_t app_id;
-        bool screensaver_enabled;
+        app_control_home_screensaver_t screensaver;
         app_screenshot_t *screenshot;
     } arg;
 } ui_control_request_t;
@@ -363,16 +363,13 @@ static esp_err_t execute_ui_control(const ui_control_request_t *request)
     case UI_CONTROL_SWITCH_TO:
         return switch_to_locked(request->arg.app_id);
     case UI_CONTROL_HOME_SCREENSAVER: {
-        app_control_home_screensaver_t control = {
-            .enabled = request->arg.screensaver_enabled,
-        };
-
         ESP_RETURN_ON_ERROR(switch_to_locked(APP_ID_HOME), TAG, "home switch failed");
         slot = find_slot(APP_ID_HOME);
         ESP_RETURN_ON_FALSE(slot != NULL, ESP_ERR_NOT_FOUND, TAG, "home app not registered");
         ESP_RETURN_ON_FALSE(slot->descriptor.handle_control != NULL, ESP_ERR_NOT_SUPPORTED, TAG,
                             "home app does not support controls");
-        return slot->descriptor.handle_control(APP_CONTROL_HOME_SCREENSAVER, &control);
+        return slot->descriptor.handle_control(APP_CONTROL_HOME_SCREENSAVER,
+                                               &request->arg.screensaver);
     }
     case UI_CONTROL_SCREENSHOT:
         return capture_screenshot_locked(request->arg.screenshot);
@@ -488,13 +485,18 @@ esp_err_t app_manager_request_switch_to(app_id_t app_id, uint32_t timeout_ms)
     return request_ui_control(&request, timeout_ms);
 }
 
-esp_err_t app_manager_request_home_screensaver(bool enabled, uint32_t timeout_ms)
+esp_err_t app_manager_request_home_screensaver(bool enabled, const char *effect,
+                                               uint32_t timeout_ms)
 {
     ui_control_request_t request = {
         .type = UI_CONTROL_HOME_SCREENSAVER,
         .waiter_task = NULL,
-        .arg.screensaver_enabled = enabled,
+        .arg.screensaver.enabled = enabled,
     };
+
+    if (effect != NULL) {
+        strlcpy(request.arg.screensaver.effect, effect, sizeof(request.arg.screensaver.effect));
+    }
 
     return request_ui_control(&request, timeout_ms);
 }

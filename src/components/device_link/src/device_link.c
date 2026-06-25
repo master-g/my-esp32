@@ -1294,7 +1294,9 @@ static void handle_request_frame(const cJSON *root)
 
     if (strcmp(method->valuestring, "home.screensaver") == 0) {
         const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(params, "enabled");
-        esp_err_t err = app_manager_request_home_screensaver(cJSON_IsTrue(enabled),
+        const cJSON *effect = cJSON_GetObjectItemCaseSensitive(params, "effect");
+        const char *effect_name = cJSON_IsString(effect) ? effect->valuestring : NULL;
+        esp_err_t err = app_manager_request_home_screensaver(cJSON_IsTrue(enabled), effect_name,
                                                              HOME_SCREENSAVER_CONTROL_TIMEOUT_MS);
 
         if (err != ESP_OK) {

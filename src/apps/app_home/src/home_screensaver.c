@@ -351,7 +351,18 @@ static void start_fx(home_screensaver_t *screensaver)
                                                       : (HOME_SCREENSAVER_FX_W / SS_CELL_W);
         uint16_t rows = screensaver->fx.direct_active ? (BSP_LCD_V_RES / SS_CELL_H)
                                                       : (HOME_SCREENSAVER_FX_H / SS_CELL_H);
-        int idx = screensaver_effects_select(cols, rows);
+        int idx = -1;
+        if (screensaver->requested_effect[0] != '\0') {
+            idx = screensaver_effects_select_named(screensaver->requested_effect, cols, rows);
+            if (idx < 0) {
+                ESP_LOGW(TAG, "screensaver effect '%s' unknown; picking random",
+                         screensaver->requested_effect);
+            }
+            screensaver->requested_effect[0] = '\0'; /* one-shot */
+        }
+        if (idx < 0) {
+            idx = screensaver_effects_select(cols, rows);
+        }
         ESP_LOGI(TAG, "screensaver effect: %s (%d/%d)", screensaver_effects_current_name(), idx,
                  screensaver_effects_count());
     }
@@ -467,6 +478,18 @@ void home_screensaver_create(home_screensaver_t *screensaver, lv_obj_t *root,
                                        0);
     lv_obj_center(screensaver->time_label);
     lv_label_set_text_static(screensaver->time_label, "--:--");
+}
+
+void home_screensaver_request_effect(home_screensaver_t *screensaver, const char *name)
+{
+    if (screensaver == NULL) {
+        return;
+    }
+    if (name == NULL || name[0] == '\0') {
+        screensaver->requested_effect[0] = '\0';
+        return;
+    }
+    strlcpy(screensaver->requested_effect, name, sizeof(screensaver->requested_effect));
 }
 
 void home_screensaver_enter(home_screensaver_t *screensaver, const home_present_model_t *model)

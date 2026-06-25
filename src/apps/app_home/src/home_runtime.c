@@ -375,6 +375,12 @@ esp_err_t home_runtime_handle_control(home_runtime_t *runtime, app_control_type_
                             "screensaver control is required");
         build_model(&snapshot, &model);
         if (control->enabled) {
+            /* A named effect while already showing the screensaver restarts the
+             * effect so the request takes hold (debug preview workflow). */
+            if (control->effect[0] != '\0' && home_screensaver_is_active(&runtime->screensaver)) {
+                exit_screensaver(runtime);
+            }
+            home_screensaver_request_effect(&runtime->screensaver, control->effect);
             enter_screensaver(runtime, &model);
             home_screensaver_mute_perf_logs(&runtime->screensaver,
                                             HOME_SCREENSAVER_PROTOCOL_QUIET_MS);

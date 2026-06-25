@@ -321,6 +321,12 @@ enum ChibiCommand {
     Screensaver {
         #[arg(value_enum, help = "Whether to enter or exit the screensaver")]
         action: ScreensaverAction,
+        #[arg(
+            long,
+            help = "Effect to show on enter: matrix|plasma|sine|stars|rain|life|fire|pipes \
+                    (default: random; unknown names fall back to random)"
+        )]
+        effect: Option<String>,
         #[arg(long, help = "Serial port (default: autodiscover or running agent)")]
         port: Option<String>,
     },
@@ -556,29 +562,31 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
         }
         ChibiCommand::Screensaver {
             action,
+            effect,
             port,
         } => {
             let enabled = matches!(action, ScreensaverAction::Enter);
+            let mut params = json!({ "enabled": enabled });
+            if enabled {
+                if let Some(name) = effect.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    params["effect"] = json!(name);
+                }
+            }
             request_direct_with_timeout(
                 Arc::new(UnixSerialFactory),
                 port.as_deref(),
                 compat::serial_baud(),
                 RpcRequest {
                     method: "home.screensaver".into(),
-                    params: json!({
-                        "enabled": enabled,
-                    }),
+                    params,
                 },
                 CHIBI_SCREENSAVER_RPC_TIMEOUT,
             )?;
-            println!(
-                "screensaver {}",
-                if enabled {
-                    "entered"
-                } else {
-                    "exited"
-                }
-            );
+            match (enabled, effect.as_deref()) {
+                (true, Some(name)) => println!("screensaver entered (effect: {name})"),
+                (true, None) => println!("screensaver entered"),
+                (false, _) => println!("screensaver exited"),
+            }
             Ok(())
         }
         ChibiCommand::Prompt {

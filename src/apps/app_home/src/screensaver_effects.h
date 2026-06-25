@@ -41,6 +41,11 @@ int screensaver_effects_count(void);
  * Returns the chosen index, or -1 when the registry is empty. */
 int screensaver_effects_select(uint16_t cols, uint16_t rows);
 
+/* Select the effect whose name matches (case-sensitive), reset its state for
+ * the grid, and make it current. Returns the chosen index, or -1 when name is
+ * NULL/empty or unknown (caller falls back to random selection). */
+int screensaver_effects_select_named(const char *name, uint16_t cols, uint16_t rows);
+
 /* Render the current effect's background for one frame. No-op if no effect is
  * selected (caller renders the clock over a blank background). */
 void screensaver_effects_render(pixel_writer_t writer, void *writer_ctx, uint16_t cols,

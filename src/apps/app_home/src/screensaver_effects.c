@@ -531,11 +531,22 @@ void screensaver_effects_deinit(void)
 
 int screensaver_effects_count(void) { return registry_count(); }
 
+static void apply_selection(int idx, uint16_t cols, uint16_t rows)
+{
+    const screensaver_effect_t *fx = s_registry[idx];
+
+    s_current = idx;
+    s_last = idx;
+    if (fx->reset != NULL && fx->ctx_size <= s_ctx_cap && s_ctx != NULL) {
+        memset(s_ctx, 0, fx->ctx_size);
+        fx->reset(s_ctx, cols, rows);
+    }
+}
+
 int screensaver_effects_select(uint16_t cols, uint16_t rows)
 {
     int n = registry_count();
     int idx;
-    const screensaver_effect_t *fx;
 
     if (n <= 0) {
         s_current = -1;
@@ -550,15 +561,22 @@ int screensaver_effects_select(uint16_t cols, uint16_t rows)
         } while (idx == s_last);
     }
 
-    s_current = idx;
-    s_last = idx;
-
-    fx = s_registry[idx];
-    if (fx->reset != NULL && fx->ctx_size <= s_ctx_cap && s_ctx != NULL) {
-        memset(s_ctx, 0, fx->ctx_size);
-        fx->reset(s_ctx, cols, rows);
-    }
+    apply_selection(idx, cols, rows);
     return idx;
+}
+
+int screensaver_effects_select_named(const char *name, uint16_t cols, uint16_t rows)
+{
+    if (name == NULL || name[0] == '\0') {
+        return -1;
+    }
+    for (int i = 0; i < registry_count(); i++) {
+        if (strcmp(s_registry[i]->name, name) == 0) {
+            apply_selection(i, cols, rows);
+            return i;
+        }
+    }
+    return -1;
 }
 
 void screensaver_effects_render(pixel_writer_t writer, void *writer_ctx, uint16_t cols,

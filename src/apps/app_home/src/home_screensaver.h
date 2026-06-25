@@ -46,11 +46,14 @@ typedef struct {
     home_screensaver_touch_cb_t touch_cb;
     void *touch_cb_ctx;
     home_screensaver_fx_t fx;
+    char requested_effect[16]; /* one-shot: named effect for next start_fx; empty = random */
 } home_screensaver_t;
 
 void home_screensaver_create(home_screensaver_t *screensaver, lv_obj_t *root,
                              home_screensaver_touch_cb_t touch_cb, void *touch_cb_ctx);
 void home_screensaver_enter(home_screensaver_t *screensaver, const home_present_model_t *model);
+/* Stage a named effect for the next start_fx (one-shot). NULL/empty/unknown -> random. */
+void home_screensaver_request_effect(home_screensaver_t *screensaver, const char *name);
 void home_screensaver_exit(home_screensaver_t *screensaver);
 void home_screensaver_suspend(home_screensaver_t *screensaver);
 void home_screensaver_apply(home_screensaver_t *screensaver, const home_present_model_t *model);
