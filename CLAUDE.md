@@ -193,3 +193,34 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 ### 搜索
 
 - 联网搜索的时候要优先采信英文网站信源；
+
+## 技术栈
+- 固件: C + ESP-IDF (`idf: ">5.0.4,!=5.1.1"`，项目按 6.0 开发)，目标 `esp32s3`；UI 用 LVGL `^9`；运行时 FreeRTOS。
+- 固件依赖 (`src/main/idf_component.yml`): `espressif/esp_lcd_axs15231b 2.1.0`、`espressif/esp_websocket_client ^1`。
+- 宿主代理 `tools/esp32dash/`: Rust，edition 2024，crate `esp32dash 0.1.1`，通过 USB 串口 + WebSocket 与设备/Claude hook 通信。
+
+## 命令
+- 固件构建/烧录见上文「Build Commands」：`idf.py build`、`idf.py -p <PORT> flash monitor`、`idf.py fullclean`。
+- 宿主代理: `cd tools/esp32dash && cargo build` / `cargo run -- agent run` / `cargo test`。
+- 提交前格式化: `pre-commit run --all-files`（需 `pip install pre-commit` 后 `pre-commit install`）。
+
+## 代码风格
+- C: `.clang-format`（LLVM 基底，4 空格缩进，列宽 100，Linux 大括号，指针右对齐，`SortIncludes: false`）。仅作用于 `src/**.{c,h,cpp,hpp}`，由 pre-commit 的 clang-format hook 强制。
+- Rust: `tools/esp32dash/.rustfmt.toml`（edition 2024，4 空格，`use_small_heuristics = "Off"`，`reorder_imports`）。用 `cargo fmt`。
+- pre-commit hooks: trailing-whitespace、end-of-file-fixer、check-yaml、check-merge-conflict、clang-format(固件)。
+
+## 禁止文件
+- 构建产物: `build/`、`build-*/`、`managed_components/`、`target/`（勿手改）。
+- 配置: `sdkconfig`、`sdkconfig.*`、`sdkconfig.old`（生成物）；唯一手改的基线是 `sdkconfig.defaults`。
+- 生成代码: `src/apps/*/src/generated/`、`tools/lv_font_pipeline/*_tmp.c`（字体/精灵流水线产物）。
+- 本地状态: `.claude/`、`.omc/`、`.pre-commit-cache/`。
+
+## 审查规则
+- 提交信息遵循 Conventional Commits 带 scope：`feat(...)` / `fix(...)` / `refactor(...)` / `docs(...)`（见 git log）。
+- 提交前跑 pre-commit；改动固件需 `idf.py build` 通过后再提交。
+- 暂无 CONTRIBUTING.md / CODEOWNERS / PR 模板 (待补充)。
+
+## 项目记忆 (回写约定)
+跨会话的持久信息记录在 [PROJECT_MEMORY.md](./PROJECT_MEMORY.md)。
+**完成每个重要任务后务必回写**: 把确认的决策写入「已验证的事实」、踩的坑写入「失败尝试」、用进展更新「上次会话」、把计划写入「下次运行」。
+保持 PROJECT_MEMORY.md 在 300~400 行,超长时用 `scripts/memory.py compact` 压缩(保留事实与计划,淘汰最旧日志)。
