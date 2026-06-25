@@ -13,23 +13,23 @@ static uint32_t s_user_activity_seq;
 static SemaphoreHandle_t s_mutex;
 static bool s_initialized;
 
-static void recompute_and_publish_if_needed(void)
+// 在持 s_mutex 时调用:返回策略输入是否有变化。
+// 故意不在此发事件——event_bus_publish 同步派发给订阅者,若订阅者回调反向调
+// system_state_set_*(),持锁内 publish 会在二次 take(s_mutex) 处死锁。改为算完放锁后再发。
+static bool recompute_locked(void)
 {
-    power_policy_output_t output;
+    return s_initialized && power_policy_on_input_changed(&s_input);
+}
+
+// 在 s_mutex 已释放后调用,发布 power-changed 信号。
+// payload 为 NULL,遵循事件总线约定:订阅者以事件类型为信号,自行 query 最新状态。
+static void publish_power_changed(void)
+{
     app_event_t event = {
         .type = APP_EVENT_POWER_CHANGED,
         .payload = NULL,
     };
-
-    if (!s_initialized) {
-        return;
-    }
-
-    if (power_policy_on_input_changed(&s_input)) {
-        power_policy_get_output(&output);
-        event.payload = &output;
-        event_bus_publish(&event);
-    }
+    event_bus_publish(&event);
 }
 
 esp_err_t system_state_init(void)
@@ -45,7 +45,11 @@ esp_err_t system_state_init(void)
     s_input.foreground_app = APP_ID_HOME;
     s_user_activity_seq = 0;
     s_initialized = true;
-    recompute_and_publish_if_needed();
+
+    // init 跑在启动期单线程,无竞争;直接算并发布初始状态。
+    if (recompute_locked()) {
+        publish_power_changed();
+    }
     return ESP_OK;
 }
 
@@ -72,42 +76,72 @@ uint32_t system_state_get_user_activity_seq(void)
 
 void system_state_set_power_source(power_source_t power_source)
 {
+    bool changed;
+
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.power_source = power_source;
-    recompute_and_publish_if_needed();
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
+
+    if (changed) {
+        publish_power_changed();
+    }
 }
 
 void system_state_set_display_state(display_state_t display_state)
 {
+    bool changed;
+
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.display_state = display_state;
-    recompute_and_publish_if_needed();
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
+
+    if (changed) {
+        publish_power_changed();
+    }
 }
 
 void system_state_set_foreground_app(app_id_t app_id)
 {
+    bool changed;
+
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.foreground_app = app_id;
-    recompute_and_publish_if_needed();
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
+
+    if (changed) {
+        publish_power_changed();
+    }
 }
 
 void system_state_set_wifi_connected(bool wifi_connected)
 {
+    bool changed;
+
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.wifi_connected = wifi_connected;
-    recompute_and_publish_if_needed();
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
+
+    if (changed) {
+        publish_power_changed();
+    }
 }
 
 void system_state_set_user_interacting(bool user_interacting)
 {
+    bool changed;
+
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_input.user_interacting = user_interacting;
-    recompute_and_publish_if_needed();
+    changed = recompute_locked();
     xSemaphoreGive(s_mutex);
+
+    if (changed) {
+        publish_power_changed();
+    }
 }
 
 void system_state_note_user_activity(void)

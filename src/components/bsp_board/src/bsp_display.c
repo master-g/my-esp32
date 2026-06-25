@@ -44,8 +44,10 @@ static const char *TAG = "bsp_display";
 #define BSP_EDGE_GESTURE_ZONE_PX 20
 #define BSP_EDGE_GESTURE_TRIGGER_PX 72
 #define BSP_EDGE_GESTURE_MAX_OFF_AXIS_PX 48
+#define BSP_FATAL_SCREEN_COLOR_RGB565 0xF800u // 纯红
 
 static SemaphoreHandle_t s_lvgl_mutex;
+static TaskHandle_t s_lvgl_task_handle;
 static SemaphoreHandle_t s_flush_done_semaphore;
 static esp_lcd_panel_handle_t s_panel;
 static lv_display_t *s_display;
@@ -512,7 +514,7 @@ static esp_err_t init_lvgl(void)
     {
         BaseType_t ret =
             xTaskCreatePinnedToCore(lvgl_port_task, "bsp_lvgl", BSP_LVGL_TASK_STACK_SIZE, NULL,
-                                    BSP_LVGL_TASK_PRIORITY, NULL, 0);
+                                    BSP_LVGL_TASK_PRIORITY, &s_lvgl_task_handle, 0);
         ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "lvgl task create failed");
     }
 
@@ -551,6 +553,11 @@ void bsp_display_unlock(void)
     if (s_lvgl_mutex != NULL) {
         xSemaphoreGive(s_lvgl_mutex);
     }
+}
+
+bool bsp_display_is_in_lvgl_task(void)
+{
+    return s_lvgl_task_handle != NULL && xTaskGetCurrentTaskHandle() == s_lvgl_task_handle;
 }
 
 lv_obj_t *bsp_display_get_app_root(void) { return s_app_root; }
@@ -600,4 +607,36 @@ esp_err_t bsp_display_push_native_rgb565(const uint16_t *pixels, uint16_t rows, 
         stats->push_us = 0;
     }
     return err;
+}
+
+bool bsp_display_show_fatal_screen(void)
+{
+    // 拿 LVGL 锁独占 panel(拿不到说明 LVGL 任务卡住,放弃画屏走串口)。
+    if (!bsp_display_lock(1000)) {
+        return false;
+    }
+    // 显示未完整初始化(如失败发生在 init_lvgl 之前)时画不出,退回串口。
+    if (!bsp_display_begin_direct_mode()) {
+        bsp_display_unlock();
+        return false;
+    }
+
+    // 纯红整屏作为"启动失败"的醒目视觉信号;具体错误码由调用方打到串口。
+    // 逐行推送,缓冲只需一行(panel_push_rows_blocking 会 memcpy 到 DMA buffer)。
+    static uint16_t red_row[BSP_LCD_PANEL_H_RES];
+    for (size_t i = 0; i < BSP_LCD_PANEL_H_RES; i++) {
+        red_row[i] = BSP_FATAL_SCREEN_COLOR_RGB565;
+    }
+
+    bool ok = true;
+    for (uint16_t y = 0; y < BSP_LCD_PANEL_V_RES; y++) {
+        if (bsp_display_push_native_rgb565(red_row, 1, y, NULL) != ESP_OK) {
+            ok = false;
+            break;
+        }
+    }
+
+    // 终态专用:故意不 end_direct_mode、不 unlock,保持独占 panel,防止 LVGL 任务
+    // 在调用方重启/halt 前用 lv_timer_handler 把界面重绘覆盖掉红屏。
+    return ok;
 }
