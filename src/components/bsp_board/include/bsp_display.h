@@ -34,5 +34,7 @@ bool bsp_display_begin_direct_mode(void);
 void bsp_display_end_direct_mode(void);
 esp_err_t bsp_display_push_native_rgb565(const uint16_t *pixels, uint16_t rows, uint16_t y_offset,
                                          bsp_display_push_stats_t *stats);
+// 启动失败时画一块纯色错误屏(独占拿锁,显示未就绪则返回 false)。错误码由调用方打串口。
+bool bsp_display_show_fatal_screen(void);
 
 #endif

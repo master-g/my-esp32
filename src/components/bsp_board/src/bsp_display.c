@@ -607,3 +607,35 @@ esp_err_t bsp_display_push_native_rgb565(const uint16_t *pixels, uint16_t rows, 
     }
     return err;
 }
+
+bool bsp_display_show_fatal_screen(void)
+{
+    // 拿 LVGL 锁独占 panel(拿不到说明 LVGL 任务卡住,放弃画屏走串口)。
+    if (!bsp_display_lock(1000)) {
+        return false;
+    }
+    // 显示未完整初始化(如失败发生在 init_lvgl 之前)时画不出,退回串口。
+    if (!bsp_display_begin_direct_mode()) {
+        bsp_display_unlock();
+        return false;
+    }
+
+    // 纯红整屏作为"启动失败"的醒目视觉信号;具体错误码由调用方打到串口。
+    // 逐行推送,缓冲只需一行(panel_push_rows_blocking 会 memcpy 到 DMA buffer)。
+    static uint16_t red_row[BSP_LCD_PANEL_H_RES];
+    for (size_t i = 0; i < BSP_LCD_PANEL_H_RES; i++) {
+        red_row[i] = 0xF800; // RGB565 红
+    }
+
+    bool ok = true;
+    for (uint16_t y = 0; y < BSP_LCD_PANEL_V_RES; y++) {
+        if (bsp_display_push_native_rgb565(red_row, 1, y, NULL) != ESP_OK) {
+            ok = false;
+            break;
+        }
+    }
+
+    bsp_display_end_direct_mode();
+    bsp_display_unlock();
+    return ok;
+}
