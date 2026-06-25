@@ -11,6 +11,7 @@
 #include "generated/departure_mono_55.h"
 #include "home_internal.h"
 #include "screensaver_direct.h"
+#include "screensaver_effects.h"
 #include "screensaver_renderer.h"
 #include "service_home.h"
 
@@ -295,6 +296,12 @@ static void start_fx(home_screensaver_t *screensaver)
         return;
     }
 
+    {
+        int idx = screensaver_effects_select(BSP_LCD_H_RES / SS_CELL_W, BSP_LCD_V_RES / SS_CELL_H);
+        ESP_LOGI(TAG, "screensaver effect: %s (%d/%d)", screensaver_effects_current_name(), idx,
+                 screensaver_effects_count());
+    }
+
     screensaver->fx.fps_x10 = 0;
     screensaver->fx.interval_ms_x10 = 0;
     screensaver->fx.render_ms_x10 = 0;
@@ -376,6 +383,9 @@ void home_screensaver_create(home_screensaver_t *screensaver, lv_obj_t *root,
     }
 
     memset(screensaver, 0, sizeof(*screensaver));
+    if (!screensaver_effects_init()) {
+        ESP_LOGW(TAG, "screensaver effects init failed; clock over blank background");
+    }
     screensaver->last_activity_us = home_now_us();
     screensaver->touch_cb = touch_cb_fn;
     screensaver->touch_cb_ctx = touch_cb_ctx;
