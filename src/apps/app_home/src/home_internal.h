@@ -27,6 +27,12 @@
 #define HOME_WEATHER_TEXT_COLOR ui_theme_color_hex(UI_THEME_COLOR_TEXT_SECONDARY)
 #define HOME_WEATHER_MUTED_COLOR ui_theme_color_hex(UI_THEME_COLOR_TEXT_MUTED)
 #define HOME_BG_BASE_COLOR ui_theme_color_hex(UI_THEME_COLOR_CANVAS_BG)
+/* While a permission/input request is pending, the whole Home background flashes
+ * between the base color and this alert color to draw a glance's attention. Half-
+ * period in ms (full cycle = 2x); kept ~1Hz, well under the >3Hz photosensitivity
+ * range for a full-field flash. */
+#define HOME_ALERT_FLASH_COLOR 0xFFADBB
+#define HOME_ALERT_FLASH_PERIOD_MS 500
 #define HOME_BUBBLE_BG_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_OVERLAY)
 #define HOME_BUBBLE_TEXT_COLOR ui_theme_color_hex(UI_THEME_COLOR_TEXT_PRIMARY)
 #define HOME_BUBBLE_MAX_W 220
@@ -53,7 +59,5 @@
 #define HOME_SPRITE_X_OFFSET -60
 #define HOME_SPRITE_Y_OFFSET 10
 #define HOME_SPRITE_MOTION_PERIOD_MS 33
-
-#define APPROVE_BG_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_OVERLAY)
 
 #endif

@@ -390,14 +390,89 @@ static void refresh_bubble(home_view_t *view, const home_present_model_t *model)
         lv_label_set_text(view->bubble_label, model->bubble_text);
         lv_obj_clear_flag(view->bubble_box, LV_OBJ_FLAG_HIDDEN);
         stop_bubble_timer(view);
-        view->bubble_timer = lv_timer_create(bubble_fade_cb, HOME_BUBBLE_FADE_MS, view);
-        lv_timer_set_repeat_count(view->bubble_timer, 1);
+        /* Sticky bubbles (a pending permission/input request) stay until the
+         * request clears; only transient status bubbles fade after a few seconds. */
+        if (!model->bubble_sticky) {
+            view->bubble_timer = lv_timer_create(bubble_fade_cb, HOME_BUBBLE_FADE_MS, view);
+            lv_timer_set_repeat_count(view->bubble_timer, 1);
+        }
         return;
     }
 
     if (!view->bubble_dismissed) {
         lv_obj_clear_flag(view->bubble_box, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+/* On the pink flash phase the light text/icons wash out, so invert them all to
+ * the dark base color for legible contrast; restore their normal colors otherwise.
+ * Clock/date use fixed theme colors; wifi/claude/weather are dynamic, so their
+ * normal color comes from the cache home_view_apply() keeps. */
+static void apply_alert_colors(home_view_t *view, bool flash_phase)
+{
+    lv_color_t ink = lv_color_hex(HOME_BG_BASE_COLOR);
+
+    if (view->time_label != NULL) {
+        lv_obj_set_style_text_color(
+            view->time_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_EMPHASIS), 0);
+    }
+    if (view->date_label != NULL) {
+        lv_obj_set_style_text_color(
+            view->date_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_SECONDARY), 0);
+    }
+    if (view->wifi_icon != NULL) {
+        lv_obj_set_style_text_color(view->wifi_icon,
+                                    flash_phase ? ink : lv_color_hex(view->alert_c_wifi), 0);
+    }
+    if (view->claude_icon != NULL) {
+        lv_obj_set_style_text_color(view->claude_icon,
+                                    flash_phase ? ink : lv_color_hex(view->alert_c_claude), 0);
+    }
+    if (view->weather_icon != NULL) {
+        lv_obj_set_style_text_color(view->weather_icon,
+                                    flash_phase ? ink : lv_color_hex(view->alert_c_weather), 0);
+    }
+    if (view->weather_label != NULL) {
+        lv_obj_set_style_text_color(view->weather_label,
+                                    flash_phase ? ink : lv_color_hex(view->alert_c_weather), 0);
+    }
+}
+
+static void alert_flash_cb(lv_timer_t *timer)
+{
+    home_view_t *view = lv_timer_get_user_data(timer);
+
+    if (view == NULL || view->root == NULL) {
+        return;
+    }
+    view->alert_flash_phase = !view->alert_flash_phase;
+    lv_obj_set_style_bg_color(
+        view->root,
+        lv_color_hex(view->alert_flash_phase ? HOME_ALERT_FLASH_COLOR : HOME_BG_BASE_COLOR), 0);
+    apply_alert_colors(view, view->alert_flash_phase);
+}
+
+static void start_alert_flash(home_view_t *view)
+{
+    if (view->alert_flash_timer != NULL) {
+        return;
+    }
+    view->alert_flash_phase = false;
+    view->alert_flash_timer = lv_timer_create(alert_flash_cb, HOME_ALERT_FLASH_PERIOD_MS, view);
+}
+
+static void stop_alert_flash(home_view_t *view)
+{
+    if (view->alert_flash_timer == NULL) {
+        return;
+    }
+    lv_timer_delete(view->alert_flash_timer);
+    view->alert_flash_timer = NULL;
+    view->alert_flash_phase = false;
+    if (view->root != NULL) {
+        lv_obj_set_style_bg_color(view->root, lv_color_hex(HOME_BG_BASE_COLOR), 0);
+    }
+    apply_alert_colors(view, false); /* restore the theme text colors */
 }
 
 lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
@@ -562,19 +637,26 @@ void home_view_apply(home_view_t *view, const home_present_model_t *model)
     lv_label_set_text(view->date_label, model->date_line);
 
     lv_label_set_text_static(view->wifi_icon, model->wifi_symbol);
-    lv_obj_set_style_text_color(view->wifi_icon, lv_color_hex(model->wifi_color), 0);
     set_status_dot_visible(view->wifi_dot, model->wifi_dot_visible);
-
-    lv_obj_set_style_text_color(view->claude_icon, lv_color_hex(model->claude_color), 0);
     set_status_dot_visible(view->claude_dot, model->claude_dot_visible);
-
     lv_label_set_text_static(view->weather_icon, model->weather_symbol);
-    lv_obj_set_style_text_color(view->weather_icon, lv_color_hex(model->weather_color), 0);
     lv_label_set_text(view->weather_label, model->weather_text);
-    lv_obj_set_style_text_color(view->weather_label, lv_color_hex(model->weather_color), 0);
+
+    /* Cache the dynamic icon/weather colors; the color actually applied may be
+     * inverted to dark on the pink flash phase (see apply_alert_colors). */
+    view->alert_c_wifi = model->wifi_color;
+    view->alert_c_claude = model->claude_color;
+    view->alert_c_weather = model->weather_color;
 
     refresh_sprite(view, model->sprite_state, model->sprite_emotion);
     refresh_bubble(view, model);
+
+    if (model->alert_flash) {
+        start_alert_flash(view);
+    } else {
+        stop_alert_flash(view);
+    }
+    apply_alert_colors(view, (view->alert_flash_timer != NULL) && view->alert_flash_phase);
 }
 
 void home_view_set_hidden(home_view_t *view, bool hidden)
@@ -638,6 +720,7 @@ void home_view_suspend(home_view_t *view)
     }
     reset_motion_phase(view);
     stop_bubble_timer(view);
+    stop_alert_flash(view);
 }
 
 void home_view_on_screensaver_enter(home_view_t *view)

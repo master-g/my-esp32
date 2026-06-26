@@ -37,6 +37,8 @@ typedef struct {
     sprite_state_t sprite_state;
     sprite_emotion_t sprite_emotion;
     bool bubble_visible;
+    bool bubble_sticky; /* pending interaction: bubble stays up until cleared (no 5s fade) */
+    bool alert_flash;   /* pending interaction: flash the Home background for salience */
     char bubble_text[96];
     char screensaver_time_text[6];
 } home_present_model_t;

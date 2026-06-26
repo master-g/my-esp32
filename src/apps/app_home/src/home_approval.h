@@ -5,13 +5,13 @@
 
 #include "lvgl.h"
 
-/* Read-only "Claude is waiting" status overlay. The device never returns a
- * decision; this only displays the coarse interaction type for every waiting
- * type (tool permission, Elicitation, AskUserQuestion). */
+/* Read-only "Claude is waiting" alert lifecycle. The device never returns a
+ * decision; it surfaces only the coarse interaction type for every waiting type
+ * (tool permission, Elicitation, AskUserQuestion). The waiting state is drawn by
+ * the Home sprite + bubble (driven by the snapshot); this struct only keeps the
+ * screen lit and runs a self-timeout backstop while a request is outstanding. */
 typedef struct {
-    lv_obj_t *overlay;
-    lv_obj_t *status_label;
-    lv_obj_t *type_label;
+    bool active;
     lv_timer_t *timeout_timer;
 } home_approval_t;
 

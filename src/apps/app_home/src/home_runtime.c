@@ -83,6 +83,12 @@ static void enter_screensaver(home_runtime_t *runtime, const home_present_model_
         return;
     }
 
+    /* While a request is pending, keep showing the Home waiting alert (sprite +
+     * bubble + flashing background) rather than letting the screensaver cover it. */
+    if (home_approval_is_visible(&runtime->approval)) {
+        return;
+    }
+
     if (home_screensaver_is_active(&runtime->screensaver)) {
         home_screensaver_apply(&runtime->screensaver, model);
         return;
@@ -337,20 +343,16 @@ void home_runtime_handle_event(home_runtime_t *runtime, const app_event_t *event
         home_view_apply(&runtime->view, &model);
         break;
     case APP_EVENT_PERMISSION_REQUEST:
-        home_screensaver_poke_activity(&runtime->screensaver);
-        exit_screensaver(runtime);
-        home_approval_show_pending(&runtime->approval);
-        break;
-    case APP_EVENT_PERMISSION_DISMISS:
-        home_approval_hide(&runtime->approval);
-        break;
     case APP_EVENT_PROMPT_REQUEST:
         home_screensaver_poke_activity(&runtime->screensaver);
         exit_screensaver(runtime);
         home_approval_show_pending(&runtime->approval);
+        apply_current_snapshot(runtime); /* surface the waiting sprite + bubble now */
         break;
+    case APP_EVENT_PERMISSION_DISMISS:
     case APP_EVENT_PROMPT_DISMISS:
         home_approval_hide(&runtime->approval);
+        apply_current_snapshot(runtime); /* clear the bubble now that nothing pends */
         break;
     default:
         break;
@@ -394,6 +396,9 @@ esp_err_t home_runtime_handle_control(home_runtime_t *runtime, app_control_type_
         return ESP_OK;
     }
     case APP_CONTROL_CAPTURE_SCREENSHOT:
+        /* Only the direct-mode screensaver needs a custom capture path. The Home
+         * UI (incl. the waiting sprite + bubble) is captured via the LVGL snapshot
+         * fallback the caller uses when this returns NOT_SUPPORTED. */
         return capture_direct_screensaver(runtime, (app_screenshot_t *)payload);
     default:
         return ESP_ERR_NOT_SUPPORTED;

@@ -45,6 +45,11 @@ typedef struct {
     lv_coord_t sprite_motion_x;
     lv_coord_t sprite_motion_y;
     bool bubble_dismissed;
+    lv_timer_t *alert_flash_timer;
+    bool alert_flash_phase;
+    uint32_t alert_c_wifi;    /* last model wifi icon color (for flash inversion) */
+    uint32_t alert_c_claude;  /* last model claude icon color */
+    uint32_t alert_c_weather; /* last model weather icon/text color */
 } home_view_t;
 
 lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent);
