@@ -20,6 +20,13 @@ static const char *TAG = "power_runtime";
 #define POWER_RUNTIME_TASK_STACK 4096
 #define POWER_RUNTIME_TASK_PRIO 4
 #define POWER_RUNTIME_POLL_MS 200
+/* While the waiting alert is active the loop keeps the screen ACTIVE at the policy
+ * brightness every iteration. The backlight is held STEADY, not breathed: a
+ * whole-panel fade dims the alert's centered text too, which the user rejected.
+ * Salience comes from the flashing red/blue lightbar, not the backlight. */
+/* Backstop mirroring the overlay's 5-min self-timeout: a wedged producer that
+ * never clears the flag cannot pin the backlight/idle-state forever. */
+#define POWER_RUNTIME_ALERT_MAX_US (5LL * 60 * 1000 * 1000)
 #define POWER_RUNTIME_USB_DIM_TIMEOUT_US (30LL * 1000 * 1000)
 #define POWER_RUNTIME_USB_SLEEP_TIMEOUT_US (90LL * 1000 * 1000)
 #define POWER_RUNTIME_BATTERY_DIM_TIMEOUT_US (15LL * 1000 * 1000)
@@ -104,17 +111,51 @@ static void reconcile_user_activity(void)
 static void power_runtime_task(void *arg)
 {
     power_runtime_cmd_t cmd;
+    bool raw_prev = false;
+    bool eff_prev = false;
+    int64_t alert_start_us = 0;
 
     (void)arg;
     for (;;) {
-        if (xQueueReceive(s_cmd_queue, &cmd, pdMS_TO_TICKS(POWER_RUNTIME_POLL_MS)) == pdTRUE) {
+        int64_t now_us = esp_timer_get_time();
+        bool raw = system_state_get_alert_active();
+        bool eff;
+        uint32_t wait_ms;
+
+        if (raw && !raw_prev) {
+            alert_start_us = now_us; /* rising edge: start the breathe + backstop window */
+        }
+        eff = raw && (now_us - alert_start_us <= POWER_RUNTIME_ALERT_MAX_US);
+        wait_ms = POWER_RUNTIME_POLL_MS;
+
+        if (xQueueReceive(s_cmd_queue, &cmd, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
             if (cmd == POWER_RUNTIME_CMD_APPLY_OUTPUT) {
                 apply_policy_output();
             }
         }
 
         reconcile_user_activity();
-        maybe_update_display_state_from_idle();
+
+        if (eff) {
+            power_policy_input_t input;
+
+            /* Keep the screen lit at steady policy brightness while waiting. Force
+             * ACTIVE if idle had dimmed it (battery); do NOT modulate — a backlight
+             * fade would dim the alert text too. */
+            system_state_get_power_policy_input(&input);
+            if (input.display_state != DISPLAY_STATE_ACTIVE) {
+                system_state_set_display_state(DISPLAY_STATE_ACTIVE);
+            }
+            apply_policy_output();
+        } else {
+            if (eff_prev) {
+                apply_policy_output(); /* clear/backstop edge: restore policy brightness once */
+            }
+            maybe_update_display_state_from_idle();
+        }
+
+        raw_prev = raw;
+        eff_prev = eff;
     }
 }
 
@@ -153,9 +194,9 @@ esp_err_t power_runtime_init(void)
                         "failed to subscribe power runtime");
 
     {
-        BaseType_t ret = xTaskCreatePinnedToCore(power_runtime_task, "power_runtime",
-                                                  POWER_RUNTIME_TASK_STACK, NULL,
-                                                  POWER_RUNTIME_TASK_PRIO, &s_task_handle, 1);
+        BaseType_t ret =
+            xTaskCreatePinnedToCore(power_runtime_task, "power_runtime", POWER_RUNTIME_TASK_STACK,
+                                    NULL, POWER_RUNTIME_TASK_PRIO, &s_task_handle, 1);
         ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "power runtime task create failed");
     }
 

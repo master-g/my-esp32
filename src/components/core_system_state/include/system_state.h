@@ -17,4 +17,12 @@ void system_state_set_wifi_connected(bool wifi_connected);
 void system_state_set_user_interacting(bool user_interacting);
 void system_state_note_user_activity(void);
 
+/* Waiting-alert flag. Set by the home view while a request is pending, read by
+ * power_runtime to keep the screen lit (steady, not dimmed) while it is set.
+ * Deliberately OUTSIDE the power-policy input and the recompute/publish path —
+ * toggling it must not emit APP_EVENT_POWER_CHANGED (that would force a backlight
+ * rewrite each show/hide). */
+void system_state_set_alert_active(bool alert_active);
+bool system_state_get_alert_active(void);
+
 #endif

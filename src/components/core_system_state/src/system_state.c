@@ -10,6 +10,7 @@
 
 static power_policy_input_t s_input;
 static uint32_t s_user_activity_seq;
+static bool s_alert_active;
 static SemaphoreHandle_t s_mutex;
 static bool s_initialized;
 
@@ -44,6 +45,7 @@ esp_err_t system_state_init(void)
     s_input.display_state = DISPLAY_STATE_ACTIVE;
     s_input.foreground_app = APP_ID_HOME;
     s_user_activity_seq = 0;
+    s_alert_active = false;
     s_initialized = true;
 
     // init 跑在启动期单线程,无竞争;直接算并发布初始状态。
@@ -149,4 +151,24 @@ void system_state_note_user_activity(void)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_user_activity_seq++;
     xSemaphoreGive(s_mutex);
+}
+
+void system_state_set_alert_active(bool alert_active)
+{
+    /* No recompute_locked()/publish_power_changed(): the alert flag never feeds
+     * power_policy, and emitting POWER_CHANGED on each show/hide would force an
+     * apply_policy_output() that fights the backlight breathe. */
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_alert_active = alert_active;
+    xSemaphoreGive(s_mutex);
+}
+
+bool system_state_get_alert_active(void)
+{
+    bool alert_active;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    alert_active = s_alert_active;
+    xSemaphoreGive(s_mutex);
+    return alert_active;
 }
