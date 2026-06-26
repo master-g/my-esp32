@@ -250,6 +250,13 @@ static esp_err_t panel_push_rows_blocking(const uint16_t *map, uint16_t y_offset
         return ESP_OK;
     }
 
+    /* Self-heal the flush-done semaphore: a prior push that hit the 1000ms take
+     * timeout returns while its DMA-done give is still pending, leaving the binary
+     * semaphore off by one. That desync makes every later wait track the wrong
+     * DMA — the screensaver tears (degrades) then stalls. Drain to 0, then prime
+     * to exactly 1 so each push starts from a known count. */
+    while (xSemaphoreTake(s_flush_done_semaphore, 0) == pdTRUE) {
+    }
     xSemaphoreGive(s_flush_done_semaphore);
     while (remaining_rows > 0) {
         const size_t rows = (remaining_rows > dma_chunk_rows) ? dma_chunk_rows : remaining_rows;
