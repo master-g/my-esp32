@@ -192,7 +192,10 @@ impl PromptStore {
             guard.device_visible = Some(target_id);
         }
 
-        PromptOverlayStep { dismiss, show }
+        PromptOverlayStep {
+            dismiss,
+            show,
+        }
     }
 
     pub async fn requeue_visible_for_device(&self) -> Option<DismissedPrompt> {
@@ -294,9 +297,7 @@ impl PromptStore {
         for id in &expired_ids {
             guard.entries.remove(id);
         }
-        guard
-            .pending_order
-            .retain(|id| !expired_ids.contains(id));
+        guard.pending_order.retain(|id| !expired_ids.contains(id));
 
         if dismissed.iter().any(|p| p.was_visible_on_device) {
             guard.device_visible = None;
@@ -340,7 +341,6 @@ fn remove_existing_locked(state: &mut State, id: &str) {
         state.device_visible = None;
     }
 }
-
 
 fn matches_event(entry: &Entry, event: &LocalHookEvent) -> bool {
     if entry.session_id.is_empty() || event.session_id.is_empty() {
@@ -433,7 +433,8 @@ mod tests {
             }
         );
 
-        let retried = store.next_device_overlay().await.show.expect("pending should be shown again");
+        let retried =
+            store.next_device_overlay().await.show.expect("pending should be shown again");
         assert_eq!(retried.id, "prompt-1");
     }
 

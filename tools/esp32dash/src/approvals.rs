@@ -203,7 +203,10 @@ impl ApprovalStore {
             guard.device_visible = Some(target_id);
         }
 
-        ApprovalOverlayStep { dismiss, show }
+        ApprovalOverlayStep {
+            dismiss,
+            show,
+        }
     }
 
     pub async fn note_device_disconnected(&self) {
@@ -259,7 +262,6 @@ impl ApprovalStore {
             }
         })
     }
-
 }
 
 fn is_entry_expired(entry: &Entry, timeout: Duration) -> bool {
@@ -439,7 +441,8 @@ mod tests {
 
         store.note_device_disconnected().await;
 
-        let retried = store.next_device_overlay().await.show.expect("pending should be shown again");
+        let retried =
+            store.next_device_overlay().await.show.expect("pending should be shown again");
         assert_eq!(retried.id, "approve-1");
         assert_eq!(retried.transport_id, "approval-1");
     }
@@ -455,7 +458,8 @@ mod tests {
             .await;
 
         // Freshest pending (approve-1) is the one shown on the device.
-        let first = store.next_device_overlay().await.show.expect("freshest pending should be shown");
+        let first =
+            store.next_device_overlay().await.show.expect("freshest pending should be shown");
         assert_eq!(first.id, "approve-1");
 
         {

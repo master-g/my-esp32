@@ -18,10 +18,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use tokio::{
-    net::TcpListener,
-    sync::Mutex,
-};
+use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -587,7 +584,10 @@ impl AppState {
             }
         }
         if let Some(expired) = self.prompts.take_expired_visible_for_device().await {
-            info!(prompt_id = expired.id, "prompt timed out before dismiss, clearing device overlay");
+            info!(
+                prompt_id = expired.id,
+                "prompt timed out before dismiss, clearing device overlay"
+            );
             if let Err(err) = self.send_device_prompt_dismiss(&expired) {
                 warn!(prompt_id = expired.id, error = %err, "failed to clear timed-out prompt");
                 return;
@@ -619,7 +619,11 @@ impl AppState {
                     warn!(approval_id = approval.id, error = %err, "failed to forward approval to device");
                     return;
                 }
-                info!(approval_id = approval.id, tool = approval.tool_name, "forwarded approval to device");
+                info!(
+                    approval_id = approval.id,
+                    tool = approval.tool_name,
+                    "forwarded approval to device"
+                );
             }
             return;
         }
@@ -1187,11 +1191,8 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
     let initial_sessions = restored_sessions(persisted.as_ref(), &initial_snapshot);
     let approvals = ApprovalStore::with_timeout(Duration::from_secs(config.approval.timeout_secs));
     let prompts = PromptStore::new();
-    let device_manager = DeviceManager::start(
-        config.device.clone(),
-        factory,
-        Some(initial_snapshot.clone()),
-    );
+    let device_manager =
+        DeviceManager::start(config.device.clone(), factory, Some(initial_snapshot.clone()));
 
     AppState {
         emotion_analyzer: EmotionAnalyzer::from_config(&config.emotion),

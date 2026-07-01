@@ -38,7 +38,6 @@ use crate::{
         UnixSerialFactory, capture_screenshot_direct, discover_devices, open_direct_session,
         request_direct, request_direct_with_timeout, send_event_direct, send_protocol_event_direct,
     },
-    hooks::InstallHooksResult,
     model::{
         AdminErrorResponse, AdminRpcResponse, Attention, DeviceScreenshot, LocalHookEvent,
         RawHookInput, RpcRequest, RunStatus, Snapshot, WaitingPrompt, WaitingPromptKind,
@@ -103,9 +102,14 @@ enum Command {
     #[command(about = "Remove the esp32dash launchd service on macOS")]
     UninstallLaunchd,
     #[command(
-        about = "Install the Claude hook wrapper and register hooks in ~/.claude/settings.json"
+        about = "Install or uninstall esp32dash hooks for Claude Code and/or OMP",
+        subcommand_required = true,
+        arg_required_else_help = true
     )]
-    InstallHooks(InstallHooksArgs),
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
     #[command(
         about = "Test chibi sprite states and text bubbles on the ESP32 display",
         subcommand_required = true,
@@ -179,10 +183,30 @@ struct ConfigArgs {
     port: Option<String>,
 }
 
-#[derive(Debug, Args)]
-struct InstallHooksArgs {
-    #[arg(short = 'f', long, help = "Overwrite and update without interactive confirmation")]
-    force: bool,
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+enum HookTarget {
+    #[value(name = "claude")]
+    Claude,
+    #[value(name = "omp")]
+    Omp,
+    #[value(name = "all")]
+    All,
+}
+
+#[derive(Debug, Subcommand)]
+enum HooksCommand {
+    #[command(about = "Install hooks for the specified target (default: all)")]
+    Install {
+        #[arg(value_enum, help = "claude | omp | all (default: all)")]
+        target: Option<HookTarget>,
+        #[arg(short = 'f', long, help = "Overwrite and update without interactive confirmation")]
+        force: bool,
+    },
+    #[command(about = "Uninstall hooks for the specified target (default: all)")]
+    Uninstall {
+        #[arg(value_enum, help = "claude | omp | all (default: all)")]
+        target: Option<HookTarget>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -323,7 +347,7 @@ enum ChibiCommand {
         action: ScreensaverAction,
         #[arg(
             long,
-            help = "Effect to show on enter: matrix|plasma|sine|stars|rain|life|fire|pipes \
+            help = "Effect to show on enter: matrix|plasma|sine|stars|rain|swarm|fire|pipes \
                     (default: random; unknown names fall back to random)"
         )]
         effect: Option<String>,
@@ -389,7 +413,9 @@ async fn main() -> Result<()> {
         Command::Config(args) => config_ui::run_config_editor(args.port).await,
         Command::InstallLaunchd => install_launchd(),
         Command::UninstallLaunchd => uninstall_launchd(),
-        Command::InstallHooks(args) => install_hooks(args),
+        Command::Hooks {
+            command,
+        } => run_hooks_command(command),
         Command::Chibi {
             command,
         } => run_chibi_command(command).await,
@@ -609,7 +635,8 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 println!("sent prompt dismiss");
                 Ok(())
             } else {
-                let option_labels: Vec<String> = options.split(',').map(|s| s.trim().to_string()).collect();
+                let option_labels: Vec<String> =
+                    options.split(',').map(|s| s.trim().to_string()).collect();
                 let option_count = option_labels.len();
                 println!("sending prompt request: title=\"{title}\" question=\"{question}\"");
                 send_protocol_event_direct(
@@ -770,11 +797,30 @@ fn uninstall_launchd() -> Result<()> {
     Ok(())
 }
 
-fn install_hooks(args: InstallHooksArgs) -> Result<()> {
-    let executable = env::current_exe().context("failed to resolve current executable")?;
-    let executable = executable.canonicalize().unwrap_or(executable);
-    let result: InstallHooksResult = hooks::install_hooks(&executable, args.force)?;
-    print_json(&result)
+fn run_hooks_command(command: HooksCommand) -> Result<()> {
+    match command {
+        HooksCommand::Install {
+            target,
+            force,
+        } => {
+            let resolved = target.unwrap_or(HookTarget::All);
+            let install_claude = matches!(resolved, HookTarget::Claude | HookTarget::All);
+            let install_omp = matches!(resolved, HookTarget::Omp | HookTarget::All);
+            let executable = env::current_exe().context("failed to resolve current executable")?;
+            let executable = executable.canonicalize().unwrap_or(executable);
+            let result = hooks::install_hooks(&executable, force, install_claude, install_omp)?;
+            print_json(&result)
+        }
+        HooksCommand::Uninstall {
+            target,
+        } => {
+            let resolved = target.unwrap_or(HookTarget::All);
+            let uninstall_claude = matches!(resolved, HookTarget::Claude | HookTarget::All);
+            let uninstall_omp = matches!(resolved, HookTarget::Omp | HookTarget::All);
+            let result = hooks::uninstall_hooks(uninstall_claude, uninstall_omp)?;
+            print_json(&result)
+        }
+    }
 }
 
 fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
@@ -1018,10 +1064,7 @@ async fn respond_from_stdin() -> Result<()> {
         }
     };
 
-    let event_name = raw
-        .get("hook_event_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let event_name = raw.get("hook_event_name").and_then(|v| v.as_str()).unwrap_or("unknown");
 
     match event_name {
         "PermissionRequest" => handle_permission_request(&stdin, &raw).await,
@@ -1061,11 +1104,8 @@ async fn handle_permission_request(stdin: &str, raw: &Value) -> Result<()> {
             .await;
     }
 
-    let permission_suggestions = raw
-        .get("permission_suggestions")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let permission_suggestions =
+        raw.get("permission_suggestions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
     // Submit approval to agent
     let client = Client::new();
@@ -1109,11 +1149,9 @@ async fn handle_elicitation(stdin: &str, raw: &Value) -> Result<()> {
     // Read-only device: never emit a decision. Complex object schemas (allOf/anyOf/oneOf
     // compositions included) can't be summarized as a coarse type, so skip the device
     // notify and let Claude Code's native prompt handle them.
-    let is_form_mode = raw
-        .get("requested_schema")
-        .and_then(|v| v.get("type"))
-        .and_then(Value::as_str)
-        == Some("object");
+    let is_form_mode =
+        raw.get("requested_schema").and_then(|v| v.get("type")).and_then(Value::as_str)
+            == Some("object");
 
     if is_form_mode {
         return Ok(());
@@ -1301,10 +1339,7 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use axum::{
-        Json, Router,
-        routing::get,
-    };
+    use axum::{Json, Router, routing::get};
     use tokio::net::TcpListener;
 
     use super::*;
@@ -1529,5 +1564,99 @@ mod tests {
         assert_eq!(prompt.options.len(), 2);
         assert_eq!(prompt.options[0].label, "A");
         assert_eq!(prompt.options[1].label, "B");
+    }
+
+    // --- CLI structure tests ---
+
+    #[test]
+    fn hook_target_parses_all_variants() {
+        use clap::ValueEnum;
+
+        assert_eq!(HookTarget::from_str("claude", true).unwrap(), HookTarget::Claude);
+        assert_eq!(HookTarget::from_str("omp", true).unwrap(), HookTarget::Omp);
+        assert_eq!(HookTarget::from_str("all", true).unwrap(), HookTarget::All);
+    }
+
+    #[test]
+    fn hooks_install_subcommand_parses_with_target() {
+        let cli = Cli::try_parse_from(["esp32dash", "hooks", "install", "claude"]).unwrap();
+        match cli.command {
+            Command::Hooks {
+                command:
+                    HooksCommand::Install {
+                        target,
+                        force,
+                    },
+            } => {
+                assert_eq!(target, Some(HookTarget::Claude));
+                assert!(!force);
+            }
+            other => panic!("expected Hooks::Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hooks_install_defaults_to_all_when_target_omitted() {
+        let cli = Cli::try_parse_from(["esp32dash", "hooks", "install"]).unwrap();
+        match cli.command {
+            Command::Hooks {
+                command:
+                    HooksCommand::Install {
+                        target,
+                        ..
+                    },
+            } => {
+                assert!(target.is_none());
+            }
+            other => panic!("expected Hooks::Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hooks_install_accepts_force_flag() {
+        let cli = Cli::try_parse_from(["esp32dash", "hooks", "install", "omp", "--force"]).unwrap();
+        match cli.command {
+            Command::Hooks {
+                command:
+                    HooksCommand::Install {
+                        target,
+                        force,
+                    },
+            } => {
+                assert_eq!(target, Some(HookTarget::Omp));
+                assert!(force);
+            }
+            other => panic!("expected Hooks::Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hooks_uninstall_subcommand_parses_with_target() {
+        let cli = Cli::try_parse_from(["esp32dash", "hooks", "uninstall", "claude"]).unwrap();
+        match cli.command {
+            Command::Hooks {
+                command: HooksCommand::Uninstall {
+                    target,
+                },
+            } => {
+                assert_eq!(target, Some(HookTarget::Claude));
+            }
+            other => panic!("expected Hooks::Uninstall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hooks_uninstall_defaults_to_all_when_target_omitted() {
+        let cli = Cli::try_parse_from(["esp32dash", "hooks", "uninstall"]).unwrap();
+        match cli.command {
+            Command::Hooks {
+                command: HooksCommand::Uninstall {
+                    target,
+                },
+            } => {
+                assert!(target.is_none());
+            }
+            other => panic!("expected Hooks::Uninstall, got {other:?}"),
+        }
     }
 }
