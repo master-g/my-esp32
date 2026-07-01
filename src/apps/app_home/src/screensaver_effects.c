@@ -203,78 +203,157 @@ static void rain_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, 
     }
 }
 
-/* --- 6. Conway's Game of Life --- */
-#define GOL_STEP_MS 130
+/* --- 6. Swarm (particles drifting through a flow field) --- */
+/* Particles ride a time-varying sin/cos noise field — the same math as
+ * plasma, but sampled at each particle's position to derive a flow
+ * direction. This spreads particles across the entire grid instead of
+ * clustering around a single attractor (the old model's problem on the
+ * 80-col-wide display). Trails fade by age; heads glow brighter when
+ * moving fast (high-velocity regions of the flow field). */
+#define SWARM_COUNT 28
+#define SWARM_TRAIL 4 /* trail length per particle (cell history ring) */
+
 typedef struct {
-    uint8_t cell[SS_MAX_ROWS][SS_MAX_COLS];
-    uint32_t last_step;
-    uint32_t last_seed;
-} gol_state_t;
+    /* Current position in fixed-point: value = pixel * 16 */
+    int16_t px[SWARM_COUNT];
+    int16_t py[SWARM_COUNT];
+    /* Previous velocity (for render-time brightness) */
+    int16_t vx[SWARM_COUNT];
+    int16_t vy[SWARM_COUNT];
+    /* Trail ring: last SWARM_TRAIL positions per particle */
+    uint8_t trail_col[SWARM_COUNT][SWARM_TRAIL];
+    uint8_t trail_row[SWARM_COUNT][SWARM_TRAIL];
+    uint8_t trail_idx;
+    uint32_t last_tick;
+} swarm_state_t;
 
-static void gol_reset(void *ctx, uint16_t cols, uint16_t rows)
+static const char SWARM_GLYPHS[] = {'.', 'o', '*', '+', 'o'};
+
+static void swarm_reset(void *ctx, uint16_t cols, uint16_t rows)
 {
-    gol_state_t *s = (gol_state_t *)ctx;
-
-    (void)cols;
-    (void)rows;
-    for (int r = 0; r < SS_MAX_ROWS; r++) {
-        for (int c = 0; c < SS_MAX_COLS; c++) {
-            s->cell[r][c] = (esp_random() % 100U) < 32U ? 1U : 0U;
-        }
+    swarm_state_t *s = (swarm_state_t *)ctx;
+    if (cols == 0 || rows == 0) {
+        return;
     }
-    s->last_step = 0;
-    s->last_seed = 0;
+
+    for (int i = 0; i < SWARM_COUNT; i++) {
+        s->px[i] = (int16_t)((esp_random() % (cols * 16U)) & 0x7FFF);
+        s->py[i] = (int16_t)((esp_random() % (rows * 16U)) & 0x7FFF);
+        s->vx[i] = (int16_t)((esp_random() % 64U) - 32);
+        s->vy[i] = (int16_t)((esp_random() % 32U) - 16);
+    }
+    memset(s->trail_col, 0xFF, sizeof(s->trail_col)); /* 0xFF = invalid */
+    memset(s->trail_row, 0xFF, sizeof(s->trail_row));
+    s->trail_idx = 0;
+    s->last_tick = 0;
+    /* (flow field has no persistent attractor state) */
 }
 
-static void gol_step(gol_state_t *s, uint16_t R, uint16_t C)
+static void swarm_tick(swarm_state_t *s, uint16_t C, uint16_t R, uint32_t t)
 {
-    static uint8_t next[SS_MAX_ROWS][SS_MAX_COLS];
+    int32_t tt = (int32_t)(t / 16U);
+    int16_t max_x = (int16_t)(C * 16 - 1);
+    int16_t max_y = (int16_t)(R * 16 - 1);
 
-    for (uint16_t r = 0; r < R; r++) {
-        for (uint16_t c = 0; c < C; c++) {
-            int n = 0;
-            for (int dr = -1; dr <= 1; dr++) {
-                for (int dc = -1; dc <= 1; dc++) {
-                    if (dr == 0 && dc == 0) {
-                        continue;
-                    }
-                    n += s->cell[(r + dr + R) % R][(c + dc + C) % C];
-                }
-            }
-            next[r][c] = s->cell[r][c] ? (n == 2 || n == 3) : (n == 3);
+    for (int i = 0; i < SWARM_COUNT; i++) {
+        /* Sample the flow field at the particle's cell. The field is
+         * built from overlapping sine waves (same as plasma) so it has
+         * no center of attraction — flow direction varies smoothly
+         * across the grid, carrying particles to all regions. */
+        int16_t col = s->px[i] / 16;
+        int16_t row = s->py[i] / 16;
+        int32_t fx =
+            lv_trigo_sin(wrap360(col * 14 + tt)) + lv_trigo_sin(wrap360((col + row) * 9 + tt));
+        int32_t fy =
+            lv_trigo_sin(wrap360(row * 20 - tt)) + lv_trigo_sin(wrap360((col + row) * 9 - tt));
+        /* fx,fy range: [-65534, 65534]. Scale to velocity. */
+        s->vx[i] = (int16_t)(fx / 2048);
+        s->vy[i] = (int16_t)(fy / 2048);
+
+        /* Small random jitter for organic feel */
+        s->vx[i] += (int16_t)(esp_random() % 8U) - 4;
+        s->vy[i] += (int16_t)(esp_random() % 6U) - 3;
+
+        /* Update position */
+        s->px[i] += s->vx[i] / 4;
+        s->py[i] += s->vy[i] / 4;
+
+        /* Wrap around edges (toroidal) — particles exit one side and
+         * re-enter the other, so no edge goes permanently empty. */
+        if (s->px[i] < 0) {
+            s->px[i] += max_x + 1;
+        }
+        if (s->px[i] > max_x) {
+            s->px[i] -= max_x + 1;
+        }
+        if (s->py[i] < 0) {
+            s->py[i] += max_y + 1;
+        }
+        if (s->py[i] > max_y) {
+            s->py[i] -= max_y + 1;
         }
     }
-    for (uint16_t r = 0; r < R; r++) {
-        for (uint16_t c = 0; c < C; c++) {
-            s->cell[r][c] = next[r][c];
-        }
+
+    /* Record trail positions */
+    uint8_t ti = s->trail_idx;
+    for (int i = 0; i < SWARM_COUNT; i++) {
+        s->trail_col[i][ti] = (uint8_t)(s->px[i] / 16);
+        s->trail_row[i][ti] = (uint8_t)(s->py[i] / 16);
     }
+    s->trail_idx = (ti + 1) % SWARM_TRAIL;
 }
 
-static void gol_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
-                       uint32_t t)
+/* Swarm stores trail positions as uint8_t col/row indices, so it requires
+ * cols <= 255 and rows <= 255. The fixed-point math (int16_t px = col*16)
+ * also assumes cols/rows fit comfortably in int16_t after scaling — safe
+ * up to ~2047. Callers pass display-resolution-derived values (<=80/<=14),
+ * well within both bounds. Sibling effects (fire, pipes) clamp to SS_MAX_*
+ * defensively; swarm relies on this caller contract instead. */
+static void swarm_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
+                         uint32_t t)
 {
-    gol_state_t *s = (gol_state_t *)ctx;
-    uint16_t R = rows < SS_MAX_ROWS ? rows : SS_MAX_ROWS;
-    uint16_t C = cols < SS_MAX_COLS ? cols : SS_MAX_COLS;
+    swarm_state_t *s = (swarm_state_t *)ctx;
 
-    if (s->last_step == 0 || t - s->last_step >= GOL_STEP_MS) {
-        gol_step(s, R, C);
-        s->last_step = (t == 0) ? 1 : t;
+    if (s->last_tick == 0 || t - s->last_tick >= 80) {
+        swarm_tick(s, cols, rows, t);
+        s->last_tick = (t == 0) ? 1 : t;
     }
-    if (t - s->last_seed >= 6000U) { /* perturb so the field never freezes */
-        for (int i = 0; i < 24; i++) {
-            s->cell[esp_random() % R][esp_random() % C] = 1;
-        }
-        s->last_seed = t;
-    }
-    for (uint16_t r = 0; r < R; r++) {
-        for (uint16_t c = 0; c < C; c++) {
-            if (s->cell[r][c]) {
-                ss_glyph_draw_char(w, wctx, c * SS_CELL_W, r * SS_CELL_H, 1, '#',
-                                   rgb565(120, 200, 255));
+
+    /* Draw trails first (dim), then heads (bright) */
+    for (int i = 0; i < SWARM_COUNT; i++) {
+        for (int j = 0; j < SWARM_TRAIL; j++) {
+            uint8_t tc = s->trail_col[i][j];
+            uint8_t tr = s->trail_row[i][j];
+            if (tc == 0xFF || tr == 0xFF) {
+                continue;
             }
+            if (tc >= cols || tr >= rows) {
+                continue;
+            }
+            /* Brightness by trail age: trail_idx points at the next write
+             * slot, so the newest position is at (trail_idx - 1). Slot j's
+             * age is how many ticks ago it was written. Newest = brightest. */
+            uint8_t age = (uint8_t)((s->trail_idx + SWARM_TRAIL - 1 - j) % SWARM_TRAIL);
+            uint16_t alpha = (uint16_t)(SWARM_TRAIL - age) * 30;
+            uint8_t bv = (uint8_t)(40 + alpha);
+            ss_glyph_draw_char(w, wctx, tc * SS_CELL_W, tr * SS_CELL_H, 1, '.',
+                               rgb565(bv, bv + 20, 255));
         }
+    }
+
+    /* Draw heads */
+    for (int i = 0; i < SWARM_COUNT; i++) {
+        int16_t col = s->px[i] / 16;
+        int16_t row = s->py[i] / 16;
+        if (col < 0 || row < 0 || col >= (int16_t)cols || row >= (int16_t)rows) {
+            continue;
+        }
+        /* Brightness based on speed — fast particles glow brighter */
+        int32_t speed2 = s->vx[i] * s->vx[i] + s->vy[i] * s->vy[i];
+        char ch = SWARM_GLYPHS[i % (int)sizeof(SWARM_GLYPHS)];
+        uint8_t bright = (speed2 > 400) ? 255 : (speed2 > 100 ? 200 : 140);
+        ss_glyph_draw_char(w, wctx, col * SS_CELL_W, row * SS_CELL_H, 1, ch,
+                           rgb565(bright, (uint8_t)(bright * 4 / 5), 200));
     }
 }
 
@@ -471,8 +550,10 @@ static const screensaver_effect_t k_stars = {
 static const screensaver_effect_t k_rain = {
     .name = "rain", .ctx_size = sizeof(rain_state_t), .reset = rain_reset, .render = rain_render};
 
-static const screensaver_effect_t k_gol = {
-    .name = "life", .ctx_size = sizeof(gol_state_t), .reset = gol_reset, .render = gol_render};
+static const screensaver_effect_t k_swarm = {.name = "swarm",
+                                             .ctx_size = sizeof(swarm_state_t),
+                                             .reset = swarm_reset,
+                                             .render = swarm_render};
 static const screensaver_effect_t k_fire = {
     .name = "fire", .ctx_size = sizeof(fire_state_t), .reset = fire_reset, .render = fire_render};
 static const screensaver_effect_t k_pipes = {.name = "pipes",
@@ -481,7 +562,7 @@ static const screensaver_effect_t k_pipes = {.name = "pipes",
                                              .render = pipes_render};
 
 static const screensaver_effect_t *const s_registry[] = {
-    &k_matrix, &k_plasma, &k_sine, &k_stars, &k_rain, &k_gol, &k_fire, &k_pipes,
+    &k_matrix, &k_plasma, &k_sine, &k_stars, &k_rain, &k_swarm, &k_fire, &k_pipes,
 };
 
 static void *s_ctx; /* shared per-effect state buffer (max ctx_size) */
