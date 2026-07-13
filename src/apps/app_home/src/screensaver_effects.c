@@ -307,7 +307,7 @@ static void swarm_tick(swarm_state_t *s, uint16_t C, uint16_t R, uint32_t t)
  * cols <= 255 and rows <= 255. The fixed-point math (int16_t px = col*16)
  * also assumes cols/rows fit comfortably in int16_t after scaling — safe
  * up to ~2047. Callers pass display-resolution-derived values (<=80/<=14),
- * well within both bounds. Sibling effects (fire, pipes) clamp to SS_MAX_*
+ * well within both bounds. Sibling effect (pipes) clamps to SS_MAX_*
  * defensively; swarm relies on this caller contract instead. */
 static void swarm_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
                          uint32_t t)
@@ -357,74 +357,7 @@ static void swarm_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols,
     }
 }
 
-/* --- 7. ASCII fire --- */
-#define FIRE_STEP_MS 45
-typedef struct {
-    uint8_t heat[SS_MAX_ROWS + 1][SS_MAX_COLS];
-    uint32_t last_step;
-} fire_state_t;
-
-static void fire_reset(void *ctx, uint16_t cols, uint16_t rows)
-{
-    fire_state_t *s = (fire_state_t *)ctx;
-
-    (void)cols;
-    (void)rows;
-    memset(s->heat, 0, sizeof(s->heat));
-    s->last_step = 0;
-}
-
-static void fire_step(fire_state_t *s, uint16_t R, uint16_t C)
-{
-    for (uint16_t c = 0; c < C; c++) {
-        s->heat[R][c] = (esp_random() % 100U) < 80U ? 255U : 90U; /* source row */
-    }
-    for (int r = (int)R - 1; r >= 0; r--) {
-        for (uint16_t c = 0; c < C; c++) {
-            uint16_t l = (uint16_t)((c + C - 1) % C);
-            uint16_t rr = (uint16_t)((c + 1) % C);
-            int sum =
-                s->heat[r + 1][l] + s->heat[r + 1][c] + s->heat[r + 1][rr] + s->heat[r + 1][c];
-            int v = sum / 4 - 14;
-            s->heat[r][c] = (uint8_t)(v < 0 ? 0 : v);
-        }
-    }
-}
-
-static void fire_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
-                        uint32_t t)
-{
-    fire_state_t *s = (fire_state_t *)ctx;
-    uint16_t R = rows < SS_MAX_ROWS ? rows : SS_MAX_ROWS;
-    uint16_t C = cols < SS_MAX_COLS ? cols : SS_MAX_COLS;
-
-    if (s->last_step == 0 || t - s->last_step >= FIRE_STEP_MS) {
-        fire_step(s, R, C);
-        s->last_step = (t == 0) ? 1 : t;
-    }
-    for (uint16_t r = 0; r < R; r++) {
-        for (uint16_t c = 0; c < C; c++) {
-            uint8_t v = s->heat[r][c];
-            int idx;
-            uint8_t g;
-            uint8_t b;
-
-            if (v < 24) {
-                continue;
-            }
-            idx = v * 9 / 255;
-            if (idx > 9) {
-                idx = 9;
-            }
-            g = (uint8_t)(v * 4 / 5);
-            b = (uint8_t)(v > 180 ? (v - 180) * 3 : 0);
-            ss_glyph_draw_char(w, wctx, c * SS_CELL_W, r * SS_CELL_H, 1, SS_RAMP[idx],
-                               rgb565(255, g, b));
-        }
-    }
-}
-
-/* --- 8. Pipes (box-drawing growth) --- */
+/* --- 7. Pipes (box-drawing growth) --- */
 #define PIPES_STEP_MS 70
 typedef struct {
     uint8_t glyph[SS_MAX_ROWS][SS_MAX_COLS]; /* (pipe_idx << 3) | box_code; 0 = empty */
@@ -554,15 +487,13 @@ static const screensaver_effect_t k_swarm = {.name = "swarm",
                                              .ctx_size = sizeof(swarm_state_t),
                                              .reset = swarm_reset,
                                              .render = swarm_render};
-static const screensaver_effect_t k_fire = {
-    .name = "fire", .ctx_size = sizeof(fire_state_t), .reset = fire_reset, .render = fire_render};
 static const screensaver_effect_t k_pipes = {.name = "pipes",
                                              .ctx_size = sizeof(pipes_state_t),
                                              .reset = pipes_reset,
                                              .render = pipes_render};
 
 static const screensaver_effect_t *const s_registry[] = {
-    &k_matrix, &k_plasma, &k_sine, &k_stars, &k_rain, &k_swarm, &k_fire, &k_pipes,
+    &k_matrix, &k_plasma, &k_sine, &k_stars, &k_rain, &k_swarm, &k_pipes,
 };
 
 static void *s_ctx; /* shared per-effect state buffer (max ctx_size) */

@@ -347,7 +347,7 @@ enum ChibiCommand {
         action: ScreensaverAction,
         #[arg(
             long,
-            help = "Effect to show on enter: matrix|plasma|sine|stars|rain|swarm|fire|pipes \
+            help = "Effect to show on enter: matrix|plasma|sine|stars|rain|swarm|pipes \
                     (default: random; unknown names fall back to random)"
         )]
         effect: Option<String>,
