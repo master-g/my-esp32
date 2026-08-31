@@ -914,6 +914,8 @@ static cJSON *build_device_info(void)
     cJSON_AddStringToObject(result, "ssid", net.ssid);
     cJSON_AddStringToObject(result, "ip_addr", net.ip_addr);
     cJSON_AddBoolToObject(result, "has_credentials", net.has_credentials);
+    cJSON_AddBoolToObject(result, "auth_failed", net.auth_failed);
+    cJSON_AddNumberToObject(result, "last_disconnect_reason", (double)net.last_disconnect_reason);
 
     (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     protocol_overflow_count = s_protocol_overflow_count;

@@ -235,6 +235,7 @@ static esp_err_t do_sntp_sync(void)
     }
 
     if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SNTP sync failed: %s", esp_err_to_name(err));
         esp_netif_sntp_deinit();
         return err;
     }

@@ -606,8 +606,9 @@ static esp_err_t start_connection_to_profile(uint8_t profile_idx)
         return ESP_OK;
     }
 
-    s_ignore_disconnect_event = true;
-    (void)esp_wifi_disconnect();
+    // 只有 esp_wifi_disconnect 真的拆掉了在途连接才会产生 DISCONNECTED 事件;
+    // 失败(本就未连接)时不会来事件,此时置标志会把下一次真实断开吞掉、重试链永久停摆。
+    s_ignore_disconnect_event = (esp_wifi_disconnect() == ESP_OK);
     publish_net_event();
     return esp_wifi_connect();
 }
