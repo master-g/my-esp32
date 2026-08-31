@@ -4,6 +4,8 @@
 .idea/
 # VS Code currently only contains machine-local ESP-IDF extension state.
 .vscode/
+.cache/
+.pi-glla/
 
 # Local assistant / workspace state
 .claude/
