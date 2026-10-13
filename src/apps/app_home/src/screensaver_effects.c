@@ -10,10 +10,8 @@
 #define TAG "ss_effects"
 
 #define SS_MAX_COLS 80
-#define SS_MAX_ROWS 16
 #define SS_STARS 110
 #define SS_DROPS 70
-#define SS_PIPES 4
 
 /* 10 density levels for plasma / flow shading. */
 static const char SS_RAMP[] = " .:-=+*#%@";
@@ -307,8 +305,7 @@ static void swarm_tick(swarm_state_t *s, uint16_t C, uint16_t R, uint32_t t)
  * cols <= 255 and rows <= 255. The fixed-point math (int16_t px = col*16)
  * also assumes cols/rows fit comfortably in int16_t after scaling — safe
  * up to ~2047. Callers pass display-resolution-derived values (<=80/<=14),
- * well within both bounds. Sibling effect (pipes) clamps to SS_MAX_*
- * defensively; swarm relies on this caller contract instead. */
+ * well within both bounds; swarm relies on this caller contract. */
 static void swarm_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
                          uint32_t t)
 {
@@ -357,119 +354,6 @@ static void swarm_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols,
     }
 }
 
-/* --- 7. Pipes (box-drawing growth) --- */
-#define PIPES_STEP_MS 70
-typedef struct {
-    uint8_t glyph[SS_MAX_ROWS][SS_MAX_COLS]; /* (pipe_idx << 3) | box_code; 0 = empty */
-    uint8_t cr[SS_PIPES];
-    uint8_t cc[SS_PIPES];
-    int8_t dr[SS_PIPES];
-    int8_t dc[SS_PIPES];
-    uint32_t last_step;
-    uint16_t drawn;
-} pipes_state_t;
-
-/* cyan, magenta, green, amber (RGB565) */
-static const uint16_t PIPE_PALETTE[SS_PIPES] = {0x56FF, 0xFBDB, 0x7FF4, 0xFE4B};
-
-/* Box-drawing corner connecting the side we came from to the side we go to. */
-static uint8_t pipe_corner(int8_t odc, int8_t odr, int8_t ndc, int8_t ndr)
-{
-    int sx = -odc + ndc;
-    int sy = -odr + ndr;
-
-    if (sx > 0 && sy > 0) {
-        return SS_GLYPH_PIPE_TL;
-    }
-    if (sx < 0 && sy > 0) {
-        return SS_GLYPH_PIPE_TR;
-    }
-    if (sx > 0 && sy < 0) {
-        return SS_GLYPH_PIPE_BL;
-    }
-    return SS_GLYPH_PIPE_BR;
-}
-
-static void pipes_reset(void *ctx, uint16_t cols, uint16_t rows)
-{
-    pipes_state_t *s = (pipes_state_t *)ctx;
-
-    memset(s->glyph, 0, sizeof(s->glyph));
-    for (int i = 0; i < SS_PIPES; i++) {
-        s->cr[i] = (uint8_t)(esp_random() % (rows > 0 ? rows : 1U));
-        s->cc[i] = (uint8_t)(esp_random() % (cols > 0 ? cols : 1U));
-        if (esp_random() & 1U) {
-            s->dc[i] = (esp_random() & 1U) ? 1 : -1;
-            s->dr[i] = 0;
-        } else {
-            s->dr[i] = (esp_random() & 1U) ? 1 : -1;
-            s->dc[i] = 0;
-        }
-    }
-    s->last_step = 0;
-    s->drawn = 0;
-}
-
-static void pipes_step(pipes_state_t *s, uint16_t R, uint16_t C)
-{
-    if (s->drawn > (uint16_t)((uint32_t)R * C * 7U / 10U)) {
-        memset(s->glyph, 0, sizeof(s->glyph));
-        s->drawn = 0;
-    }
-    for (int i = 0; i < SS_PIPES; i++) {
-        int8_t ndc = s->dc[i];
-        int8_t ndr = s->dr[i];
-        uint8_t code;
-
-        if ((esp_random() % 100U) < 22U) {
-            if (s->dc[i] != 0) {
-                ndc = 0;
-                ndr = (esp_random() & 1U) ? 1 : -1;
-            } else {
-                ndr = 0;
-                ndc = (esp_random() & 1U) ? 1 : -1;
-            }
-        }
-        code = (ndc == s->dc[i] && ndr == s->dr[i])
-                   ? (uint8_t)(s->dc[i] != 0 ? SS_GLYPH_PIPE_H : SS_GLYPH_PIPE_V)
-                   : pipe_corner(s->dc[i], s->dr[i], ndc, ndr);
-        if (s->cr[i] < R && s->cc[i] < C) {
-            if (s->glyph[s->cr[i]][s->cc[i]] == 0) {
-                s->drawn++;
-            }
-            s->glyph[s->cr[i]][s->cc[i]] = (uint8_t)(((unsigned)i << 3) | code);
-        }
-        s->dc[i] = ndc;
-        s->dr[i] = ndr;
-        s->cc[i] = (uint8_t)(((int)s->cc[i] + ndc + C) % C);
-        s->cr[i] = (uint8_t)(((int)s->cr[i] + ndr + R) % R);
-    }
-}
-
-static void pipes_render(void *ctx, pixel_writer_t w, void *wctx, uint16_t cols, uint16_t rows,
-                         uint32_t t)
-{
-    pipes_state_t *s = (pipes_state_t *)ctx;
-    uint16_t R = rows < SS_MAX_ROWS ? rows : SS_MAX_ROWS;
-    uint16_t C = cols < SS_MAX_COLS ? cols : SS_MAX_COLS;
-
-    if (s->last_step == 0 || t - s->last_step >= PIPES_STEP_MS) {
-        pipes_step(s, R, C);
-        s->last_step = (t == 0) ? 1 : t;
-    }
-    for (uint16_t r = 0; r < R; r++) {
-        for (uint16_t c = 0; c < C; c++) {
-            uint8_t g = s->glyph[r][c];
-
-            if (g == 0) {
-                continue;
-            }
-            ss_glyph_draw_char(w, wctx, c * SS_CELL_W, r * SS_CELL_H, 1, (char)(g & 0x07U),
-                               PIPE_PALETTE[(g >> 3) & 0x03U]);
-        }
-    }
-}
-
 static const screensaver_effect_t k_matrix = {.name = "matrix",
                                               .ctx_size = sizeof(matrix_state_t),
                                               .reset = matrix_reset,
@@ -487,13 +371,9 @@ static const screensaver_effect_t k_swarm = {.name = "swarm",
                                              .ctx_size = sizeof(swarm_state_t),
                                              .reset = swarm_reset,
                                              .render = swarm_render};
-static const screensaver_effect_t k_pipes = {.name = "pipes",
-                                             .ctx_size = sizeof(pipes_state_t),
-                                             .reset = pipes_reset,
-                                             .render = pipes_render};
 
 static const screensaver_effect_t *const s_registry[] = {
-    &k_matrix, &k_plasma, &k_sine, &k_stars, &k_rain, &k_swarm, &k_pipes,
+    &k_matrix, &k_plasma, &k_sine, &k_stars, &k_rain, &k_swarm,
 };
 
 static void *s_ctx; /* shared per-effect state buffer (max ctx_size) */

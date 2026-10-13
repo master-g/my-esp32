@@ -50,14 +50,6 @@ static const glyph_t s_glyphs[] = {
     {'$', {0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04}},
     {'&', {0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D}},
     {'~', {0x00, 0x00, 0x08, 0x15, 0x02, 0x00, 0x00}},
-
-    /* Box-drawing for pipes (keyed by SS_GLYPH_PIPE_* byte codes). */
-    {(char)SS_GLYPH_PIPE_H, {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
-    {(char)SS_GLYPH_PIPE_V, {0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
-    {(char)SS_GLYPH_PIPE_TL, {0x00, 0x00, 0x00, 0x07, 0x04, 0x04, 0x04}},
-    {(char)SS_GLYPH_PIPE_TR, {0x00, 0x00, 0x00, 0x1C, 0x04, 0x04, 0x04}},
-    {(char)SS_GLYPH_PIPE_BL, {0x04, 0x04, 0x04, 0x07, 0x00, 0x00, 0x00}},
-    {(char)SS_GLYPH_PIPE_BR, {0x04, 0x04, 0x04, 0x1C, 0x00, 0x00, 0x00}},
 };
 
 const uint8_t *ss_glyph_rows(char c)
@@ -115,13 +107,9 @@ bool ss_glyph_selftest(void)
         eight_lit |= (eight[i] != 0x00);
     }
 
-    /* A box-drawing code resolves to its own (non-space) bitmap. */
-    const uint8_t *pipe = ss_glyph_rows((char)SS_GLYPH_PIPE_V);
-    bool pipe_lit = (pipe[0] == 0x04);
-
     /* A character not in the table falls back to the space glyph (all zero). */
     const uint8_t *missing = ss_glyph_rows('Q');
     bool miss_is_space = (missing == s_glyphs[0].rows);
 
-    return eight_lit && pipe_lit && miss_is_space;
+    return eight_lit && miss_is_space;
 }

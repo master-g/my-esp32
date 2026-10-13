@@ -17,18 +17,6 @@
 /* One pixel write at logical (x, y) with an RGB565 color. */
 typedef void (*pixel_writer_t)(void *ctx, int32_t x, int32_t y, uint16_t color);
 
-/*
- * Box-drawing glyphs for the pipes effect. These are non-printable byte codes
- * (below 0x20) so they never collide with the printable characters other
- * effects emit; the pipes effect passes them as the `ch` argument.
- */
-#define SS_GLYPH_PIPE_H 0x01U  /* horizontal --- */
-#define SS_GLYPH_PIPE_V 0x02U  /* vertical    |  */
-#define SS_GLYPH_PIPE_TL 0x03U /* corner      ,- */
-#define SS_GLYPH_PIPE_TR 0x04U /* corner      -, */
-#define SS_GLYPH_PIPE_BL 0x05U /* corner      '- */
-#define SS_GLYPH_PIPE_BR 0x06U /* corner      -' */
-
 /* Returns the 7 row-bytes (low 5 bits each) for `c`; missing glyphs fall back
  * to the space glyph (all zero) so an effect can never render garbage. */
 const uint8_t *ss_glyph_rows(char c);
