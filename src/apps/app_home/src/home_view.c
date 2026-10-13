@@ -499,28 +499,19 @@ static void set_label_text_if_changed(lv_obj_t *label, const char *text)
     }
 }
 
-/* Name tag under the sprite: which project is talking and, while it works, for
- * how long. The timer is local: it starts when the shown session turns to
- * working and restarts when a different project takes over the screen. */
+/* Name tag under the sprite: which project is talking and, while it works, how
+ * long its turn has run. The host keeps that clock per session, so it survives
+ * another project taking over the screen. */
 static void refresh_session(home_view_t *view, const home_present_model_t *model)
 {
     char tag[CLAUDE_STR_WORKSPACE_MAX + 16];
 
-    snprintf(tag, sizeof(tag), "%s", model->project);
-    if (model->sprite_state == SPRITE_STATE_WORKING) {
-        uint32_t secs;
-
-        if (!view->working || strcmp(view->working_project, model->project) != 0) {
-            view->working = true;
-            view->working_since_ms = lv_tick_get();
-            snprintf(view->working_project, sizeof(view->working_project), "%s", model->project);
-        }
-        secs = lv_tick_elaps(view->working_since_ms) / 1000U;
+    if (model->sprite_state == SPRITE_STATE_WORKING && model->working_secs >= 0) {
         snprintf(tag, sizeof(tag), "%s%s%u:%02u", model->project,
-                 model->project[0] != '\0' ? "  " : "", (unsigned)(secs / 60U),
-                 (unsigned)(secs % 60U));
+                 model->project[0] != '\0' ? "  " : "", (unsigned)(model->working_secs / 60),
+                 (unsigned)(model->working_secs % 60));
     } else {
-        view->working = false;
+        snprintf(tag, sizeof(tag), "%s", model->project);
     }
     set_label_text_if_changed(view->project_label, tag);
 }
@@ -675,7 +666,7 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_obj_set_style_radius(view->bubble_box, HOME_BUBBLE_RADIUS, 0);
     lv_obj_set_style_pad_hor(view->bubble_box, HOME_BUBBLE_PAD_H, 0);
     lv_obj_set_style_pad_ver(view->bubble_box, HOME_BUBBLE_PAD_V, 0);
-    lv_obj_align(view->bubble_box, LV_ALIGN_BOTTOM_LEFT, HOME_SESSION_X, 0);
+    lv_obj_align(view->bubble_box, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(view->bubble_box, LV_OBJ_FLAG_HIDDEN);
 
     view->bubble_label = lv_label_create(view->bubble_box);

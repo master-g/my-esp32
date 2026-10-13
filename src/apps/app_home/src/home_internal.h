@@ -35,13 +35,11 @@
 #define HOME_ALERT_FLASH_PERIOD_MS 500
 #define HOME_BUBBLE_BG_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_SECONDARY)
 #define HOME_BUBBLE_TEXT_COLOR ui_theme_color_hex(UI_THEME_COLOR_TEXT_PRIMARY)
-/* The bubble sits between the clock and the sprite so it never covers the
- * character; the project name and elapsed time are a small tag under the sprite. */
-#define HOME_SESSION_X 236
-#define HOME_SESSION_W 210
+/* The bubble is centered at the bottom of the screen, between the clock block
+ * and the sprite; the project name and turn time are a small tag under the sprite. */
 #define HOME_NAME_TAG_W 168
 #define HOME_NAME_TAG_X_OFFSET -8 /* centers the tag under the sprite */
-#define HOME_BUBBLE_MAX_W HOME_SESSION_W
+#define HOME_BUBBLE_MAX_W 190
 #define HOME_BUBBLE_PAD_H 8
 #define HOME_BUBBLE_PAD_V 6
 #define HOME_BUBBLE_RADIUS 8

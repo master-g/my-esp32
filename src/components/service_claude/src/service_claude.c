@@ -14,6 +14,7 @@
 static claude_snapshot_t s_snapshot;
 static SemaphoreHandle_t s_mutex;
 static int64_t s_last_transport_us;
+static int64_t s_working_rx_us; /* when the current working_secs arrived */
 
 static void publish_claude_event(void)
 {
@@ -71,6 +72,7 @@ bool claude_service_apply_remote_snapshot(const claude_snapshot_t *snapshot)
     s_snapshot.conn_state = CLAUDE_CONN_CONNECTED;
     s_snapshot.stale = false;
     s_last_transport_us = esp_timer_get_time();
+    s_working_rx_us = s_last_transport_us;
     has_pending = s_snapshot.pending_kind != CLAUDE_PENDING_NONE;
     xSemaphoreGive(s_mutex);
     publish_claude_event();
@@ -96,6 +98,10 @@ void claude_service_get_snapshot(claude_snapshot_t *out)
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     *out = s_snapshot;
+    if (out->working) {
+        /* The host sends a duration; keep it running between frames. */
+        out->working_secs += (uint32_t)((esp_timer_get_time() - s_working_rx_us) / 1000000LL);
+    }
     xSemaphoreGive(s_mutex);
 }
 

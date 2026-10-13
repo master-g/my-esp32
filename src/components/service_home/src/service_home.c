@@ -66,6 +66,8 @@ void home_service_get_snapshot(home_snapshot_t *out)
     out->claude_run_state = claude_snap.run_state;
     copy_text(out->claude_detail, sizeof(out->claude_detail), claude_snap.detail);
     copy_text(out->claude_workspace, sizeof(out->claude_workspace), claude_snap.workspace);
+    out->claude_working = out->claude_connected && claude_snap.working;
+    out->claude_working_secs = claude_snap.working_secs;
     copy_text(out->claude_emotion, sizeof(out->claude_emotion), claude_snap.emotion);
 }
 

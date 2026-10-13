@@ -630,6 +630,16 @@ fn apply_event_to_sessions(guard: &mut AgentState, event: &LocalHookEvent) {
         guard.emotions.remove(&key);
     }
 
+    // The turn clock belongs to the session, so it keeps running while another
+    // project holds the display.
+    next.working_since = if !RunStatus::from_str(&next.status).is_active() {
+        None
+    } else if event.hook_event_name == "UserPromptSubmit" {
+        Some(event.recv_ts)
+    } else {
+        current.working_since.or(Some(event.recv_ts))
+    };
+
     entry.snapshot = next;
     entry.cwd = if event.cwd.trim().is_empty() {
         entry.cwd.clone()
@@ -1591,6 +1601,26 @@ mod tests {
         assert!(!state.sessions.contains_key("old-id"));
         assert!(state.sessions.contains_key("new-id") && state.sessions.contains_key("other"));
         assert!(state.pending.current(Instant::now()).is_none());
+    }
+
+    #[test]
+    fn turn_clock_belongs_to_the_session_and_restarts_with_each_prompt() {
+        let mut state = AgentState::new(
+            Snapshot::empty(1),
+            BTreeMap::new(),
+            (&ApprovalConfig::default()).into(),
+        );
+        let mut at = |name: &str, ts: u64, state: &mut AgentState| {
+            let mut event = waiting_prompt_event("sess-a", name, None, None, None);
+            event.recv_ts = ts;
+            apply_event_to_sessions(state, &event);
+            state.sessions["sess-a"].snapshot.working_since
+        };
+
+        assert_eq!(at("UserPromptSubmit", 100, &mut state), Some(100));
+        assert_eq!(at("PreToolUse", 130, &mut state), Some(100), "same turn keeps its start");
+        assert_eq!(at("Stop", 160, &mut state), None, "an idle session has no clock");
+        assert_eq!(at("UserPromptSubmit", 200, &mut state), Some(200));
     }
 
     #[test]

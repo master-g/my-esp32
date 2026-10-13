@@ -52,6 +52,8 @@ typedef struct {
     char emotion[CLAUDE_STR_EMOTION_MAX];
     char event[24];
     char permission_mode[16];
+    bool working;          /* the host sent a turn duration */
+    uint32_t working_secs; /* how long the shown session's turn has run */
     claude_pending_kind_t pending_kind;
     char pending_type[CLAUDE_STR_PENDING_TYPE_MAX]; /* coarse type, may be empty */
 } claude_snapshot_t;

@@ -136,5 +136,13 @@ bool device_protocol_parse_claude_update(const cJSON *payload, claude_snapshot_t
     copy_json_string(payload, "status", status, sizeof(status));
     snapshot->run_state = claude_status_from_text(status);
     parse_claude_pending(cJSON_GetObjectItemCaseSensitive(payload, "pending"), snapshot);
+    {
+        const cJSON *working_secs = cJSON_GetObjectItemCaseSensitive(payload, "working_secs");
+
+        if (cJSON_IsNumber(working_secs) && working_secs->valuedouble >= 0) {
+            snapshot->working = true;
+            snapshot->working_secs = (uint32_t)working_secs->valuedouble;
+        }
+    }
     return true;
 }

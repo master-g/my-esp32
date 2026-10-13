@@ -556,6 +556,9 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 },
             );
             snapshot.workspace = workspace;
+            if RunStatus::from_str(&snapshot.status) == RunStatus::Processing {
+                snapshot.working_since = Some(now_epoch());
+            }
             snapshot.pending = pending.map(ChibiPending::display);
             pause_agent(hold).await;
             send_event_direct(
@@ -716,6 +719,7 @@ fn build_test_snapshot(
         unread,
         attention,
         pending: None,
+        working_since: None,
     }
 }
 

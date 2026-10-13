@@ -162,6 +162,7 @@ void home_presenter_build(home_present_model_t *out, const home_snapshot_t *snap
     out->sprite_state = map_run_state(snapshot->claude_run_state, snapshot->claude_connected);
     out->sprite_emotion = emotion_from_text(snapshot->claude_emotion);
     out->claude_connected = snapshot->claude_connected;
+    out->working_secs = snapshot->claude_working ? (int32_t)snapshot->claude_working_secs : -1;
     snprintf(out->project, sizeof(out->project), "%s",
              snapshot->claude_connected ? snapshot->claude_workspace : "");
 

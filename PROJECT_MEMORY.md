@@ -35,6 +35,7 @@
 - [2026-10-13] 主机:日志一律写 stderr(hook 的 stdout 会进 Claude 上下文);以 `<task-notification>`、`<system-reminder>`、`[SYSTEM NOTIFICATION`、`<agent-message from=` 开头的 UserPromptSubmit 不当作用户提示词;会话失活或被清理时连带清掉它的 pending;`state.json` 0600,pending id 用摘要不含问题文本。`make check` = fmt-check + `make test-host` + `cargo test`(不含固件构建;clippy 有 23 条既有警告未纳入)。
 - [2026-10-13] 主机会话表:一个 Claude 进程只保留一条会话。`/clear`、`/resume` 会让同一 pid 换 session id,旧条目收不到事件、pid 又活着,不会被对账清掉;若它停在 waiting_for_input(优先级最高)就会一直占着屏幕。现在同 pid 的新 id 到来时删掉旧条目及其 pending(`apply_event_to_sessions`)。授权后到工具跑完之间 Claude Code 不发 hook,所以长命令期间提示会一直留到 PostToolUse。
 - [2026-10-13] 真机查看不用再停服务:`device screenshot`、`chibi test/demo/screensaver` 会先 `POST /v1/device/pause` 让代理让出串口(只延长不缩短,`secs=0` 立即恢复);`device rpc <method> <json>` 走代理;`chibi test` 有 `--workspace`、`--pending`、`--hold`;`agent status` 列出全部会话和 `events_received`。屏保不能经代理发:代理的下一帧快照会把屏幕唤醒。pre-commit 曾要 3 分多钟,原因是 `src/components/ui_fonts/src/generated/` 下 3 MB 的字体文件没被排除,排除后 0.7 秒。CI 在 `.github/workflows/check.yml`。
+- [2026-10-13] 回合计时由主机按会话维护:`Snapshot.working_since`(UserPromptSubmit 时置为当时,会话转为非活动时清空),下发时换算成 `working_secs`(设备不需要和主机对时),`service_claude` 在两帧之间自己往上加。所以 A 被 B 抢占再回来,时长接着走。气泡改为屏幕底部水平居中,最宽 190(再宽会压到日期行的星期)。
 
 ## 上次会话
 <!-- 上次运行做了什么、停在何处。滚动记录,超长时最旧条目优先淘汰。 -->

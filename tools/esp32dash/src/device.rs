@@ -214,7 +214,7 @@ pub fn send_event_direct(
         preferred_port,
         baud,
         "claude.update",
-        serde_json::to_value(snapshot)?,
+        snapshot_payload(snapshot)?,
     )
 }
 
@@ -749,7 +749,25 @@ fn perform_rpc(
 }
 
 fn send_snapshot_update(session: &mut dyn DeviceSession, snapshot: &Snapshot) -> Result<()> {
-    send_named_event(session, "claude.update", serde_json::to_value(snapshot)?)
+    send_named_event(session, "claude.update", snapshot_payload(snapshot)?)
+}
+
+/// The `claude.update` payload: the snapshot, with the turn start turned into a
+/// duration so the device needs no clock in sync with the host.
+fn snapshot_payload(snapshot: &Snapshot) -> Result<Value> {
+    let mut payload = serde_json::to_value(snapshot)?;
+    if let (Some(since), Some(fields)) = (snapshot.working_since, payload.as_object_mut()) {
+        fields.remove("working_since");
+        fields.insert("working_secs".into(), now_epoch().saturating_sub(since).into());
+    }
+    Ok(payload)
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
 }
 
 fn send_named_event(session: &mut dyn DeviceSession, method: &str, payload: Value) -> Result<()> {
@@ -1136,6 +1154,7 @@ mod tests {
                 unread: true,
                 attention: Attention::Medium,
                 pending: None,
+                working_since: None,
             },
         )
         .unwrap();

@@ -160,6 +160,10 @@ pub struct Snapshot {
     /// The pending interaction the device should show, if any (see GLOSSARY.md).
     #[serde(default)]
     pub pending: Option<PendingDisplay>,
+    /// Epoch second the session's current turn started; `None` while it is idle.
+    /// The device gets it as `working_secs`, computed when the frame is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_since: Option<u64>,
 }
 
 /// What the read-only device learns about a pending interaction: its kind and
@@ -188,6 +192,7 @@ impl Snapshot {
             unread: false,
             attention: Attention::Low,
             pending: None,
+            working_since: None,
         }
     }
 }

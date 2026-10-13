@@ -153,6 +153,7 @@ pub fn normalize(event: &LocalHookEvent, current: &Snapshot) -> Snapshot {
         unread,
         attention,
         pending: None,
+        working_since: None,
     }
 }
 
