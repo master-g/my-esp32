@@ -680,14 +680,20 @@ fn send_named_event(session: &mut dyn DeviceSession, method: &str, payload: Valu
 }
 
 fn set_connected(status: &Arc<Mutex<SerialConnectionStatus>>, port: &str, hello: &DeviceHello) {
-    info!(
-        port,
-        device_id = hello.device_id,
-        product = hello.product,
-        protocol = hello.protocol_version,
-        "connected to device"
-    );
     let mut guard = status.lock().expect("serial status mutex poisoned");
+    // The firmware repeats hello about once a second; only log when the link state changes.
+    let already_connected = guard.connected
+        && guard.active_port.as_deref() == Some(port)
+        && guard.device_id.as_deref() == Some(hello.device_id.as_str());
+    if !already_connected {
+        info!(
+            port,
+            device_id = hello.device_id,
+            product = hello.product,
+            protocol = hello.protocol_version,
+            "connected to device"
+        );
+    }
     guard.active_port = Some(port.to_string());
     guard.connected = true;
     guard.protocol_version = Some(hello.protocol_version);

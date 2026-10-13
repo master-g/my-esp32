@@ -120,22 +120,6 @@ struct InstallAnalysis {
     settings_json: Value,
 }
 
-const OMP_EXTENSION_NAME: &str = "esp32dash.ts";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OmpInstallResult {
-    pub extension_path: String,
-    pub extension_written: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct HooksResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claude: Option<InstallHooksResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub omp: Option<OmpInstallResult>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ClaudeUninstallResult {
     pub settings_path: String,
@@ -143,138 +127,46 @@ pub struct ClaudeUninstallResult {
     pub script_removed: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct OmpUninstallResult {
-    pub extension_path: String,
-    pub extension_removed: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UninstallHooksResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claude: Option<ClaudeUninstallResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub omp: Option<OmpUninstallResult>,
-}
-
-#[derive(Debug)]
-struct OmpAnalysis {
-    extension_path: PathBuf,
-    extension_contents: String,
-    extension_written: bool,
-}
-
 fn home_claude_dir() -> Result<PathBuf> {
     Ok(home().ok_or_else(|| anyhow!("failed to resolve home directory"))?.join(CLAUDE_DIR_NAME))
 }
 
-pub fn install_hooks(
-    executable: &Path,
-    force: bool,
-    install_claude: bool,
-    install_omp: bool,
-) -> Result<HooksResult> {
-    let claude_dir = if install_claude {
-        Some(home_claude_dir()?)
-    } else {
-        None
-    };
-    let claude_analysis = if let Some(dir) = claude_dir.as_deref() {
-        Some(analyze_install(dir, executable)?)
-    } else {
-        None
-    };
+pub fn install_hooks(executable: &Path, force: bool) -> Result<InstallHooksResult> {
+    let claude_dir = home_claude_dir()?;
+    let analysis = analyze_install(&claude_dir, executable)?;
+    let changes = analysis.script_written || analysis.settings_updated;
 
-    let omp_analysis = if install_omp {
-        let omp_dir = resolve_omp_agent_dir()?;
-        Some(analyze_omp(&omp_dir)?)
-    } else {
-        None
-    };
-
-    let claude_needs_write =
-        claude_analysis.as_ref().is_some_and(|a| a.script_written || a.settings_updated);
-    let omp_needs_write = omp_analysis.as_ref().is_some_and(|analysis| analysis.extension_written);
-
-    if !claude_needs_write && !omp_needs_write {
-        return Ok(HooksResult {
-            claude: claude_analysis.map(|analysis| InstallHooksResult {
-                ok: true,
-                hook_script_path: analysis.hook_script_path.to_string_lossy().into_owned(),
-                settings_path: analysis.settings_path.to_string_lossy().into_owned(),
-                script_written: false,
-                settings_updated: false,
-                changes_applied: false,
-            }),
-            omp: omp_analysis.map(|analysis| OmpInstallResult {
-                extension_path: analysis.extension_path.to_string_lossy().into_owned(),
-                extension_written: false,
-            }),
-        });
-    }
-
-    if !force {
-        let confirm_message =
-            build_combined_confirm_message(claude_analysis.as_ref(), omp_analysis.as_ref());
-        let confirmed = match Confirm::new(&confirm_message).with_default(true).prompt() {
-            Ok(value) => value,
-            Err(InquireError::OperationCanceled) | Err(InquireError::OperationInterrupted) => {
-                return Err(anyhow!("installation cancelled by user"));
-            }
-            Err(err) => return Err(err).context("failed to prompt for hook installation"),
-        };
+    if changes && !force {
+        let confirmed =
+            match Confirm::new(&build_confirm_message(&analysis)).with_default(true).prompt() {
+                Ok(value) => value,
+                Err(InquireError::OperationCanceled) | Err(InquireError::OperationInterrupted) => {
+                    return Err(anyhow!("installation cancelled by user"));
+                }
+                Err(err) => return Err(err).context("failed to prompt for hook installation"),
+            };
 
         if !confirmed {
             return Err(anyhow!("installation cancelled by user"));
         }
     }
 
-    if let (Some(dir), Some(analysis)) = (claude_dir.as_deref(), claude_analysis.as_ref()) {
-        apply_install(dir, analysis)?;
+    if changes {
+        apply_install(&claude_dir, &analysis)?;
     }
 
-    if let Some(analysis) = omp_analysis.as_ref() {
-        apply_omp(analysis)?;
-    }
-
-    Ok(HooksResult {
-        claude: claude_analysis.map(|analysis| InstallHooksResult {
-            ok: true,
-            hook_script_path: analysis.hook_script_path.to_string_lossy().into_owned(),
-            settings_path: analysis.settings_path.to_string_lossy().into_owned(),
-            script_written: analysis.script_written,
-            settings_updated: analysis.settings_updated,
-            changes_applied: analysis.script_written || analysis.settings_updated,
-        }),
-        omp: omp_analysis.map(|analysis| OmpInstallResult {
-            extension_path: analysis.extension_path.to_string_lossy().into_owned(),
-            extension_written: analysis.extension_written,
-        }),
+    Ok(InstallHooksResult {
+        ok: true,
+        hook_script_path: analysis.hook_script_path.to_string_lossy().into_owned(),
+        settings_path: analysis.settings_path.to_string_lossy().into_owned(),
+        script_written: analysis.script_written,
+        settings_updated: analysis.settings_updated,
+        changes_applied: changes,
     })
 }
 
-pub fn uninstall_hooks(
-    uninstall_claude: bool,
-    uninstall_omp: bool,
-) -> Result<UninstallHooksResult> {
-    let claude_result = if uninstall_claude {
-        let claude_dir = home_claude_dir()?;
-        Some(uninstall_claude_hooks(&claude_dir)?)
-    } else {
-        None
-    };
-
-    let omp_result = if uninstall_omp {
-        let omp_dir = resolve_omp_agent_dir()?;
-        Some(uninstall_omp_hooks(&omp_dir)?)
-    } else {
-        None
-    };
-
-    Ok(UninstallHooksResult {
-        claude: claude_result,
-        omp: omp_result,
-    })
+pub fn uninstall_hooks() -> Result<ClaudeUninstallResult> {
+    uninstall_claude_hooks(&home_claude_dir()?)
 }
 
 fn analyze_install(claude_dir: &Path, executable: &Path) -> Result<InstallAnalysis> {
@@ -343,173 +235,24 @@ fn apply_install(claude_dir: &Path, analysis: &InstallAnalysis) -> Result<()> {
     Ok(())
 }
 
-fn build_combined_confirm_message(
-    claude: Option<&InstallAnalysis>,
-    omp: Option<&OmpAnalysis>,
-) -> String {
-    let mut lines = Vec::new();
-    lines.push("Install esp32dash hooks?".to_string());
-    if let Some(claude) = claude {
-        if claude.script_written {
-            lines.push(format!("Write hook script: {}", claude.hook_script_path.display()));
-        }
-        if claude.settings_updated {
-            lines.push(format!("Update settings: {}", claude.settings_path.display()));
-            lines.push(format!("Add hook entries: {}", claude.updated_specs.join(", ")));
-        }
+fn build_confirm_message(analysis: &InstallAnalysis) -> String {
+    let mut lines = vec!["Install esp32dash hooks?".to_string()];
+    if analysis.script_written {
+        lines.push(format!("Write hook script: {}", analysis.hook_script_path.display()));
     }
-    if let Some(analysis) = omp.filter(|a| a.extension_written) {
-        lines.push(format!("Write OMP extension: {}", analysis.extension_path.display()));
+    if analysis.settings_updated {
+        lines.push(format!("Update settings: {}", analysis.settings_path.display()));
+        lines.push(format!("Add hook entries: {}", analysis.updated_specs.join(", ")));
     }
     lines.join("\n")
 }
 
-fn resolve_omp_agent_dir() -> Result<PathBuf> {
-    use std::env;
-    if let Some(dir) = env::var_os("OMP_AGENT_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-    if let Some(dir) = env::var_os("PI_CODING_AGENT_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-    Ok(home()
-        .ok_or_else(|| anyhow!("failed to resolve home directory"))?
-        .join(".omp")
-        .join("agent"))
-}
-
-fn analyze_omp(omp_dir: &Path) -> Result<OmpAnalysis> {
-    let extensions_dir = omp_dir.join("extensions");
-    let extension_path = extensions_dir.join(OMP_EXTENSION_NAME);
-    let extension_contents = render_omp_extension();
-    let existing = fs::read_to_string(&extension_path).ok();
-    let extension_written = existing.as_deref() != Some(extension_contents.as_str());
-    Ok(OmpAnalysis {
-        extension_path,
-        extension_contents,
-        extension_written,
-    })
-}
-
-fn apply_omp(analysis: &OmpAnalysis) -> Result<()> {
-    if !analysis.extension_written {
-        return Ok(());
-    }
-    if let Some(parent) = analysis.extension_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    fs::write(&analysis.extension_path, &analysis.extension_contents).with_context(|| {
-        format!("failed to write extension {}", analysis.extension_path.display())
-    })?;
-    Ok(())
-}
-
-pub fn uninstall_omp_hooks(omp_dir: &Path) -> Result<OmpUninstallResult> {
-    let extension_path = omp_dir.join("extensions").join(OMP_EXTENSION_NAME);
-    let extension_removed = match fs::remove_file(&extension_path) {
-        Ok(()) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!("failed to remove extension {}", extension_path.display())
-            });
-        }
-    };
-    Ok(OmpUninstallResult {
-        extension_path: extension_path.to_string_lossy().into_owned(),
-        extension_removed,
-    })
-}
-
-fn render_omp_extension() -> String {
-    // Use the compile-time constant as the fallback, not the env-derived
-    // admin_addr() — a misconfigured ESP32DASH_ADMIN_ADDR (quotes, backticks)
-    // could break the rendered JS string literal. The runtime process.env
-    // read in the extension carries any legitimate override.
-    let default_addr = crate::compat::DEFAULT_ADMIN_ADDR;
-    format!(
-        r#"// Auto-generated by esp32dash `hooks install omp`.
-// Forwards OMP session/turn/tool lifecycle events to the esp32dash agent,
-// translated to Claude-compatible hook_event_name values so the device
-// displays a unified agent status (last-event-wins).
-const ENDPOINT =
-  `http://${{process.env.ESP32DASH_ADMIN_ADDR || "{default_addr}"}}/v1/claude/events`;
-
-function sessionId(ctx: any): string {{
-  try {{
-    const sm = ctx?.sessionManager;
-    const id =
-      (typeof sm?.getSessionFile === "function" && sm.getSessionFile()) ||
-      (typeof sm?.sessionId === "string" && sm.sessionId) ||
-      undefined;
-    if (id) return String(id);
-  }} catch {{
-    /* fall through to placeholder */
-  }}
-  return "omp-session";
-}}
-
-async function postEvent(payload: Record<string, unknown>): Promise<void> {{
-  try {{
-    await fetch(ENDPOINT, {{
-      method: "POST",
-      headers: {{ "Content-Type": "application/json" }},
-      body: JSON.stringify(payload),
-    }});
-  }} catch (err) {{
-    // Agent unreachable — fail silently, do not block OMP.
-    console.error("[esp32dash] event post failed:", err);
-  }}
-}}
-
-function buildEvent(
-  ctx: any,
-  hookEventName: string,
-  toolName?: string,
-): Record<string, unknown> {{
-  return {{
-    session_id: sessionId(ctx),
-    cwd: String(ctx?.cwd ?? process.cwd()),
-    hook_event_name: hookEventName,
-    tool_name: toolName,
-    permission_mode: "default",
-    recv_ts: Math.floor(Date.now() / 1000),
-  }};
-}}
-
-export default function (pi: any): void {{
-  pi.on("session_start", async (_event: unknown, ctx: any) => {{
-    await postEvent(buildEvent(ctx, "SessionStart"));
-  }});
-
-  pi.on("session_shutdown", async (_event: unknown, ctx: any) => {{
-    await postEvent(buildEvent(ctx, "SessionEnd"));
-  }});
-
-  pi.on("turn_start", async (_event: unknown, ctx: any) => {{
-    await postEvent(buildEvent(ctx, "UserPromptSubmit"));
-  }});
-
-  pi.on("turn_end", async (_event: unknown, ctx: any) => {{
-    await postEvent(buildEvent(ctx, "Stop"));
-  }});
-
-  pi.on("tool_call", async (event: any, ctx: any) => {{
-    const toolName = typeof event?.toolName === "string" ? event.toolName : undefined;
-    await postEvent(buildEvent(ctx, "PreToolUse", toolName));
-  }});
-}}
-"#
-    )
-}
-
 fn render_hook_script(executable: &Path) -> String {
-    let escaped_executable = shell_single_quote(executable);
+    let default_bin = shell_bin_path(executable, home().as_deref());
     format!(
         r#"#!/bin/sh
 
-DEFAULT_BIN={escaped_executable}
+DEFAULT_BIN={default_bin}
 BIN="${{ESP32DASH_BIN:-$DEFAULT_BIN}}"
 export ESP32DASH_CLAUDE_PID="${{PPID:-}}"
 
@@ -524,16 +267,11 @@ fi
 # Read stdin so we can inspect and re-pipe it
 INPUT=$(cat)
 
-# Route user-input events through the blocking respond path
+# Only PermissionRequest takes the respond path; AskUserQuestion and Elicitation
+# reach the device overlay through ingest.
 EVENT_NAME=$(printf '%s' "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-TOOL_NAME=$(printf '%s' "$INPUT" | grep -o '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 
-IS_RESPOND_EVENT=0
 if [ "$EVENT_NAME" = "PermissionRequest" ]; then
-  IS_RESPOND_EVENT=1
-fi
-
-if [ "$IS_RESPOND_EVENT" = "1" ]; then
   printf '%s' "$INPUT" | exec "$BIN" claude respond --event-from-stdin
 else
   printf '%s' "$INPUT" | "$BIN" claude ingest --event-from-stdin
@@ -541,6 +279,25 @@ else
 fi
 "#
     )
+}
+
+/// Paths under $HOME render as `"${HOME}/..."` so one script works for every user/OS the
+/// dotfiles sync it to; anything else is single-quoted verbatim.
+fn shell_bin_path(executable: &Path, home_dir: Option<&Path>) -> String {
+    match home_dir.and_then(|home_dir| executable.strip_prefix(home_dir).ok()) {
+        Some(rest) => {
+            let rest = rest.to_string_lossy();
+            let mut escaped = String::with_capacity(rest.len());
+            for ch in rest.chars() {
+                if matches!(ch, '\\' | '"' | '$' | '`') {
+                    escaped.push('\\');
+                }
+                escaped.push(ch);
+            }
+            format!("\"${{HOME}}/{escaped}\"")
+        }
+        None => shell_single_quote(executable),
+    }
 }
 
 fn shell_single_quote(path: &Path) -> String {
@@ -937,24 +694,29 @@ mod tests {
     #[test]
     fn render_hook_script_routes_only_permission_request_to_respond() {
         let script = render_hook_script(Path::new("/tmp/esp32dash"));
+        let respond_line = script.find("exec \"$BIN\" claude respond").unwrap();
+        let condition = &script[..respond_line];
 
-        // PermissionRequest must route to respond
-        assert!(
-            script.contains(r#"[ "$EVENT_NAME" = "PermissionRequest" ]"#),
-            "script must contain PermissionRequest condition"
-        );
+        assert!(condition.contains(r#"if [ "$EVENT_NAME" = "PermissionRequest" ]; then"#));
+        let routing = &condition[condition.find("EVENT_NAME=").unwrap()..];
+        assert!(!routing.contains("Elicitation"));
+        assert!(!routing.contains("AskUserQuestion"));
+    }
 
-        // Elicitation must NOT appear in the IS_RESPOND_EVENT block
-        let respond_block_start = script.find("IS_RESPOND_EVENT=0").unwrap();
-        let respond_block_end = script.find("if [ \"$IS_RESPOND_EVENT\" = \"1\" ]").unwrap();
-        let respond_block = &script[respond_block_start..respond_block_end];
-        assert!(
-            !respond_block.contains("Elicitation"),
-            "Elicitation must not appear in the IS_RESPOND_EVENT logic"
+    #[test]
+    fn shell_bin_path_uses_home_variable_under_home() {
+        let home_dir = Path::new("/Users/me");
+        assert_eq!(
+            shell_bin_path(Path::new("/Users/me/.cargo/bin/esp32dash"), Some(home_dir)),
+            r#""${HOME}/.cargo/bin/esp32dash""#
         );
-        assert!(
-            !respond_block.contains("AskUserQuestion"),
-            "AskUserQuestion must not appear in the IS_RESPOND_EVENT logic"
+        assert_eq!(
+            shell_bin_path(Path::new("/Users/me/we$ird\"dir/esp32dash"), Some(home_dir)),
+            r#""${HOME}/we\$ird\"dir/esp32dash""#
+        );
+        assert_eq!(
+            shell_bin_path(Path::new("/opt/it's/esp32dash"), Some(home_dir)),
+            r#"'/opt/it'"'"'s/esp32dash'"#
         );
     }
 
@@ -1090,222 +852,5 @@ mod tests {
         assert!(!hooks_dir.join(HOOK_SCRIPT_NAME).exists());
 
         let _ = fs::remove_dir_all(&claude_dir);
-    }
-
-    // --- OMP extension rendering tests ---
-
-    #[test]
-    fn render_omp_extension_contains_factory_and_handlers() {
-        let src = render_omp_extension();
-        assert!(src.contains("export default function"), "missing factory export");
-        assert!(src.contains("pi.on(\"session_start\""));
-        assert!(src.contains("pi.on(\"session_shutdown\""));
-        assert!(src.contains("pi.on(\"turn_start\""));
-        assert!(src.contains("pi.on(\"turn_end\""));
-        assert!(src.contains("pi.on(\"tool_call\""));
-        assert!(src.contains("fetch("));
-    }
-
-    #[test]
-    fn render_omp_extension_contains_all_claude_event_literals() {
-        let src = render_omp_extension();
-        for literal in [
-            "\"SessionStart\"",
-            "\"SessionEnd\"",
-            "\"UserPromptSubmit\"",
-            "\"Stop\"",
-            "\"PreToolUse\"",
-        ] {
-            assert!(
-                src.contains(literal),
-                "rendered extension must contain Claude event literal {literal}"
-            );
-        }
-    }
-
-    #[test]
-    fn render_omp_extension_uses_epoch_seconds_not_millis() {
-        let src = render_omp_extension();
-        assert!(
-            src.contains("Math.floor(Date.now() / 1000)"),
-            "recv_ts must use epoch seconds (Math.floor(Date.now() / 1000)), not raw millis"
-        );
-        // Ensure no bare Date.now() call that isn't divided.
-        let bare = src.matches("Date.now()").count();
-        let divided = src.matches("Date.now() / 1000").count();
-        assert_eq!(
-            bare, divided,
-            "all Date.now() calls must be divided by 1000 to produce seconds"
-        );
-    }
-
-    #[test]
-    fn render_omp_extension_includes_default_admin_addr() {
-        let src = render_omp_extension();
-        assert!(
-            src.contains(crate::compat::DEFAULT_ADMIN_ADDR),
-            "extension must contain default admin addr as fallback"
-        );
-        assert!(
-            src.contains("ESP32DASH_ADMIN_ADDR"),
-            "extension must read ESP32DASH_ADMIN_ADDR env override"
-        );
-    }
-
-    #[test]
-    fn render_omp_extension_permission_mode_is_default() {
-        let src = render_omp_extension();
-        assert!(
-            src.contains("permission_mode: \"default\""),
-            "OMP extension must set permission_mode to \"default\" (normalizer safe fallback)"
-        );
-    }
-
-    #[test]
-    fn omp_payload_round_trips_through_normalizer() {
-        // Verify the JSON payload the extension would POST is deserializable as
-        // LocalHookEvent and produces the expected snapshot title/status.
-        use crate::model::{LocalHookEvent, Snapshot};
-        use crate::normalizer::normalize;
-
-        let src = render_omp_extension();
-        assert!(src.contains("\"PreToolUse\""));
-
-        // Construct the payload the tool_call handler would build.
-        let payload = json!({
-            "session_id": "omp-sess-1",
-            "cwd": "/tmp/project",
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Write",
-            "permission_mode": "default",
-            "recv_ts": 1700000000_u64,
-        });
-        let event: LocalHookEvent = serde_json::from_value(payload).unwrap();
-        assert_eq!(event.hook_event_name, "PreToolUse");
-
-        let snap = normalize(&event, &Snapshot::empty(1));
-        assert_eq!(snap.status, "running_tool");
-        assert_eq!(snap.detail, "Write");
-    }
-
-    // --- OMP install/uninstall filesystem tests ---
-
-    fn temp_omp_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        std::env::temp_dir().join(format!("esp32dash-omp-{name}-{}-{unique}", process::id()))
-    }
-
-    #[test]
-    fn analyze_omp_detects_missing_extension() {
-        let omp_dir = temp_omp_dir("analyze");
-        let analysis = analyze_omp(&omp_dir).unwrap();
-        assert!(analysis.extension_written);
-        assert_eq!(analysis.extension_path, omp_dir.join("extensions").join(OMP_EXTENSION_NAME));
-
-        let _ = fs::remove_dir_all(&omp_dir);
-    }
-
-    #[test]
-    fn apply_omp_writes_extension_file() {
-        let omp_dir = temp_omp_dir("apply");
-        let analysis = analyze_omp(&omp_dir).unwrap();
-        apply_omp(&analysis).unwrap();
-
-        assert!(analysis.extension_path.exists());
-        let written = fs::read_to_string(&analysis.extension_path).unwrap();
-        assert!(written.contains("export default function"));
-
-        let _ = fs::remove_dir_all(&omp_dir);
-    }
-
-    #[test]
-    fn analyze_omp_is_idempotent_when_content_matches() {
-        let omp_dir = temp_omp_dir("idempotent");
-        let first = analyze_omp(&omp_dir).unwrap();
-        apply_omp(&first).unwrap();
-
-        let second = analyze_omp(&omp_dir).unwrap();
-        assert!(!second.extension_written, "re-analyzing after install must be no-op");
-
-        let _ = fs::remove_dir_all(&omp_dir);
-    }
-
-    #[test]
-    fn uninstall_omp_removes_extension_file() {
-        let omp_dir = temp_omp_dir("uninstall");
-        let analysis = analyze_omp(&omp_dir).unwrap();
-        apply_omp(&analysis).unwrap();
-        assert!(analysis.extension_path.exists());
-
-        let result = uninstall_omp_hooks(&omp_dir).unwrap();
-        assert!(result.extension_removed);
-        assert!(!analysis.extension_path.exists());
-
-        let _ = fs::remove_dir_all(&omp_dir);
-    }
-
-    #[test]
-    fn uninstall_omp_is_idempotent_when_missing() {
-        let omp_dir = temp_omp_dir("uninstall-missing");
-        let result = uninstall_omp_hooks(&omp_dir).unwrap();
-        assert!(!result.extension_removed);
-
-        let _ = fs::remove_dir_all(&omp_dir);
-    }
-
-    #[test]
-    fn install_omp_then_uninstall_round_trip() {
-        let omp_dir = temp_omp_dir("round-trip");
-        let analysis = analyze_omp(&omp_dir).unwrap();
-        apply_omp(&analysis).unwrap();
-        assert!(analysis.extension_path.exists());
-
-        uninstall_omp_hooks(&omp_dir).unwrap();
-        assert!(!analysis.extension_path.exists());
-
-        let _ = fs::remove_dir_all(&omp_dir);
-    }
-
-    #[test]
-    fn omp_install_does_not_touch_claude_hooks() {
-        // Installing OMP extension should not create or modify any Claude settings.
-        let omp_dir = temp_omp_dir("independence-omp");
-        let claude_dir = temp_claude_dir("independence-omp");
-        fs::create_dir_all(&claude_dir).unwrap();
-
-        let analysis = analyze_omp(&omp_dir).unwrap();
-        apply_omp(&analysis).unwrap();
-
-        assert!(!claude_dir.join(SETTINGS_NAME).exists());
-        assert!(!claude_dir.join("hooks").exists());
-        assert!(analysis.extension_path.exists());
-
-        let _ = fs::remove_dir_all(&omp_dir);
-        let _ = fs::remove_dir_all(&claude_dir);
-    }
-
-    #[test]
-    fn install_hooks_omits_claude_when_target_is_omp_only() {
-        // R8: requesting only OMP must not analyze or apply Claude. When
-        // install_claude is false the coordinator skips home_claude_dir entirely,
-        // so the result carries no Claude entry. This would fail on the old
-        // coordinator which always set claude = Some(...).
-        let exe = PathBuf::from("/tmp/esp32dash");
-        let result = install_hooks(&exe, true, false, false).unwrap();
-        assert!(result.claude.is_none(), "Claude result must be absent when install_claude=false");
-        assert!(result.omp.is_none(), "OMP result must be absent when install_omp=false");
-    }
-
-    #[test]
-    fn uninstall_hooks_omits_claude_when_target_is_omp_only() {
-        // R8: uninstalling only OMP must not touch Claude hooks. The old
-        // coordinator always called uninstall_claude_hooks and returned
-        // claude = Some(...); this assertion locks in the gate.
-        let result = uninstall_hooks(false, false).unwrap();
-        assert!(
-            result.claude.is_none(),
-            "Claude result must be absent when uninstall_claude=false"
-        );
-        assert!(result.omp.is_none(), "OMP result must be absent when uninstall_omp=false");
     }
 }

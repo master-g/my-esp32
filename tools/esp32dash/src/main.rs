@@ -102,7 +102,7 @@ enum Command {
     #[command(about = "Remove the esp32dash launchd service on macOS")]
     UninstallLaunchd,
     #[command(
-        about = "Install or uninstall esp32dash hooks for Claude Code and/or OMP",
+        about = "Install or uninstall esp32dash hooks for Claude Code",
         subcommand_required = true,
         arg_required_else_help = true
     )]
@@ -183,30 +183,15 @@ struct ConfigArgs {
     port: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
-enum HookTarget {
-    #[value(name = "claude")]
-    Claude,
-    #[value(name = "omp")]
-    Omp,
-    #[value(name = "all")]
-    All,
-}
-
 #[derive(Debug, Subcommand)]
 enum HooksCommand {
-    #[command(about = "Install hooks for the specified target (default: all)")]
+    #[command(about = "Install the Claude Code hook script and settings entries")]
     Install {
-        #[arg(value_enum, help = "claude | omp | all (default: all)")]
-        target: Option<HookTarget>,
         #[arg(short = 'f', long, help = "Overwrite and update without interactive confirmation")]
         force: bool,
     },
-    #[command(about = "Uninstall hooks for the specified target (default: all)")]
-    Uninstall {
-        #[arg(value_enum, help = "claude | omp | all (default: all)")]
-        target: Option<HookTarget>,
-    },
+    #[command(about = "Remove the Claude Code hook script and settings entries")]
+    Uninstall,
 }
 
 #[derive(Debug, Serialize)]
@@ -382,6 +367,13 @@ async fn main() -> Result<()> {
             command: AgentCommand::Run,
         } => {
             let config = Config::from_env()?;
+            tokio::spawn(async {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    launchd::rotate_service_logs();
+                }
+            });
             agent::run(config).await
         }
         Command::Agent {
@@ -800,26 +792,13 @@ fn uninstall_launchd() -> Result<()> {
 fn run_hooks_command(command: HooksCommand) -> Result<()> {
     match command {
         HooksCommand::Install {
-            target,
             force,
         } => {
-            let resolved = target.unwrap_or(HookTarget::All);
-            let install_claude = matches!(resolved, HookTarget::Claude | HookTarget::All);
-            let install_omp = matches!(resolved, HookTarget::Omp | HookTarget::All);
             let executable = env::current_exe().context("failed to resolve current executable")?;
             let executable = executable.canonicalize().unwrap_or(executable);
-            let result = hooks::install_hooks(&executable, force, install_claude, install_omp)?;
-            print_json(&result)
+            print_json(&hooks::install_hooks(&executable, force)?)
         }
-        HooksCommand::Uninstall {
-            target,
-        } => {
-            let resolved = target.unwrap_or(HookTarget::All);
-            let uninstall_claude = matches!(resolved, HookTarget::Claude | HookTarget::All);
-            let uninstall_omp = matches!(resolved, HookTarget::Omp | HookTarget::All);
-            let result = hooks::uninstall_hooks(uninstall_claude, uninstall_omp)?;
-            print_json(&result)
-        }
+        HooksCommand::Uninstall => print_json(&hooks::uninstall_hooks()?),
     }
 }
 
@@ -1333,7 +1312,9 @@ fn summarize_tool_input(raw: &Value) -> String {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt().with_env_filter(filter).with_target(false).try_init();
+    // launchd redirects stdout into a log file; escape codes only belong on a terminal.
+    let ansi = std::io::IsTerminal::is_terminal(&io::stdout());
+    let _ = fmt().with_env_filter(filter).with_target(false).with_ansi(ansi).try_init();
 }
 
 #[cfg(test)]
@@ -1569,94 +1550,21 @@ mod tests {
     // --- CLI structure tests ---
 
     #[test]
-    fn hook_target_parses_all_variants() {
-        use clap::ValueEnum;
-
-        assert_eq!(HookTarget::from_str("claude", true).unwrap(), HookTarget::Claude);
-        assert_eq!(HookTarget::from_str("omp", true).unwrap(), HookTarget::Omp);
-        assert_eq!(HookTarget::from_str("all", true).unwrap(), HookTarget::All);
-    }
-
-    #[test]
-    fn hooks_install_subcommand_parses_with_target() {
-        let cli = Cli::try_parse_from(["esp32dash", "hooks", "install", "claude"]).unwrap();
-        match cli.command {
-            Command::Hooks {
-                command:
-                    HooksCommand::Install {
-                        target,
-                        force,
-                    },
-            } => {
-                assert_eq!(target, Some(HookTarget::Claude));
-                assert!(!force);
-            }
-            other => panic!("expected Hooks::Install, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn hooks_install_defaults_to_all_when_target_omitted() {
-        let cli = Cli::try_parse_from(["esp32dash", "hooks", "install"]).unwrap();
-        match cli.command {
-            Command::Hooks {
-                command:
-                    HooksCommand::Install {
-                        target,
-                        ..
-                    },
-            } => {
-                assert!(target.is_none());
-            }
-            other => panic!("expected Hooks::Install, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn hooks_install_accepts_force_flag() {
-        let cli = Cli::try_parse_from(["esp32dash", "hooks", "install", "omp", "--force"]).unwrap();
-        match cli.command {
+        let cli = Cli::try_parse_from(["esp32dash", "hooks", "install", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
             Command::Hooks {
-                command:
-                    HooksCommand::Install {
-                        target,
-                        force,
-                    },
-            } => {
-                assert_eq!(target, Some(HookTarget::Omp));
-                assert!(force);
+                command: HooksCommand::Install {
+                    force: true
+                }
             }
-            other => panic!("expected Hooks::Install, got {other:?}"),
-        }
+        ));
     }
 
     #[test]
-    fn hooks_uninstall_subcommand_parses_with_target() {
-        let cli = Cli::try_parse_from(["esp32dash", "hooks", "uninstall", "claude"]).unwrap();
-        match cli.command {
-            Command::Hooks {
-                command: HooksCommand::Uninstall {
-                    target,
-                },
-            } => {
-                assert_eq!(target, Some(HookTarget::Claude));
-            }
-            other => panic!("expected Hooks::Uninstall, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn hooks_uninstall_defaults_to_all_when_target_omitted() {
-        let cli = Cli::try_parse_from(["esp32dash", "hooks", "uninstall"]).unwrap();
-        match cli.command {
-            Command::Hooks {
-                command: HooksCommand::Uninstall {
-                    target,
-                },
-            } => {
-                assert!(target.is_none());
-            }
-            other => panic!("expected Hooks::Uninstall, got {other:?}"),
-        }
+    fn hooks_rejects_removed_targets() {
+        assert!(Cli::try_parse_from(["esp32dash", "hooks", "install", "omp"]).is_err());
+        assert!(Cli::try_parse_from(["esp32dash", "hooks", "uninstall", "omp"]).is_err());
     }
 }

@@ -23,11 +23,7 @@ cargo run -- install-launchd
 cargo run -- uninstall-launchd
 cargo run -- chibi test --state idle --emotion happy --bubble "Nice"
 cargo run -- hooks install
-cargo run -- hooks install claude
-cargo run -- hooks install omp
 cargo run -- hooks uninstall
-cargo run -- hooks uninstall claude
-cargo run -- hooks uninstall omp
 cargo run -- chibi approve-dismiss --delay-ms 1500
 cargo run -- chibi screensaver enter
 ```
@@ -68,34 +64,29 @@ cargo run -- agent status
 
 ## Hook Installation
 
-`hooks install` and `hooks uninstall` manage hook integration for both Claude Code and OMP. Each target (`claude` / `omp` / `all`) is installed and uninstalled independently. Omitting the target defaults to `all`.
-
-
-### Claude Code
-
 Install the hook wrapper and update `~/.claude/settings.json` automatically:
 
 ```bash
-cargo run -- hooks install claude
+cargo run -- hooks install
 ```
 
 Use `-f` to skip the interactive confirmation:
 
 ```bash
-cargo run -- hooks install claude --force
+cargo run -- hooks install --force
 ```
 
 Uninstall:
 
 ```bash
-cargo run -- hooks uninstall claude
+cargo run -- hooks uninstall
 ```
 
-The command writes `~/.claude/hooks/esp32dash-hook.sh`, preserves existing Claude hooks, and only appends any missing `esp32dash` entries in `~/.claude/settings.json`. Uninstall removes all `esp32dash` entries and deletes the hook script, leaving other hooks untouched.
+The command writes `~/.claude/hooks/esp32dash-hook.sh` (an executable under `$HOME` is referenced as `${HOME}/...`, so the same script works when synced across machines), preserves existing Claude hooks, and only appends any missing `esp32dash` entries in `~/.claude/settings.json`. Uninstall removes all `esp32dash` entries and deletes the hook script, leaving other hooks untouched.
 
 Running install again is safe. If the hook script and settings entries are already in place, the command becomes a no-op. `-f` only skips the confirmation prompt before writing changes.
 
-The hook config added by `hooks install claude` covers:
+The hook config added by `hooks install` covers:
 
 - `SessionStart`
 - `SessionEnd`
@@ -115,41 +106,7 @@ The hook config added by `hooks install claude` covers:
 - `PostCompact`
 - `PermissionRequest`
 
-On the device, true `PermissionRequest` events keep the actionable `Accept / Decline / YOLO`
-overlay. `AskUserQuestion` and `Elicitation` waits use a separate read-only prompt overlay
-that shows the question and points the user back to the terminal.
-
-### OMP
-
-Install the OMP extension:
-
-```bash
-cargo run -- hooks install omp
-```
-
-Uninstall:
-
-```bash
-cargo run -- hooks uninstall omp
-```
-
-This writes a self-contained TypeScript extension to `~/.omp/agent/extensions/esp32dash.ts`. OMP auto-discovers extensions in this directory, so no `config.yml` edit is needed.
-
-The extension registers `pi.on()` handlers for OMP session, turn, and tool lifecycle events, translates them to Claude-compatible `hook_event_name` values, and POSTs them to the esp32dash agent's `/v1/claude/events` endpoint via `fetch`. The device displays a unified agent status (last-event-wins, shared with Claude Code).
-
-Event mapping:
-
-| OMP event | Claude `hook_event_name` | Device display |
-|---|---|---|
-| `session_start` | `SessionStart` | Session started |
-| `session_shutdown` | `SessionEnd` | Session ended |
-| `turn_start` | `UserPromptSubmit` | Processing prompt |
-| `turn_end` | `Stop` | Idle |
-| `tool_call` | `PreToolUse` | Running tool: \<tool_name\> |
-
-If the agent is unreachable, the extension fails silently and does not block OMP. The endpoint address defaults to `127.0.0.1:37125` and can be overridden at runtime via the `ESP32DASH_ADMIN_ADDR` environment variable.
-
-OMP's approval flow is in-process (`ctx.ui.confirm`) and does not emit external events, so it cannot trigger the device overlay. The extension only forwards passive status (session/turn/tool); it never returns a decision to OMP.
+The device is a read-only notifier. Only `PermissionRequest` goes through `claude respond`, which pushes a coarse overlay and returns no decision, so Claude Code's native prompt still decides. `AskUserQuestion` and `Elicitation` reach the device's read-only prompt overlay through the normal ingest path.
 
 ## launchd
 
@@ -163,6 +120,8 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 
 The command writes `~/Library/LaunchAgents/com.local.esp32dash.plist` and starts the new agent.
 Run it as your logged-in macOS user, not with `sudo`: this is a per-user `LaunchAgent`, and `sudo` will incorrectly target root's unsupported `gui/0` domain.
+
+launchd sends the agent's stdout/stderr to `~/Library/Logs/esp32dash/{stdout,stderr}.log` and never rotates them. The agent checks once a minute: a log over 5 MiB is copied to `*.log.1` (replacing the previous copy) and truncated in place, so each log stays under roughly 10 MiB on disk.
 
 For quick local testing you can still use `cargo run -- install-launchd`, but the plist will point at the current build artifact under `target/`, so `cargo clean` or moving the repo will break the service.
 
