@@ -5,6 +5,7 @@ idf_component_register(
         "include"
     REQUIRES
         core_event_bus
+        core_system_state
         core_types
     PRIV_REQUIRES
         esp_timer

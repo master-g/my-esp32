@@ -40,8 +40,7 @@ Apps communicate via events defined in `src/components/core_types/include/core_t
 APP_EVENT_ENTER, APP_EVENT_LEAVE, APP_EVENT_TICK_1S,
 APP_EVENT_TOUCH, APP_EVENT_NET_CHANGED, APP_EVENT_POWER_CHANGED,
 APP_EVENT_DATA_CLAUDE, APP_EVENT_DATA_MARKET, APP_EVENT_DATA_WEATHER,
-APP_EVENT_DATA_SETTINGS, APP_EVENT_PERMISSION_REQUEST, APP_EVENT_PERMISSION_DISMISS,
-APP_EVENT_PROMPT_REQUEST, APP_EVENT_PROMPT_DISMISS
+APP_EVENT_DATA_SETTINGS
 ```
 
 Each app implements `app_descriptor_t` with callbacks: `init`, `create_root`, `resume`, `suspend`, `handle_event`.
@@ -152,8 +151,8 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 - Service layer handles all external data, broadcasts via event bus
 - Power policy controls data collection frequency based on power source and foreground app
 - Display uses partial double buffering (not full screen buffer) due to memory constraints
-- Apps support explicit pause/resume; Home owns a single **read-only** overlay that shows the coarse type of any waiting Claude interaction (tool permission, Elicitation, AskUserQuestion) — it never returns a decision
-- The ESP32 is a read-only status notifier for Claude authorizations: every decision (allow / deny / allow_always, Elicitation, AskUserQuestion) is made on the Mac's native prompt, so a locked Mac cannot be bypassed from the device. `device_link` carries only one-way request/dismiss notifications; the inbound decision frames (`claude.approval.resolved`, `claude.prompt.response`), the `claude.approve` RPC, and the approval generation check are removed. The overlay shows only a coarse interaction type — never command, argument, or option content
+- Apps support explicit pause/resume; Home shows the coarse type of the one pending interaction (tool permission, Elicitation, AskUserQuestion; terms in GLOSSARY.md) as a **read-only** sprite bubble — it never returns a decision
+- The ESP32 is a read-only status notifier for Claude authorizations: every decision (allow / deny / allow_always, Elicitation, AskUserQuestion) is made on the Mac's native prompt, so a locked Mac cannot be bypassed from the device. The host decides which pending interaction to show and sends it as a level inside every `claude.update` (`pending`: kind + coarse type, or null); there are no request/dismiss frames and no decision frames or RPCs in either direction (docs/adr/0001). `service_claude` owns that state and the screen-lit alert flag; Home only renders it. The bubble shows only a coarse interaction type — never command, argument, or option content
 - `protocol.error` and the serial line-overflow guard are unrelated to approvals and stay load-bearing — do not revert them
 - Lock order: LVGL lock → service mutex. No service task may call LVGL directly
 

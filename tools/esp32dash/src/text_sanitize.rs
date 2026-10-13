@@ -7,7 +7,6 @@ pub const TITLE_MAX_BYTES: usize = 40;
 pub const DETAIL_MAX_BYTES: usize = 96;
 pub const PROMPT_MAX_BYTES: usize = 96;
 pub const TOOL_NAME_MAX_BYTES: usize = 48;
-pub const APPROVAL_ID_MAX_BYTES: usize = 31;
 pub const MESSAGE_MAX_BYTES: usize = 96;
 pub const PERMISSION_MODE_MAX_BYTES: usize = 16;
 
@@ -81,14 +80,6 @@ pub fn build_workspace(cwd: &str) -> String {
         .unwrap_or_default()
 }
 
-pub fn sanitize_transport_id(input: &str) -> String {
-    let token = truncate_ascii_token(input, APPROVAL_ID_MAX_BYTES);
-    if token.is_empty() {
-        return format!("approval-{:08x}", fnv1a_32(input.as_bytes()));
-    }
-    token
-}
-
 fn first_line(input: &str) -> &str {
     input.lines().next().unwrap_or_default().trim()
 }
@@ -111,57 +102,9 @@ fn push_if_fits(out: &mut String, ch: char, max_bytes: usize) -> bool {
     true
 }
 
-fn truncate_ascii_token(input: &str, max_bytes: usize) -> String {
-    if max_bytes == 0 {
-        return String::new();
-    }
-
-    let mut out = String::new();
-    let mut prev_sep = true;
-
-    for ch in input.chars() {
-        let mapped = match ch {
-            'a'..='z' | '0'..='9' => ch,
-            'A'..='Z' => ch.to_ascii_lowercase(),
-            '-' | '_' => '-',
-            _ => '-',
-        };
-
-        if mapped == '-' {
-            if prev_sep || !push_if_fits(&mut out, '-', max_bytes) {
-                continue;
-            }
-            prev_sep = true;
-            continue;
-        }
-
-        if !push_if_fits(&mut out, mapped, max_bytes) {
-            break;
-        }
-        prev_sep = false;
-    }
-
-    while out.ends_with('-') {
-        out.pop();
-    }
-
-    out
-}
-
-fn fnv1a_32(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811c9dc5u32;
-    for byte in bytes {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_workspace, sanitize_display_text, sanitize_tool_name, sanitize_transport_id,
-    };
+    use super::{build_workspace, sanitize_display_text, sanitize_tool_name};
 
     #[test]
     fn supported_cjk_survives() {
@@ -186,13 +129,5 @@ mod tests {
     #[test]
     fn tool_name_is_byte_safe() {
         assert_eq!(sanitize_tool_name("exec_command").as_deref(), Some("exec_command"));
-    }
-
-    #[test]
-    fn transport_id_falls_back_to_hashed_ascii() {
-        let transport_id = sanitize_transport_id("审批🔥");
-        assert!(transport_id.is_ascii());
-        assert!(!transport_id.is_empty());
-        assert!(transport_id.len() <= 31);
     }
 }

@@ -24,11 +24,8 @@ cargo run -- uninstall-launchd
 cargo run -- chibi test --state idle --emotion happy --bubble "Nice"
 cargo run -- hooks install
 cargo run -- hooks uninstall
-cargo run -- chibi approve-dismiss --delay-ms 1500
 cargo run -- chibi screensaver enter
 ```
-
-`chibi approve-dismiss` prefers the real host-side approval flow. When the local agent is reachable, it posts a synthetic `PermissionRequest`, submits a matching approval, then posts a follow-up `PreToolUse` event so the agent dismisses the ESP32 overlay through the same path used by normal Claude hooks. If the local agent is unavailable, it falls back to a direct serial smoke test and first forces `home.screensaver` off so the overlay is visible.
 
 `chibi test` is the quickest Home UI smoke harness. Besides `--state`, `--emotion`, and `--bubble`, it now also accepts snapshot-level overrides like `--unread auto|on|off`, `--attention auto|low|medium|high`, plus `--title`, `--source`, `--session-id`, and `--event`, so you can exercise unread-dot, notification, and idle-state cases without waiting for real Claude hooks.
 
@@ -168,32 +165,10 @@ Host config commit:
 Host Claude update:
 
 ```json
-@esp32dash {"type":"event","method":"claude.update","payload":{"seq":7,"source":"claude_code","status":"waiting_for_input","title":"Ready for input","workspace":"project-foo","detail":"Previous action completed","permission_mode":"default","ts":1743957128,"unread":true,"attention":"medium","session_id":"sess-1","event":"Stop"}}
+@esp32dash {"type":"event","method":"claude.update","payload":{"seq":7,"source":"claude_code","status":"waiting_for_input","title":"Ready for input","workspace":"project-foo","detail":"Previous action completed","permission_mode":"default","ts":1743957128,"unread":true,"attention":"medium","session_id":"sess-1","event":"Stop","pending":{"kind":"approval","type":"Bash command"}}}
 ```
 
-Host approval request:
-
-```json
-@esp32dash {"type":"event","method":"claude.approval.request","payload":{"id":"approval-1","tool_name":"Bash","description":"rm -rf /tmp/test"}}
-```
-
-Host approval dismiss:
-
-```json
-@esp32dash {"type":"event","method":"claude.approval.dismiss","payload":{"id":"approval-1"}}
-```
-
-Host read-only prompt request:
-
-```json
-@esp32dash {"type":"event","method":"claude.prompt.request","payload":{"id":"prompt-1","kind":"question_prompt","title":"Plan ready","question":"Execute now or revise?","options_text":"1. Execute - Run the plan  2. More prompt - Edit in terminal"}}
-```
-
-Host read-only prompt dismiss:
-
-```json
-@esp32dash {"type":"event","method":"claude.prompt.dismiss","payload":{"id":"prompt-1"}}
-```
+`pending` is the one pending interaction the device should show, or `null`. `kind` is `approval` or `prompt`; `type` is a coarse label only, never a command, argument, question or option. There are no request/dismiss frames: the device shows whatever the latest `claude.update` says (see `docs/adr/0001-pending-interaction-as-snapshot-level.md`).
 
 Host screenshot capture start:
 

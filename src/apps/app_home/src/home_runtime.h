@@ -6,19 +6,16 @@
 
 #include "app_manager.h"
 #include "esp_err.h"
-#include "home_approval.h"
 #include "home_screensaver.h"
 #include "home_view.h"
 
 typedef struct {
     home_view_t view;
     home_screensaver_t screensaver;
-    home_approval_t approval;
     lv_timer_t *time_refresh_timer;
     lv_timer_t *snapshot_refresh_timer;
     lv_timer_t *unread_timer;
     uint32_t unread_seq;
-    bool was_connected;
     uint32_t last_snapshot_epoch_s;
 } home_runtime_t;
 

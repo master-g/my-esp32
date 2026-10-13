@@ -55,19 +55,11 @@ static char s_device_id[32];
 static bool s_started;
 static uint32_t s_screenshot_seq;
 
-/* Approval / prompt overlay state — shared between reader task and LVGL task.
- * The device is read-only: it never returns a decision, so there is no RPC
- * semaphore, decision field, or generation counter — only the pending display state. */
+/* Guards the protocol overflow counters. */
 static SemaphoreHandle_t s_state_mutex;
-static approval_request_t s_approval_req;
-static prompt_request_t s_prompt_req;
 static uint32_t s_protocol_overflow_count;
 static uint32_t s_last_protocol_overflow_bytes;
 
-static void reset_approval_state(void);
-static void reset_prompt_state(void);
-static void reset_approval_state_locked(void);
-static void reset_prompt_state_locked(void);
 static void note_protocol_overflow(size_t dropped_bytes);
 
 static void stdout_lock_take(void)
@@ -114,25 +106,10 @@ typedef struct {
 } pending_config_t;
 
 static const char *capabilities[] = {
-    "device.info",
-    "device.reboot",
-    "config.export",
-    "config.set_many",
-    "wifi.scan",
-    "wifi.profiles.list",
-    "wifi.profile.add",
-    "wifi.profile.remove",
-    "claude.update",
-    "claude.heartbeat",
-    "claude.approval.request",
-    "claude.approval.dismiss",
-    "claude.prompt.request",
-    "claude.prompt.dismiss",
-    "protocol.error",
-    "home.screensaver",
-    "app.switch",
-    "screen.capture.start",
-    "debug.market_snapshot",
+    "device.info",   "device.reboot",        "config.export",         "config.set_many",
+    "wifi.scan",     "wifi.profiles.list",   "wifi.profile.add",      "wifi.profile.remove",
+    "claude.update", "claude.heartbeat",     "protocol.error",        "home.screensaver",
+    "app.switch",    "screen.capture.start", "debug.market_snapshot",
 };
 
 static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
@@ -402,84 +379,6 @@ static esp_err_t stream_screenshot_capture(const char *capture_id, const app_scr
         send_event_frame("screen.capture.done", payload);
     }
 
-    return ESP_OK;
-}
-
-static void publish_ui_event(app_event_type_t type)
-{
-    app_event_t evt = {.type = type, .payload = NULL};
-    event_bus_publish(&evt);
-}
-
-static esp_err_t focus_home_for_claude_overlay(void)
-{
-    return app_manager_request_switch_to(APP_ID_HOME, UI_CONTROL_TIMEOUT_MS);
-}
-
-static void reset_approval_state_locked(void)
-{
-    memset(&s_approval_req, 0, sizeof(s_approval_req));
-}
-
-static void reset_approval_state(void)
-{
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    reset_approval_state_locked();
-    (void)xSemaphoreGive(s_state_mutex);
-}
-
-static void reset_prompt_state_locked(void) { memset(&s_prompt_req, 0, sizeof(s_prompt_req)); }
-
-static void reset_prompt_state(void)
-{
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    reset_prompt_state_locked();
-    (void)xSemaphoreGive(s_state_mutex);
-}
-
-static esp_err_t set_pending_approval(const cJSON *req_id, const cJSON *type)
-{
-    ESP_RETURN_ON_FALSE(cJSON_IsString(req_id) && req_id->valuestring != NULL, ESP_ERR_INVALID_ARG,
-                        TAG, "approval request missing id");
-
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    /* Supersede: a new approval replaces any currently-pending approval (the host
-     * dismisses the old one first, but accept a replacement here too) and preempts a
-     * pending prompt — an approval always wins the single device overlay. */
-    if (s_prompt_req.pending) {
-        reset_prompt_state_locked();
-    }
-    reset_approval_state_locked();
-    strlcpy(s_approval_req.id, req_id->valuestring, sizeof(s_approval_req.id));
-    if (cJSON_IsString(type)) {
-        strlcpy(s_approval_req.type_label, type->valuestring, sizeof(s_approval_req.type_label));
-    }
-    s_approval_req.pending = true;
-    (void)xSemaphoreGive(s_state_mutex);
-    return ESP_OK;
-}
-
-static esp_err_t set_pending_prompt(const cJSON *req_id, const cJSON *type)
-{
-    ESP_RETURN_ON_FALSE(cJSON_IsString(req_id) && req_id->valuestring != NULL, ESP_ERR_INVALID_ARG,
-                        TAG, "prompt request missing id");
-
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    /* An approval always wins the single device overlay; refuse a prompt while one is
-     * pending. */
-    if (s_approval_req.pending) {
-        (void)xSemaphoreGive(s_state_mutex);
-        return ESP_ERR_INVALID_STATE;
-    }
-    /* Supersede: a new prompt replaces any currently-pending prompt. */
-    reset_prompt_state_locked();
-    strlcpy(s_prompt_req.id, req_id->valuestring, sizeof(s_prompt_req.id));
-    if (cJSON_IsString(type)) {
-        strlcpy(s_prompt_req.type_label, type->valuestring, sizeof(s_prompt_req.type_label));
-    }
-    s_prompt_req.pending = true;
-    (void)xSemaphoreGive(s_state_mutex);
-    claude_service_set_pending_prompt(true);
     return ESP_OK;
 }
 
@@ -1030,6 +929,28 @@ static cJSON *build_market_snapshot_debug(void)
     return result;
 }
 
+/* `pending` is null/absent or {"kind": "approval"|"prompt", "type": "<coarse type>"}. */
+static void parse_claude_pending(const cJSON *pending, claude_snapshot_t *snapshot)
+{
+    char kind[16] = {0};
+
+    snapshot->pending_kind = CLAUDE_PENDING_NONE;
+    snapshot->pending_type[0] = '\0';
+    if (!cJSON_IsObject(pending)) {
+        return;
+    }
+
+    copy_json_string(pending, "kind", kind, sizeof(kind));
+    if (strcmp(kind, "approval") == 0) {
+        snapshot->pending_kind = CLAUDE_PENDING_APPROVAL;
+    } else if (strcmp(kind, "prompt") == 0) {
+        snapshot->pending_kind = CLAUDE_PENDING_PROMPT;
+    } else {
+        return;
+    }
+    copy_json_string(pending, "type", snapshot->pending_type, sizeof(snapshot->pending_type));
+}
+
 static esp_err_t parse_claude_update(const cJSON *payload, claude_snapshot_t *snapshot)
 {
     const cJSON *seq = cJSON_GetObjectItemCaseSensitive(payload, "seq");
@@ -1056,6 +977,7 @@ static esp_err_t parse_claude_update(const cJSON *payload, claude_snapshot_t *sn
                      sizeof(snapshot->permission_mode));
     copy_json_string(payload, "status", status, sizeof(status));
     snapshot->run_state = claude_status_from_text(status);
+    parse_claude_pending(cJSON_GetObjectItemCaseSensitive(payload, "pending"), snapshot);
     return ESP_OK;
 }
 
@@ -1072,7 +994,14 @@ static void handle_event_frame(const cJSON *root)
         claude_snapshot_t snapshot = {0};
         esp_err_t err = parse_claude_update(payload, &snapshot);
         if (err == ESP_OK) {
-            claude_service_apply_remote_snapshot(&snapshot);
+            /* Bring Home forward only when an interaction starts waiting; a user
+             * who then navigates away is left alone while it stays pending. */
+            if (claude_service_apply_remote_snapshot(&snapshot)) {
+                err = app_manager_request_switch_to(APP_ID_HOME, UI_CONTROL_TIMEOUT_MS);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "claude.update: failed to focus home: %s", esp_err_to_name(err));
+                }
+            }
         } else {
             ESP_LOGW(TAG, "claude.update: parse failed (0x%x)", (unsigned)err);
         }
@@ -1082,99 +1011,6 @@ static void handle_event_frame(const cJSON *root)
     if (strcmp(method->valuestring, "claude.heartbeat") == 0) {
         claude_service_note_transport_alive();
         return;
-    }
-
-    if (strcmp(method->valuestring, "claude.approval.request") == 0) {
-        const cJSON *type = cJSON_GetObjectItemCaseSensitive(payload, "type");
-        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
-        esp_err_t err;
-
-        err = set_pending_approval(req_id, type);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "claude.approval.request: invalid payload");
-            return;
-        }
-        err = focus_home_for_claude_overlay();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "claude.approval.request: failed to focus home: %s",
-                     esp_err_to_name(err));
-            /* Read-only device: never return a decision. Just clear the pending state. */
-            reset_approval_state();
-            return;
-        }
-        publish_ui_event(APP_EVENT_PERMISSION_REQUEST);
-        return;
-    }
-
-    if (strcmp(method->valuestring, "claude.approval.dismiss") == 0) {
-        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
-        bool dismissed = false;
-
-        if (!cJSON_IsString(req_id) || req_id->valuestring == NULL) {
-            return;
-        }
-
-        (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-        if (s_approval_req.pending && strcmp(s_approval_req.id, req_id->valuestring) == 0) {
-            reset_approval_state_locked();
-            dismissed = true;
-        }
-        (void)xSemaphoreGive(s_state_mutex);
-
-        if (!dismissed) {
-            ESP_LOGW(TAG, "approval dismiss ignored for unknown id");
-            return;
-        }
-        publish_ui_event(APP_EVENT_PERMISSION_DISMISS);
-        return;
-    }
-
-    if (strcmp(method->valuestring, "claude.prompt.request") == 0) {
-        const cJSON *type = cJSON_GetObjectItemCaseSensitive(payload, "type");
-        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
-        esp_err_t err;
-
-        err = set_pending_prompt(req_id, type);
-        if (err == ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "prompt request ignored because approval is pending");
-            return;
-        }
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "claude.prompt.request: invalid payload");
-            return;
-        }
-        err = focus_home_for_claude_overlay();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "claude.prompt.request: failed to focus home: %s", esp_err_to_name(err));
-            device_link_dismiss_prompt();
-            return;
-        }
-        /* Drives the same read-only overlay as approvals; sprite emotion is retained too. */
-        publish_ui_event(APP_EVENT_PROMPT_REQUEST);
-        return;
-    }
-
-    if (strcmp(method->valuestring, "claude.prompt.dismiss") == 0) {
-        const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(payload, "id");
-        bool dismissed = false;
-
-        if (!cJSON_IsString(req_id) || req_id->valuestring == NULL) {
-            return;
-        }
-
-        (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-        if (s_prompt_req.pending && strcmp(s_prompt_req.id, req_id->valuestring) == 0) {
-            reset_prompt_state_locked();
-            dismissed = true;
-        }
-        (void)xSemaphoreGive(s_state_mutex);
-
-        if (!dismissed) {
-            ESP_LOGW(TAG, "prompt dismiss ignored for unknown id");
-            return;
-        }
-        claude_service_set_pending_prompt(false);
-        publish_ui_event(APP_EVENT_PROMPT_DISMISS);
     }
 }
 
@@ -1504,8 +1340,6 @@ esp_err_t device_link_init(void)
     s_state_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_state_mutex != NULL, ESP_ERR_NO_MEM, TAG,
                         "failed to create device-link state mutex");
-    reset_approval_state();
-    reset_prompt_state();
     s_protocol_overflow_count = 0;
     s_last_protocol_overflow_bytes = 0;
     ESP_RETURN_ON_ERROR(esp_read_mac(mac, ESP_MAC_WIFI_STA), TAG, "failed to read device mac");
@@ -1531,57 +1365,4 @@ esp_err_t device_link_init(void)
     }
     s_started = true;
     return ESP_OK;
-}
-
-bool device_link_get_pending_approval(approval_request_t *out)
-{
-    bool pending = false;
-
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    if (s_approval_req.pending) {
-        if (out != NULL) {
-            *out = s_approval_req;
-        }
-        pending = true;
-    }
-    (void)xSemaphoreGive(s_state_mutex);
-    return pending;
-}
-
-bool device_link_get_pending_prompt(prompt_request_t *out)
-{
-    bool pending = false;
-
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    if (s_prompt_req.pending) {
-        if (out != NULL) {
-            *out = s_prompt_req;
-        }
-        pending = true;
-    }
-    (void)xSemaphoreGive(s_state_mutex);
-    return pending;
-}
-
-void device_link_dismiss_approval(void)
-{
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    if (s_approval_req.pending) {
-        reset_approval_state_locked();
-    }
-    (void)xSemaphoreGive(s_state_mutex);
-}
-
-void device_link_dismiss_prompt(void)
-{
-    bool had_pending = false;
-    (void)xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    if (s_prompt_req.pending) {
-        reset_prompt_state_locked();
-        had_pending = true;
-    }
-    (void)xSemaphoreGive(s_state_mutex);
-    if (had_pending) {
-        claude_service_set_pending_prompt(false);
-    }
 }

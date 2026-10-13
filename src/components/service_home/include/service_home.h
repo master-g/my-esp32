@@ -25,8 +25,8 @@ typedef struct {
     weather_icon_t weather_icon_id;
     bool claude_connected;
     bool claude_unread;
-    bool has_pending_prompt;
-    bool has_pending_approval;
+    claude_pending_kind_t claude_pending_kind; /* NONE unless the bridge is connected */
+    char claude_pending_type[CLAUDE_STR_PENDING_TYPE_MAX];
     claude_run_state_t claude_run_state;
     char claude_detail[96];
     char claude_emotion[CLAUDE_STR_EMOTION_MAX];

@@ -11,6 +11,7 @@
 #define CLAUDE_STR_DETAIL_MAX 96
 #define CLAUDE_STR_SESSION_MAX 40
 #define CLAUDE_STR_EMOTION_MAX 16
+#define CLAUDE_STR_PENDING_TYPE_MAX 32
 
 typedef enum {
     CLAUDE_CONN_DISCONNECTED = 0,
@@ -28,6 +29,15 @@ typedef enum {
     CLAUDE_RUN_ENDED,
 } claude_run_state_t;
 
+/* A pending interaction is one Claude interaction waiting for the user on the Mac
+ * (see GLOSSARY.md). The host decides which single one the device shows and sends
+ * it with every claude.update; the device never keeps its own copy of the rules. */
+typedef enum {
+    CLAUDE_PENDING_NONE = 0,
+    CLAUDE_PENDING_APPROVAL,
+    CLAUDE_PENDING_PROMPT,
+} claude_pending_kind_t;
+
 typedef struct {
     uint32_t seq;
     claude_conn_state_t conn_state;
@@ -42,20 +52,20 @@ typedef struct {
     char emotion[CLAUDE_STR_EMOTION_MAX];
     char event[24];
     char permission_mode[16];
-    bool has_pending_prompt;
+    claude_pending_kind_t pending_kind;
+    char pending_type[CLAUDE_STR_PENDING_TYPE_MAX]; /* coarse type, may be empty */
 } claude_snapshot_t;
 
 esp_err_t claude_service_init(void);
 esp_err_t claude_service_start(void);
 void claude_service_stop(void);
-void claude_service_apply_remote_snapshot(const claude_snapshot_t *snapshot);
+/* Returns true when a pending interaction appeared (none before, one now). */
+bool claude_service_apply_remote_snapshot(const claude_snapshot_t *snapshot);
 void claude_service_note_transport_alive(void);
 void claude_service_get_snapshot(claude_snapshot_t *out);
 bool claude_service_has_unread(void);
 void claude_service_mark_read(uint32_t seq);
 claude_conn_state_t claude_service_get_conn_state(void);
-void claude_service_set_pending_prompt(bool pending);
-bool claude_service_get_pending_prompt(void);
 
 /**
  * Check if the bridge has gone stale (no snapshot or heartbeat for a while).

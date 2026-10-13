@@ -157,8 +157,18 @@ pub struct Snapshot {
     pub ts: u64,
     pub unread: bool,
     pub attention: Attention,
+    /// The pending interaction the device should show, if any (see GLOSSARY.md).
     #[serde(default)]
-    pub has_pending_prompt: bool,
+    pub pending: Option<PendingDisplay>,
+}
+
+/// What the read-only device learns about a pending interaction: its kind and
+/// coarse type, never tool arguments, questions or option text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingDisplay {
+    pub kind: String,
+    #[serde(rename = "type")]
+    pub coarse_type: String,
 }
 
 impl Snapshot {
@@ -177,7 +187,7 @@ impl Snapshot {
             ts,
             unread: false,
             attention: Attention::Low,
-            has_pending_prompt: false,
+            pending: None,
         }
     }
 }

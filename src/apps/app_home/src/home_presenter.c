@@ -159,20 +159,19 @@ void home_presenter_build(home_present_model_t *out, const home_snapshot_t *snap
     out->sprite_state = map_run_state(snapshot->claude_run_state, snapshot->claude_connected);
     out->sprite_emotion = emotion_from_text(snapshot->claude_emotion);
 
-    if (snapshot->has_pending_approval) {
+    if (snapshot->claude_pending_kind != CLAUDE_PENDING_NONE) {
+        const char *fallback = snapshot->claude_pending_kind == CLAUDE_PENDING_APPROVAL
+                                   ? "Need permission"
+                                   : "Need input";
+
         out->sprite_state = SPRITE_STATE_WAITING;
         out->sprite_emotion = SPRITE_EMOTION_NEUTRAL;
         out->bubble_visible = true;
         out->bubble_sticky = true;
         out->alert_flash = true;
-        snprintf(out->bubble_text, sizeof(out->bubble_text), "Need permission");
-    } else if (snapshot->has_pending_prompt) {
-        out->sprite_state = SPRITE_STATE_WAITING;
-        out->sprite_emotion = SPRITE_EMOTION_NEUTRAL;
-        out->bubble_visible = true;
-        out->bubble_sticky = true;
-        out->alert_flash = true;
-        snprintf(out->bubble_text, sizeof(out->bubble_text), "Need input");
+        snprintf(out->bubble_text, sizeof(out->bubble_text), "%s",
+                 snapshot->claude_pending_type[0] != '\0' ? snapshot->claude_pending_type
+                                                          : fallback);
     } else {
         out->bubble_visible =
             snapshot->claude_detail[0] != '\0' && out->sprite_state != SPRITE_STATE_SLEEPING;

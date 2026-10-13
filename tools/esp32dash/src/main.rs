@@ -673,7 +673,7 @@ fn build_test_snapshot(
         ts: now_epoch(),
         unread,
         attention,
-        has_pending_prompt: false,
+        pending: None,
     }
 }
 

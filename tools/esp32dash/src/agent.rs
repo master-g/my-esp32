@@ -33,7 +33,6 @@ use crate::{
     },
     normalizer::{apply_notification_status, materially_equal, normalize},
     pending::{Interaction, PendingInteraction, PendingQueue, PendingTimeouts},
-    text_sanitize::sanitize_transport_id,
 };
 
 const RING_BUFFER_CAPACITY: usize = 64;
@@ -114,12 +113,7 @@ struct AgentState {
     sessions: BTreeMap<String, PersistedSessionState>,
     emotions: BTreeMap<String, SessionEmotionEntry>,
     last_heartbeat_ts: u64,
-    has_pending_prompt: bool,
     pending: PendingQueue,
-    /// The interaction last claimed for the device's single slot, so the next sync
-    /// knows what to dismiss. A send only fails once the device worker is gone, so
-    /// a failed send keeps its claim instead of retrying on every sync.
-    device_shown: Option<PendingInteraction>,
 }
 
 impl AgentState {
@@ -137,9 +131,7 @@ impl AgentState {
             sessions,
             emotions: BTreeMap::new(),
             last_heartbeat_ts: 0,
-            has_pending_prompt: false,
             pending: PendingQueue::new(timeouts),
-            device_shown: None,
         }
     }
 }
@@ -209,7 +201,6 @@ impl AppState {
                 self.process_event(event).await;
             }
         }
-        self.sync_device_pending().await;
     }
 
     async fn handle_pre_tool(self: &Arc<Self>, event: LocalHookEvent) {
@@ -269,7 +260,6 @@ impl AppState {
 
         if let Some(event) = pending {
             self.process_event(event).await;
-            self.sync_device_pending().await;
         }
     }
 
@@ -281,7 +271,6 @@ impl AppState {
 
         if let Some(event) = pending {
             self.process_event(event).await;
-            self.sync_device_pending().await;
         }
     }
 
@@ -296,10 +285,32 @@ impl AppState {
             hook_event = event.hook_event_name,
             "host cleared pending interactions"
         );
-        self.sync_device_pending().await;
+        self.refresh_snapshot().await;
+    }
+
+    /// Recompute the display snapshot (including the pending interaction) and push
+    /// it if it changed.
+    async fn refresh_snapshot(&self) {
+        let (persist, snapshot_to_send) = {
+            let mut guard = self.state.lock().await;
+            finalize_guard_state(&mut guard, now_epoch(), false)
+        };
+
+        if let Some(persist) = persist {
+            if let Err(err) = persist_state(&self.config.state_path, &persist) {
+                warn!("failed to persist state: {err:#}");
+            }
+        }
+
+        if let Some(snapshot) = snapshot_to_send {
+            self.device_manager.send_snapshot(snapshot);
+        }
     }
 
     async fn process_event(self: &Arc<Self>, event: LocalHookEvent) {
+        // Queue first so the snapshot built below already carries the interaction.
+        self.maybe_submit_approval_for_event(&event).await;
+        self.maybe_submit_prompt_for_event(&event).await;
         let (persist, snapshot_to_send) = {
             let mut guard = self.state.lock().await;
             apply_event_to_sessions(&mut guard, &event);
@@ -316,8 +327,6 @@ impl AppState {
             self.device_manager.send_snapshot(snapshot);
         }
 
-        self.maybe_submit_approval_for_event(&event).await;
-        self.maybe_submit_prompt_for_event(&event).await;
         self.maybe_analyze_emotion_for_event(&event).await;
     }
 
@@ -330,7 +339,6 @@ impl AppState {
         let tool_name = event.tool_name.clone().unwrap_or_else(|| "unknown".into());
         self.state.lock().await.pending.submit(
             PendingInteraction {
-                transport_id: sanitize_transport_id(&id),
                 id: id.clone(),
                 session_id: event.session_id.clone(),
                 tool_use_id: event.tool_use_id.clone(),
@@ -351,7 +359,6 @@ impl AppState {
         let id = build_prompt_id(event, &prompt);
         self.state.lock().await.pending.submit(
             PendingInteraction {
-                transport_id: sanitize_transport_id(&id),
                 id: id.clone(),
                 session_id: event.session_id.clone(),
                 tool_use_id: event.tool_use_id.clone(),
@@ -403,8 +410,6 @@ impl AppState {
                 warn!(error = %err, "failed to send claude heartbeat to device");
             }
         }
-
-        self.sync_device_pending().await;
     }
 
     async fn maybe_analyze_emotion_for_event(self: &Arc<Self>, event: &LocalHookEvent) {
@@ -537,71 +542,6 @@ impl AppState {
     fn serial_status(&self) -> crate::model::SerialConnectionStatus {
         self.device_manager.status()
     }
-
-    /// Bring the device's single slot in line with the queue. Until the firmware
-    /// reads the pending interaction from the snapshot, this is expressed as
-    /// request/dismiss frames diffed against what the device last showed.
-    async fn sync_device_pending(self: &Arc<Self>) {
-        let connected = self.serial_status().connected;
-        let mut guard = self.state.lock().await;
-        let now = Instant::now();
-        guard.has_pending_prompt = guard.pending.has_prompt(now);
-
-        if !connected {
-            // The device forgets its overlay on disconnect; show it again after.
-            guard.device_shown = None;
-            return;
-        }
-
-        let current = guard.pending.current(now).cloned();
-        if guard.device_shown.as_ref().map(|shown| &shown.id) == current.as_ref().map(|c| &c.id) {
-            return;
-        }
-
-        if let Some(shown) = guard.device_shown.take() {
-            if let Err(err) = self.send_device_dismiss(&shown) {
-                warn!(id = shown.id, error = %err, "failed to dismiss interaction on device");
-                return;
-            }
-        }
-        if let Some(next) = current {
-            match self.send_device_request(&next) {
-                Ok(()) => info!(
-                    id = next.id,
-                    coarse_type = next.coarse_type(),
-                    "forwarded interaction to device"
-                ),
-                Err(err) => {
-                    warn!(id = next.id, error = %err, "failed to forward interaction to device")
-                }
-            }
-            guard.device_shown = Some(next);
-        }
-    }
-
-    fn send_device_request(&self, item: &PendingInteraction) -> Result<()> {
-        // Read-only device: only the coarse type crosses, never tool arguments,
-        // questions or option labels (R2).
-        let method = if item.is_approval() {
-            "claude.approval.request"
-        } else {
-            "claude.prompt.request"
-        };
-        self.device_manager.send_protocol_event(
-            method,
-            serde_json::json!({ "id": item.transport_id, "type": item.coarse_type() }),
-        )
-    }
-
-    fn send_device_dismiss(&self, item: &PendingInteraction) -> Result<()> {
-        let method = if item.is_approval() {
-            "claude.approval.dismiss"
-        } else {
-            "claude.prompt.dismiss"
-        };
-        self.device_manager
-            .send_protocol_event(method, serde_json::json!({ "id": item.transport_id }))
-    }
 }
 
 fn finalize_guard_state(
@@ -610,7 +550,7 @@ fn finalize_guard_state(
     sessions_changed: bool,
 ) -> (Option<PersistedState>, Option<Snapshot>) {
     let mut next_snapshot = select_display_snapshot(&guard.sessions, fallback_ts);
-    next_snapshot.has_pending_prompt = guard.has_pending_prompt;
+    next_snapshot.pending = guard.pending.current(Instant::now()).map(PendingInteraction::display);
     let mut snapshot_to_send = None;
     let snapshot_changed = !materially_equal(&next_snapshot, &guard.snapshot);
 
@@ -903,6 +843,11 @@ fn reset_snapshot_emotion(snapshot: &mut Snapshot) {
     snapshot.emotion = Emotion::Neutral.as_str().to_string();
 }
 
+/// Pending interactions live only in memory; a restored snapshot must not claim one.
+fn reset_persisted_pending(state: &mut PersistedState) {
+    state.snapshot.pending = None;
+}
+
 fn reset_persisted_emotions(state: &mut PersistedState) {
     reset_snapshot_emotion(&mut state.snapshot);
     for session in &mut state.sessions {
@@ -930,6 +875,7 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
     let mut persisted = load_state(&config.state_path);
     if let Some(state) = persisted.as_mut() {
         reset_persisted_emotions(state);
+        reset_persisted_pending(state);
     }
     let initial_snapshot = persisted
         .as_ref()
@@ -1080,96 +1026,26 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct PanicAfterHelloFactory {
-        crashed: Arc<AtomicBool>,
-    }
-
-    impl SessionFactory for PanicAfterHelloFactory {
-        fn connect(&self, _port: &str, _baud: u32) -> Result<Box<dyn DeviceSession>> {
-            Ok(Box::new(PanicAfterHelloSession {
-                sent_hello: false,
-                crashed: self.crashed.clone(),
-            }))
-        }
-    }
-
-    struct PanicAfterHelloSession {
-        sent_hello: bool,
-        crashed: Arc<AtomicBool>,
-    }
-
-    impl DeviceSession for PanicAfterHelloSession {
-        fn read_frame(&mut self, _timeout: Duration) -> Result<Option<WireFrame>> {
-            if !self.sent_hello {
-                self.sent_hello = true;
-                return Ok(Some(WireFrame::Hello {
-                    protocol_version: 1,
-                    device_id: "esp32-dashboard".into(),
-                    product: "waveshare".into(),
-                    capabilities: vec!["claude.update".into()],
-                }));
-            }
-
-            self.crashed.store(true, AtomicOrdering::SeqCst);
-            panic!("simulated device worker crash");
-        }
-
-        fn write_frame(&mut self, _frame: &WireFrame) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn approval_request_ids(writes: &[WireFrame]) -> Vec<String> {
+    /// The `pending` value of every claude.update frame written to the device, as
+    /// `kind:type` (or `none`), in order.
+    fn pending_updates(writes: &[WireFrame]) -> Vec<String> {
         writes
             .iter()
             .filter_map(|frame| match frame {
                 WireFrame::Event {
                     method,
                     payload,
-                } if method == "claude.approval.request" => {
-                    payload["id"].as_str().map(ToOwned::to_owned)
-                }
+                } if method == "claude.update" => Some(match payload["pending"].as_object() {
+                    Some(pending) => format!(
+                        "{}:{}",
+                        pending["kind"].as_str().unwrap_or_default(),
+                        pending["type"].as_str().unwrap_or_default()
+                    ),
+                    None => "none".to_string(),
+                }),
                 _ => None,
             })
             .collect()
-    }
-
-    fn has_approval_dismiss(writes: &[WireFrame], id: &str) -> bool {
-        writes.iter().any(|frame| {
-            matches!(
-                frame,
-                WireFrame::Event { method, payload }
-                    if method == "claude.approval.dismiss"
-                        && payload["id"] == id
-            )
-        })
-    }
-
-    fn prompt_request_ids(writes: &[WireFrame]) -> Vec<String> {
-        writes
-            .iter()
-            .filter_map(|frame| match frame {
-                WireFrame::Event {
-                    method,
-                    payload,
-                } if method == "claude.prompt.request" => {
-                    payload["id"].as_str().map(ToOwned::to_owned)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn has_prompt_dismiss(writes: &[WireFrame], id: &str) -> bool {
-        writes.iter().any(|frame| {
-            matches!(
-                frame,
-                WireFrame::Event { method, payload }
-                    if method == "claude.prompt.dismiss"
-                        && payload["id"] == id
-            )
-        })
     }
 
     fn waiting_prompt_event(
@@ -1195,10 +1071,9 @@ mod tests {
         }
     }
 
-    fn sample_approval(id: &str, transport_id: &str, tool_use_id: &str) -> PendingInteraction {
+    fn sample_approval(id: &str, tool_use_id: &str) -> PendingInteraction {
         PendingInteraction {
             id: id.into(),
-            transport_id: transport_id.into(),
             session_id: "sess-1".into(),
             tool_use_id: Some(tool_use_id.into()),
             interaction: Interaction::Approval {
@@ -1413,16 +1288,14 @@ mod tests {
             .await?
             .error_for_status()?;
 
-        approval_state.sync_device_pending().await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
 
+        // sess-1's approval showed first, sess-2's superseded it, and the follow-up
+        // event from sess-1 leaves sess-2's on the device.
         let writes = writes.lock().expect("writes mutex poisoned");
-        let request_ids = approval_request_ids(&writes);
-        assert_eq!(
-            request_ids,
-            vec!["approval-sess-1-tool-1".to_string(), "approval-sess-2-tool-2".to_string()]
-        );
-        assert!(has_approval_dismiss(&writes, "approval-sess-1-tool-1"));
+        let pending = pending_updates(&writes);
+        assert!(pending.contains(&"approval:Bash command".to_string()), "{pending:?}");
+        assert_eq!(pending.last().map(String::as_str), Some("approval:File edit"), "{pending:?}");
 
         server.abort();
         Ok(())
@@ -1485,12 +1358,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
-        // The waiting prompt is forwarded to the read-only device overlay as a
-        // claude.prompt.request, then cleared by a claude.prompt.dismiss when the
+        // The waiting prompt rides the snapshot to the device, then is gone once the
         // follow-up PostToolUse event resolves it.
-        let prompt_ids = prompt_request_ids(&writes);
-        assert_eq!(prompt_ids.len(), 1);
-        assert!(has_prompt_dismiss(&writes, &prompt_ids[0]));
+        let pending = pending_updates(&writes);
+        assert!(pending.contains(&"prompt:Question".to_string()), "{pending:?}");
+        assert_eq!(pending.last().map(String::as_str), Some("none"), "{pending:?}");
 
         Ok(())
     }
@@ -1541,98 +1413,24 @@ mod tests {
             .await;
         tokio::time::sleep(Duration::from_millis(350)).await;
 
-        // A tool permission then arrives. The approval preempts the prompt overlay —
-        // the prompt is dismissed and the approval is shown, with no double display.
+        // A tool permission then arrives and preempts the prompt.
         app_state
             .state
             .lock()
             .await
             .pending
-            .submit(sample_approval("approve-1", "approval-1", "tool-2"), Instant::now());
-        app_state.sync_device_pending().await;
+            .submit(sample_approval("approve-1", "tool-2"), Instant::now());
+        app_state.refresh_snapshot().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
-        let prompt_ids = prompt_request_ids(&writes);
-        assert_eq!(prompt_ids.len(), 1, "the prompt overlay was shown exactly once");
-        assert!(
-            has_prompt_dismiss(&writes, &prompt_ids[0]),
-            "the prompt overlay is dismissed when the approval preempts it"
-        );
+        let pending = pending_updates(&writes);
+        assert!(pending.contains(&"prompt:Question".to_string()), "{pending:?}");
         assert_eq!(
-            approval_request_ids(&writes).len(),
-            1,
-            "the approval overlay is shown after preempting the prompt"
+            pending.last().map(String::as_str),
+            Some("approval:Bash command"),
+            "{pending:?}"
         );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn failed_device_forward_does_not_immediately_requeue_claim() -> Result<()> {
-        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
-        let state_dir = std::env::temp_dir().join(format!("esp32dash-approval-fail-{unique}"));
-        fs::create_dir_all(&state_dir)?;
-        let crashed = Arc::new(AtomicBool::new(false));
-
-        let config = Config {
-            admin_addr: "127.0.0.1:0".parse()?,
-            admin_addr_raw: "127.0.0.1:0".into(),
-            state_path: state_dir.join("state.json"),
-            device: DeviceConfig {
-                preferred_port: Some("/dev/fake".into()),
-                baud: 115_200,
-            },
-            emotion: EmotionConfig::default(),
-            approval: ApprovalConfig::default(),
-        };
-
-        let app_state = build_app_state(
-            config,
-            Arc::new(PanicAfterHelloFactory {
-                crashed: crashed.clone(),
-            }),
-        );
-        let approval_state = Arc::new(app_state.clone());
-
-        for _ in 0..20 {
-            if approval_state.serial_status().connected {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(approval_state.serial_status().connected);
-
-        for _ in 0..20 {
-            if crashed.load(AtomicOrdering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(crashed.load(AtomicOrdering::SeqCst));
-        assert!(approval_state.serial_status().connected);
-
-        approval_state
-            .state
-            .lock()
-            .await
-            .pending
-            .submit(sample_approval("approve-1", "approval-1", "tool-1"), Instant::now());
-
-        approval_state.sync_device_pending().await;
-        let shown = approval_state.state.lock().await.device_shown.clone();
-        assert_eq!(shown.map(|item| item.id).as_deref(), Some("approve-1"));
-
-        // Claimed for the device even though the worker is gone: a repeat sync is a no-op.
-        approval_state.sync_device_pending().await;
-        let shown = approval_state.state.lock().await.device_shown.clone();
-        assert_eq!(shown.map(|item| item.id).as_deref(), Some("approve-1"));
-
-        // The queue still holds it, so it is claimed again after a disconnect.
-        approval_state.state.lock().await.device_shown = None;
-        approval_state.sync_device_pending().await;
-        let shown = approval_state.state.lock().await.device_shown.clone();
-        assert_eq!(shown.map(|item| item.transport_id).as_deref(), Some("approval-1"));
 
         Ok(())
     }

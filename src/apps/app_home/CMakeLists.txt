@@ -1,7 +1,6 @@
 idf_component_register(
     SRCS
         "src/app_home.c"
-        "src/home_approval.c"
         "src/home_presenter.c"
         "src/home_runtime.c"
         "src/home_screensaver.c"
@@ -29,8 +28,6 @@ idf_component_register(
     REQUIRES
         bsp_board
         core_app_manager
-        core_system_state
-        device_link
         lvgl__lvgl
         service_home
         ui_theme

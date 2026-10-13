@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::{
     config::ApprovalConfig,
-    model::{LocalHookEvent, WaitingPrompt, WaitingPromptKind},
+    model::{LocalHookEvent, PendingDisplay, WaitingPrompt, WaitingPromptKind},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +22,6 @@ pub enum Interaction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingInteraction {
     pub id: String,
-    pub transport_id: String,
     pub session_id: String,
     pub tool_use_id: Option<String>,
     pub interaction: Interaction,
@@ -31,6 +30,18 @@ pub struct PendingInteraction {
 impl PendingInteraction {
     pub fn is_approval(&self) -> bool {
         matches!(self.interaction, Interaction::Approval { .. })
+    }
+
+    pub fn display(&self) -> PendingDisplay {
+        PendingDisplay {
+            kind: if self.is_approval() {
+                "approval"
+            } else {
+                "prompt"
+            }
+            .into(),
+            coarse_type: self.coarse_type().into(),
+        }
     }
 
     /// Coarse type shown on the read-only device. Never tool arguments, question or
@@ -125,11 +136,6 @@ impl PendingQueue {
         items().find(|item| item.is_approval()).or_else(|| items().next())
     }
 
-    pub fn has_prompt(&mut self, now: Instant) -> bool {
-        self.drop_expired(now);
-        self.entries.iter().any(|entry| !entry.item.is_approval())
-    }
-
     fn drop_expired(&mut self, now: Instant) {
         let timeouts = self.timeouts;
         self.entries.retain(|entry| {
@@ -201,7 +207,6 @@ mod tests {
     ) -> PendingInteraction {
         PendingInteraction {
             id: id.into(),
-            transport_id: id.into(),
             session_id: session_id.into(),
             tool_use_id: Some(tool_use_id.into()),
             interaction: Interaction::Approval {
@@ -230,7 +235,6 @@ mod tests {
     ) -> PendingInteraction {
         PendingInteraction {
             id: id.into(),
-            transport_id: id.into(),
             session_id: session_id.into(),
             tool_use_id: tool_use_id.map(str::to_string),
             interaction: Interaction::Prompt(waiting_prompt(kind)),
@@ -306,7 +310,6 @@ mod tests {
         queue.submit(approval("approve-1", "sess-2", "tool-1", "Bash"), now);
         queue.submit(prompt("prompt-2", "sess-3", None, WaitingPromptKind::Elicitation), now);
         assert_eq!(current_id(&mut queue, now).as_deref(), Some("approve-1"));
-        assert!(queue.has_prompt(now));
 
         queue.clear_for_event(&event("PostToolUse", "sess-2", None, Some("tool-1")));
         assert_eq!(current_id(&mut queue, now).as_deref(), Some("prompt-2"));
@@ -351,7 +354,7 @@ mod tests {
             Some("tool-1"),
         ));
         assert_eq!(cleared, vec!["prompt-1".to_string()]);
-        assert!(!queue.has_prompt(now));
+        assert!(queue.current(now).is_none());
     }
 
     #[test]
@@ -368,7 +371,7 @@ mod tests {
             ..event("PreToolUse", "sess-1", Some("AskUserQuestion"), Some("tool-1"))
         });
         assert!(cleared.is_empty());
-        assert!(queue.has_prompt(now));
+        assert!(queue.current(now).is_some());
     }
 
     #[test]
@@ -392,7 +395,6 @@ mod tests {
         assert_eq!(current_id(&mut queue, after_elicitation).as_deref(), Some("ask"));
         let after_question = now + limits.question + Duration::from_secs(1);
         assert!(queue.current(after_question).is_none());
-        assert!(!queue.has_prompt(after_question));
     }
 
     #[test]

@@ -85,7 +85,7 @@ static void enter_screensaver(home_runtime_t *runtime, const home_present_model_
 
     /* While a request is pending, keep showing the Home waiting alert (sprite +
      * bubble + flashing background) rather than letting the screensaver cover it. */
-    if (home_approval_is_visible(&runtime->approval)) {
+    if (model != NULL && model->alert_flash) {
         return;
     }
 
@@ -242,7 +242,6 @@ lv_obj_t *home_runtime_create_root(home_runtime_t *runtime, lv_obj_t *parent)
     home_view_create(&runtime->view, parent);
     home_screensaver_create(&runtime->screensaver, runtime->view.root, screensaver_touch_exit_cb,
                             runtime);
-    home_approval_create(&runtime->approval, runtime->view.root);
     if (runtime->view.settings_item != NULL) {
         lv_obj_add_event_cb(runtime->view.settings_item, settings_btn_cb, LV_EVENT_CLICKED,
                             runtime);
@@ -253,7 +252,6 @@ lv_obj_t *home_runtime_create_root(home_runtime_t *runtime, lv_obj_t *parent)
     home_screensaver_poke_activity(&runtime->screensaver);
 
     build_model(&snapshot, &model);
-    runtime->was_connected = snapshot.claude_connected;
     runtime->last_snapshot_epoch_s = 0;
     home_view_apply(&runtime->view, &model);
     return runtime->view.root;
@@ -280,7 +278,6 @@ void home_runtime_resume(home_runtime_t *runtime)
     }
 
     build_model(&snapshot, &model);
-    runtime->was_connected = snapshot.claude_connected;
     runtime->last_snapshot_epoch_s = 0;
     home_view_apply(&runtime->view, &model);
 }
@@ -329,9 +326,6 @@ void home_runtime_handle_event(home_runtime_t *runtime, const app_event_t *event
         build_model(&snapshot, &model);
         home_screensaver_poke_activity(&runtime->screensaver);
         exit_screensaver(runtime);
-        home_approval_on_connection_changed(&runtime->approval, runtime->was_connected,
-                                            snapshot.claude_connected);
-        runtime->was_connected = snapshot.claude_connected;
         if (snapshot.claude_unread) {
             claude_snapshot_t claude_snapshot;
 
@@ -341,18 +335,6 @@ void home_runtime_handle_event(home_runtime_t *runtime, const app_event_t *event
             stop_unread_timer(runtime);
         }
         home_view_apply(&runtime->view, &model);
-        break;
-    case APP_EVENT_PERMISSION_REQUEST:
-    case APP_EVENT_PROMPT_REQUEST:
-        home_screensaver_poke_activity(&runtime->screensaver);
-        exit_screensaver(runtime);
-        home_approval_show_pending(&runtime->approval);
-        apply_current_snapshot(runtime); /* surface the waiting sprite + bubble now */
-        break;
-    case APP_EVENT_PERMISSION_DISMISS:
-    case APP_EVENT_PROMPT_DISMISS:
-        home_approval_hide(&runtime->approval);
-        apply_current_snapshot(runtime); /* clear the bubble now that nothing pends */
         break;
     default:
         break;
