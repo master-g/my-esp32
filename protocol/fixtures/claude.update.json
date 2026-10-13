@@ -1,0 +1,23 @@
+{
+  "type": "event",
+  "method": "claude.update",
+  "payload": {
+    "seq": 7,
+    "source": "claude_code",
+    "session_id": "sess-1",
+    "event": "PermissionRequest",
+    "status": "waiting_for_input",
+    "emotion": "happy",
+    "title": "Awaiting approval",
+    "workspace": "project-foo",
+    "detail": "Bash",
+    "permission_mode": "default",
+    "ts": 1743957128,
+    "unread": true,
+    "attention": "high",
+    "pending": {
+      "kind": "approval",
+      "type": "Bash command"
+    }
+  }
+}

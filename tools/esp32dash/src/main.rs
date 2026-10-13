@@ -32,7 +32,7 @@ use crate::{
     agent::Config,
     device::{
         UnixSerialFactory, capture_screenshot_direct, discover_devices, open_direct_session,
-        request_direct, request_direct_with_timeout, send_event_direct, send_protocol_event_direct,
+        request_direct, request_direct_with_timeout, send_event_direct,
     },
     model::{
         AdminErrorResponse, AdminRpcResponse, Attention, DeviceScreenshot, LocalHookEvent,
@@ -324,22 +324,6 @@ enum ChibiCommand {
         #[arg(long, help = "Serial port (default: autodiscover or running agent)")]
         port: Option<String>,
     },
-    #[command(
-        about = "Send a test prompt request to the device via serial",
-        long_about = "Sends claude.prompt.request directly to the device (non-blocking). Use --clear to dismiss instead."
-    )]
-    Prompt {
-        #[arg(long, default_value = "Execute,Cancel", help = "Comma-separated option labels")]
-        options: String,
-        #[arg(long, default_value = "Test prompt question?", help = "Question text")]
-        question: String,
-        #[arg(long, default_value = "Test Prompt", help = "Title text")]
-        title: String,
-        #[arg(long, help = "Dismiss the prompt instead of sending a request")]
-        clear: bool,
-        #[arg(long, help = "Serial port (default: autodiscover)")]
-        port: Option<String>,
-    },
 }
 
 #[tokio::main]
@@ -581,48 +565,6 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 (false, _) => println!("screensaver exited"),
             }
             Ok(())
-        }
-        ChibiCommand::Prompt {
-            options,
-            question,
-            title,
-            clear,
-            port,
-        } => {
-            if clear {
-                send_protocol_event_direct(
-                    Arc::new(UnixSerialFactory),
-                    port.as_deref(),
-                    compat::serial_baud(),
-                    "claude.prompt.dismiss",
-                    json!({
-                        "id": "chibi-prompt-test",
-                    }),
-                )?;
-                println!("sent prompt dismiss");
-                Ok(())
-            } else {
-                let option_labels: Vec<String> =
-                    options.split(',').map(|s| s.trim().to_string()).collect();
-                let option_count = option_labels.len();
-                println!("sending prompt request: title=\"{title}\" question=\"{question}\"");
-                send_protocol_event_direct(
-                    Arc::new(UnixSerialFactory),
-                    port.as_deref(),
-                    compat::serial_baud(),
-                    "claude.prompt.request",
-                    json!({
-                        "id": "chibi-prompt-test",
-                        "title": title,
-                        "question": question,
-                        "options_text": options,
-                        "option_count": option_count,
-                        "option_labels": option_labels,
-                    }),
-                )?;
-                println!("sent prompt request (non-blocking)");
-                Ok(())
-            }
         }
     }
 }

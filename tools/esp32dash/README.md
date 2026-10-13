@@ -129,7 +129,7 @@ Protocol frames share the same serial line as normal ESP-IDF logs. Only lines st
 Device hello:
 
 ```json
-@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.approval.request","claude.approval.dismiss","claude.approval.resolved","claude.prompt.request","claude.prompt.dismiss","screen.capture.start"]}
+@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.heartbeat","protocol.error","home.screensaver","app.switch","screen.capture.start","debug.market_snapshot"]}
 ```
 
 Host request:

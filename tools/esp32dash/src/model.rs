@@ -379,3 +379,77 @@ impl WireFrame {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    const HELLO: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../protocol/fixtures/hello.json"));
+    const CLAUDE_UPDATE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/fixtures/claude.update.json"
+    ));
+
+    /// Frames the device sends to the host; they are not capabilities.
+    const DEVICE_TO_HOST: &[&str] =
+        &["protocol.error", "screen.capture.chunk", "screen.capture.done", "screen.capture.error"];
+
+    #[test]
+    fn claude_update_fixture_is_exactly_what_the_host_serialises() {
+        let fixture: Value = serde_json::from_str(CLAUDE_UPDATE).unwrap();
+        let WireFrame::Event {
+            method,
+            payload,
+        } = serde_json::from_value(fixture.clone()).unwrap()
+        else {
+            panic!("fixture is not an event frame");
+        };
+        assert_eq!(method, "claude.update");
+
+        let snapshot: Snapshot = serde_json::from_value(payload).unwrap();
+        assert!(snapshot.pending.is_some());
+        let frame = WireFrame::event("claude.update", serde_json::to_value(&snapshot).unwrap());
+        assert_eq!(serde_json::to_value(&frame).unwrap(), fixture);
+    }
+
+    // ponytail: scans the host sources for method-shaped string literals instead of
+    // keeping a second hand-written method list; switch to a shared const table if
+    // methods ever stop being literals at their call sites.
+    #[test]
+    fn every_method_the_host_names_is_declared_by_the_device() {
+        let WireFrame::Hello {
+            capabilities,
+            ..
+        } = serde_json::from_str(HELLO).unwrap()
+        else {
+            panic!("fixture is not a hello frame");
+        };
+        let declared: BTreeSet<&str> = capabilities.iter().map(String::as_str).collect();
+
+        let prefixes =
+            ["claude.", "device.", "config.", "wifi.", "home.", "app.", "screen.", "debug."];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut undeclared = BTreeSet::new();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Fake devices in tests may declare anything; only non-test code counts.
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            for literal in code.split('"').skip(1).step_by(2) {
+                let method_shaped = prefixes.iter().any(|prefix| literal.starts_with(prefix))
+                    && literal.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c == '_')
+                    && !literal.ends_with(".toml");
+                if method_shaped
+                    && !declared.contains(literal)
+                    && !DEVICE_TO_HOST.contains(&literal)
+                {
+                    undeclared.insert(format!("{literal} ({})", path.display()));
+                }
+            }
+        }
+        assert!(undeclared.is_empty(), "host names methods the device lacks: {undeclared:?}");
+    }
+}
