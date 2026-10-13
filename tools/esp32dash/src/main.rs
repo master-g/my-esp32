@@ -1,5 +1,4 @@
 mod agent;
-mod approvals;
 mod compat;
 mod config;
 mod config_ui;
@@ -10,7 +9,7 @@ mod hooks;
 mod launchd;
 mod model;
 mod normalizer;
-mod prompts;
+mod pending;
 mod text_sanitize;
 
 use std::{

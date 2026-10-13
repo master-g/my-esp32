@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -22,7 +22,6 @@ use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{debug, info, warn};
 
 use crate::{
-    approvals::{ApprovalRequest, ApprovalStore, DeviceApproval, DismissedApproval},
     compat,
     config::{AppConfig, ApprovalConfig, EmotionConfig, default_state_dir},
     device::{DeviceConfig, DeviceManager, SessionFactory, UnixSerialFactory},
@@ -33,10 +32,10 @@ use crate::{
         PersistedSessionState, PersistedState, RpcRequest, RunStatus, Snapshot,
     },
     normalizer::{apply_notification_status, materially_equal, normalize},
-    prompts::{DevicePrompt, DismissedPrompt, PromptStore},
+    pending::{Interaction, PendingInteraction, PendingQueue, PendingTimeouts},
     text_sanitize::{
-        sanitize_approval_summary, sanitize_permission_mode, sanitize_snapshot_detail,
-        sanitize_snapshot_title, sanitize_tool_name, sanitize_transport_id,
+        sanitize_snapshot_detail, sanitize_snapshot_title, sanitize_tool_name,
+        sanitize_transport_id,
     },
 };
 
@@ -119,10 +118,19 @@ struct AgentState {
     emotions: BTreeMap<String, SessionEmotionEntry>,
     last_heartbeat_ts: u64,
     has_pending_prompt: bool,
+    pending: PendingQueue,
+    /// The interaction last claimed for the device's single slot, so the next sync
+    /// knows what to dismiss. A send only fails once the device worker is gone, so
+    /// a failed send keeps its claim instead of retrying on every sync.
+    device_shown: Option<PendingInteraction>,
 }
 
 impl AgentState {
-    fn new(initial: Snapshot, sessions: BTreeMap<String, PersistedSessionState>) -> Self {
+    fn new(
+        initial: Snapshot,
+        sessions: BTreeMap<String, PersistedSessionState>,
+        timeouts: PendingTimeouts,
+    ) -> Self {
         let seq = initial.seq;
         Self {
             seq,
@@ -133,6 +141,8 @@ impl AgentState {
             emotions: BTreeMap::new(),
             last_heartbeat_ts: 0,
             has_pending_prompt: false,
+            pending: PendingQueue::new(timeouts),
+            device_shown: None,
         }
     }
 }
@@ -145,8 +155,6 @@ pub struct AppState {
     emotion_generation: Arc<AtomicU64>,
     device_manager: DeviceManager,
     emotion_analyzer: Option<EmotionAnalyzer>,
-    pub approvals: ApprovalStore,
-    pub prompts: PromptStore,
 }
 
 pub async fn run(config: Config) -> Result<()> {
@@ -195,8 +203,7 @@ pub async fn run(config: Config) -> Result<()> {
 
 impl AppState {
     pub async fn ingest(self: &Arc<Self>, event: LocalHookEvent) {
-        self.maybe_dismiss_prompts_for_event(&event).await;
-        self.maybe_dismiss_approvals_for_event(&event).await;
+        self.clear_pending_for_event(&event).await;
         match event.hook_event_name.as_str() {
             "PreToolUse" => self.handle_pre_tool(event).await,
             "PostToolUse" | "PostToolUseFailure" => self.handle_post_tool(event).await,
@@ -205,7 +212,7 @@ impl AppState {
                 self.process_event(event).await;
             }
         }
-        self.sync_device_approvals().await;
+        self.sync_device_pending().await;
     }
 
     async fn handle_pre_tool(self: &Arc<Self>, event: LocalHookEvent) {
@@ -265,7 +272,7 @@ impl AppState {
 
         if let Some(event) = pending {
             self.process_event(event).await;
-            self.sync_device_approvals().await;
+            self.sync_device_pending().await;
         }
     }
 
@@ -277,66 +284,22 @@ impl AppState {
 
         if let Some(event) = pending {
             self.process_event(event).await;
-            self.sync_device_approvals().await;
+            self.sync_device_pending().await;
         }
     }
 
-    async fn maybe_dismiss_approvals_for_event(self: &Arc<Self>, event: &LocalHookEvent) {
-        if !event_clears_pending_approval(event) {
+    async fn clear_pending_for_event(self: &Arc<Self>, event: &LocalHookEvent) {
+        let cleared = self.state.lock().await.pending.clear_for_event(event);
+        if cleared.is_empty() {
             return;
         }
-
-        let dismissed = self.approvals.dismiss_matching(event).await;
-        for approval in dismissed {
-            info!(
-                approval_id = approval.id,
-                session_id = event.session_id,
-                hook_event = event.hook_event_name,
-                "host cleared pending approval"
-            );
-            if !approval.was_visible_on_device {
-                continue;
-            }
-
-            if let Err(err) = self.send_device_dismiss(&approval) {
-                warn!(
-                    approval_id = approval.id,
-                    session_id = event.session_id,
-                    hook_event = event.hook_event_name,
-                    error = %err,
-                    "failed to push approval dismiss event to device"
-                );
-            }
-        }
-    }
-
-    async fn maybe_dismiss_prompts_for_event(self: &Arc<Self>, event: &LocalHookEvent) {
-        if !event_clears_pending_prompt(event) {
-            return;
-        }
-
-        let dismissed = self.prompts.dismiss_matching(event).await;
-        for prompt in dismissed {
-            info!(
-                prompt_id = prompt.id,
-                session_id = event.session_id,
-                hook_event = event.hook_event_name,
-                "host cleared pending prompt"
-            );
-            if !prompt.was_visible_on_device {
-                continue;
-            }
-
-            if let Err(err) = self.send_device_prompt_dismiss(&prompt) {
-                warn!(
-                    prompt_id = prompt.id,
-                    session_id = event.session_id,
-                    hook_event = event.hook_event_name,
-                    error = %err,
-                    "failed to push prompt dismiss event to device"
-                );
-            }
-        }
+        info!(
+            ids = ?cleared,
+            session_id = event.session_id,
+            hook_event = event.hook_event_name,
+            "host cleared pending interactions"
+        );
+        self.sync_device_pending().await;
     }
 
     async fn process_event(self: &Arc<Self>, event: LocalHookEvent) {
@@ -366,16 +329,16 @@ impl AppState {
         };
 
         let id = build_prompt_id(event, &prompt);
-        let transport_id = sanitize_transport_id(&id);
-        self.prompts
-            .submit(
-                id.clone(),
-                transport_id,
-                prompt,
-                event.session_id.clone(),
-                event.tool_use_id.clone(),
-            )
-            .await;
+        self.state.lock().await.pending.submit(
+            PendingInteraction {
+                transport_id: sanitize_transport_id(&id),
+                id: id.clone(),
+                session_id: event.session_id.clone(),
+                tool_use_id: event.tool_use_id.clone(),
+                interaction: Interaction::Prompt(prompt),
+            },
+            Instant::now(),
+        );
         info!(prompt_id = id, session_id = event.session_id, "queued waiting prompt");
     }
 
@@ -421,7 +384,7 @@ impl AppState {
             }
         }
 
-        self.sync_device_approvals().await;
+        self.sync_device_pending().await;
     }
 
     async fn maybe_analyze_emotion_for_event(self: &Arc<Self>, event: &LocalHookEvent) {
@@ -555,134 +518,69 @@ impl AppState {
         self.device_manager.status()
     }
 
-    async fn sync_device_approvals(self: &Arc<Self>) {
-        let has_pending_prompt = self.prompts.has_device_backlog().await;
-        {
-            let mut guard = self.state.lock().await;
-            if guard.has_pending_prompt != has_pending_prompt {
-                guard.has_pending_prompt = has_pending_prompt;
-            }
-        }
+    /// Bring the device's single slot in line with the queue. Until the firmware
+    /// reads the pending interaction from the snapshot, this is expressed as
+    /// request/dismiss frames diffed against what the device last showed.
+    async fn sync_device_pending(self: &Arc<Self>) {
+        let connected = self.serial_status().connected;
+        let mut guard = self.state.lock().await;
+        let now = Instant::now();
+        guard.has_pending_prompt = guard.pending.has_prompt(now);
 
-        if !self.serial_status().connected {
-            self.approvals.note_device_disconnected().await;
-            self.prompts.note_device_disconnected().await;
+        if !connected {
+            // The device forgets its overlay on disconnect; show it again after.
+            guard.device_shown = None;
             return;
         }
 
-        // Host-side timeout: the device no longer self-times-out via the removed
-        // decision RPC, so clear any overlay whose request expired before a dismiss
-        // arrived. (The device keeps a coarser self-timeout of its own; see U5.)
-        if let Some(expired) = self.approvals.take_expired_visible_for_device().await {
-            info!(
-                approval_id = expired.id,
-                "approval timed out before dismiss, clearing device overlay"
-            );
-            if let Err(err) = self.send_device_dismiss(&expired) {
-                warn!(approval_id = expired.id, error = %err, "failed to clear timed-out approval");
-                return;
-            }
-        }
-        if let Some(expired) = self.prompts.take_expired_visible_for_device().await {
-            info!(
-                prompt_id = expired.id,
-                "prompt timed out before dismiss, clearing device overlay"
-            );
-            if let Err(err) = self.send_device_prompt_dismiss(&expired) {
-                warn!(prompt_id = expired.id, error = %err, "failed to clear timed-out prompt");
-                return;
-            }
-        }
-
-        // Cross-store priority: a pending approval preempts the prompt overlay.
-        if self.approvals.has_device_backlog().await {
-            if let Some(prompt) = self.prompts.requeue_visible_for_device().await {
-                if let Err(err) = self.send_device_prompt_dismiss(&prompt) {
-                    warn!(
-                        prompt_id = prompt.id,
-                        error = %err,
-                        "failed to dismiss prompt while approval preempted device overlay"
-                    );
-                    return;
-                }
-            }
-
-            let step = self.approvals.next_device_overlay().await;
-            if let Some(dismissed) = step.dismiss {
-                if let Err(err) = self.send_device_dismiss(&dismissed) {
-                    warn!(approval_id = dismissed.id, error = %err, "failed to dismiss superseded approval");
-                    return;
-                }
-            }
-            if let Some(approval) = step.show {
-                if let Err(err) = self.send_device_approval_request(&approval) {
-                    warn!(approval_id = approval.id, error = %err, "failed to forward approval to device");
-                    return;
-                }
-                info!(
-                    approval_id = approval.id,
-                    tool = approval.tool_name,
-                    "forwarded approval to device"
-                );
-            }
+        let current = guard.pending.current(now).cloned();
+        if guard.device_shown.as_ref().map(|shown| &shown.id) == current.as_ref().map(|c| &c.id) {
             return;
         }
 
-        // No approval backlog: drive the prompt overlay (Elicitation / AskUserQuestion).
-        // This is the host-side emit that the prompt paths previously lacked, so those
-        // interactions reach the read-only overlay instead of only sprite emotion.
-        let step = self.prompts.next_device_overlay().await;
-        if let Some(dismissed) = step.dismiss {
-            if let Err(err) = self.send_device_prompt_dismiss(&dismissed) {
-                warn!(prompt_id = dismissed.id, error = %err, "failed to dismiss superseded prompt");
+        if let Some(shown) = guard.device_shown.take() {
+            if let Err(err) = self.send_device_dismiss(&shown) {
+                warn!(id = shown.id, error = %err, "failed to dismiss interaction on device");
                 return;
             }
         }
-        if let Some(prompt) = step.show {
-            if let Err(err) = self.send_device_prompt_request(&prompt) {
-                warn!(prompt_id = prompt.id, error = %err, "failed to forward prompt to device");
-                return;
+        if let Some(next) = current {
+            match self.send_device_request(&next) {
+                Ok(()) => info!(
+                    id = next.id,
+                    coarse_type = next.coarse_type(),
+                    "forwarded interaction to device"
+                ),
+                Err(err) => {
+                    warn!(id = next.id, error = %err, "failed to forward interaction to device")
+                }
             }
-            info!(prompt_id = prompt.id, "forwarded prompt to device");
+            guard.device_shown = Some(next);
         }
     }
 
-    fn send_device_approval_request(&self, approval: &DeviceApproval) -> Result<()> {
-        // Read-only device: send only a coarse interaction type, never the tool name's
-        // arguments or the input summary (R2 — no command/argument content crosses).
+    fn send_device_request(&self, item: &PendingInteraction) -> Result<()> {
+        // Read-only device: only the coarse type crosses, never tool arguments,
+        // questions or option labels (R2).
+        let method = if item.is_approval() {
+            "claude.approval.request"
+        } else {
+            "claude.prompt.request"
+        };
         self.device_manager.send_protocol_event(
-            "claude.approval.request",
-            serde_json::json!({
-                "id": approval.transport_id,
-                "type": coarse_tool_type(&approval.tool_name),
-            }),
+            method,
+            serde_json::json!({ "id": item.transport_id, "type": item.coarse_type() }),
         )
     }
 
-    fn send_device_dismiss(&self, approval: &DismissedApproval) -> Result<()> {
-        self.device_manager.send_protocol_event(
-            "claude.approval.dismiss",
-            serde_json::json!({ "id": approval.transport_id }),
-        )
-    }
-
-    fn send_device_prompt_request(&self, prompt: &DevicePrompt) -> Result<()> {
-        // Read-only device: send only a coarse interaction type, never the question,
-        // option labels, or any other prompt content (R2).
-        self.device_manager.send_protocol_event(
-            "claude.prompt.request",
-            serde_json::json!({
-                "id": prompt.transport_id,
-                "type": coarse_prompt_type(prompt.prompt.kind),
-            }),
-        )
-    }
-
-    fn send_device_prompt_dismiss(&self, prompt: &DismissedPrompt) -> Result<()> {
-        self.device_manager.send_protocol_event(
-            "claude.prompt.dismiss",
-            serde_json::json!({ "id": prompt.transport_id }),
-        )
+    fn send_device_dismiss(&self, item: &PendingInteraction) -> Result<()> {
+        let method = if item.is_approval() {
+            "claude.approval.dismiss"
+        } else {
+            "claude.prompt.dismiss"
+        };
+        self.device_manager
+            .send_protocol_event(method, serde_json::json!({ "id": item.transport_id }))
     }
 }
 
@@ -898,16 +796,6 @@ fn process_exists(pid: u32) -> bool {
     matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
 }
 
-fn event_clears_pending_approval(event: &LocalHookEvent) -> bool {
-    !event.session_id.is_empty()
-        && event.hook_event_name != "PermissionRequest"
-        && event.hook_event_name != "Notification"
-}
-
-fn event_clears_pending_prompt(event: &LocalHookEvent) -> bool {
-    !event.session_id.is_empty() && event.hook_event_name != "Notification"
-}
-
 fn build_prompt_id(event: &LocalHookEvent, prompt: &crate::model::WaitingPrompt) -> String {
     let session_key = session_key_for(event);
     match prompt.kind {
@@ -922,30 +810,6 @@ fn build_prompt_id(event: &LocalHookEvent, prompt: &crate::model::WaitingPrompt)
         crate::model::WaitingPromptKind::Elicitation => {
             format!("{}-{session_key}-{}-{}", prompt.kind.as_str(), prompt.title, prompt.question)
         }
-    }
-}
-
-/// Map a tool name to a coarse interaction type for the read-only device. Never
-/// returns tool arguments or input content (R2); unknown tools collapse to a generic
-/// label so arbitrary (e.g. MCP) tool names don't leak to the always-on screen.
-fn coarse_tool_type(tool_name: &str) -> &'static str {
-    match tool_name {
-        "Bash" => "Bash command",
-        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => "File edit",
-        "Read" | "NotebookRead" => "File read",
-        "Glob" | "Grep" | "LS" => "File search",
-        "WebFetch" | "WebSearch" => "Web request",
-        "Task" => "Subagent task",
-        _ => "Tool request",
-    }
-}
-
-/// Map a prompt kind to a coarse interaction type. No question or option text crosses
-/// to the device (R2).
-fn coarse_prompt_type(kind: crate::model::WaitingPromptKind) -> &'static str {
-    match kind {
-        crate::model::WaitingPromptKind::Elicitation => "Input request",
-        crate::model::WaitingPromptKind::AskUserQuestion => "Question",
     }
 }
 
@@ -993,23 +857,15 @@ async fn post_device_rpc(
 
 use serde::Deserialize;
 
+// The CLI still posts the full request; only what the queue needs is read.
 #[derive(Debug, Deserialize)]
 struct SubmitApprovalBody {
     id: String,
     tool_name: String,
-    tool_input_summary: String,
-    #[serde(default = "default_permission_mode")]
-    permission_mode: String,
     #[serde(default)]
     session_id: String,
     #[serde(default)]
     tool_use_id: Option<String>,
-    #[serde(default)]
-    permission_suggestions: Vec<serde_json::Value>,
-}
-
-fn default_permission_mode() -> String {
-    "default".into()
 }
 
 async fn post_approval(
@@ -1017,55 +873,26 @@ async fn post_approval(
     Json(body): Json<SubmitApprovalBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let tool_name = sanitize_tool_name(&body.tool_name).unwrap_or_else(|| "unknown".into());
-    let tool_input_summary = sanitize_approval_summary(&body.tool_input_summary);
-    let permission_mode = {
-        let mode = sanitize_permission_mode(&body.permission_mode);
-        if mode.is_empty() {
-            "default".into()
-        } else {
-            mode
-        }
-    };
-    let transport_id = sanitize_transport_id(&body.id);
-    let request = ApprovalRequest {
-        tool_name: tool_name.clone(),
-        tool_input_summary: tool_input_summary.clone(),
-        permission_mode,
-        session_id: body.session_id.trim().to_string(),
-        tool_use_id: body
-            .tool_use_id
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        permission_suggestions: body.permission_suggestions,
-    };
     let state = Arc::new(state);
-    let id = state.approvals.submit(body.id, transport_id, request.clone()).await;
-    info!(approval_id = id, tool = tool_name, "approval submitted");
-    state.sync_device_approvals().await;
+    info!(approval_id = body.id, tool = tool_name, "approval submitted");
+    state.state.lock().await.pending.submit(
+        PendingInteraction {
+            transport_id: sanitize_transport_id(&body.id),
+            id: body.id.clone(),
+            session_id: body.session_id.trim().to_string(),
+            tool_use_id: body
+                .tool_use_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            interaction: Interaction::Approval {
+                tool_name,
+            },
+        },
+        Instant::now(),
+    );
+    state.sync_device_pending().await;
 
-    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": id })))
-}
-
-async fn get_approval(
-    State(state): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.approvals.status(&id).await {
-        Some(status) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "ok": true,
-                "approval": status,
-            })),
-        ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "approval not found",
-            })),
-        ),
-    }
+    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": body.id })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1086,7 +913,6 @@ async fn post_prompt(
     State(state): State<AppState>,
     Json(body): Json<SubmitPromptBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let transport_id = sanitize_transport_id(&body.id);
     let prompt = crate::model::WaitingPrompt {
         kind: match body.kind.as_str() {
             "elicitation" => crate::model::WaitingPromptKind::Elicitation,
@@ -1096,42 +922,21 @@ async fn post_prompt(
         question: sanitize_snapshot_detail(&body.question),
         options: body.options.into_iter().take(4).collect(),
     };
-    let id = state
-        .prompts
-        .submit(
-            body.id,
-            transport_id,
-            prompt,
-            body.session_id.trim().to_string(),
-            body.tool_use_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
-        )
-        .await;
-    info!(prompt_id = id, "prompt submitted");
-    Arc::new(state).sync_device_approvals().await;
+    let state = Arc::new(state);
+    info!(prompt_id = body.id, "prompt submitted");
+    state.state.lock().await.pending.submit(
+        PendingInteraction {
+            transport_id: sanitize_transport_id(&body.id),
+            id: body.id.clone(),
+            session_id: body.session_id.trim().to_string(),
+            tool_use_id: body.tool_use_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+            interaction: Interaction::Prompt(prompt),
+        },
+        Instant::now(),
+    );
+    state.sync_device_pending().await;
 
-    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": id })))
-}
-
-async fn get_prompt(
-    State(state): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.prompts.status(&id).await {
-        Some(status) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "ok": true,
-                "prompt": status,
-            })),
-        ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "ok": false,
-                "error": "prompt not found",
-            })),
-        ),
-    }
+    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": body.id })))
 }
 
 fn load_state(path: &PathBuf) -> Option<PersistedState> {
@@ -1189,20 +994,17 @@ fn build_app_state(config: Config, factory: Arc<dyn SessionFactory>) -> AppState
         .map(|state| state.snapshot.clone())
         .unwrap_or_else(|| Snapshot::empty(now_epoch()));
     let initial_sessions = restored_sessions(persisted.as_ref(), &initial_snapshot);
-    let approvals = ApprovalStore::with_timeout(Duration::from_secs(config.approval.timeout_secs));
-    let prompts = PromptStore::new();
+    let timeouts = PendingTimeouts::from(&config.approval);
     let device_manager =
         DeviceManager::start(config.device.clone(), factory, Some(initial_snapshot.clone()));
 
     AppState {
         emotion_analyzer: EmotionAnalyzer::from_config(&config.emotion),
         config,
-        state: Arc::new(Mutex::new(AgentState::new(initial_snapshot, initial_sessions))),
+        state: Arc::new(Mutex::new(AgentState::new(initial_snapshot, initial_sessions, timeouts))),
         pending_generation: Arc::new(AtomicU64::new(0)),
         emotion_generation: Arc::new(AtomicU64::new(0)),
         device_manager,
-        approvals,
-        prompts,
     }
 }
 
@@ -1251,9 +1053,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/device/rpc", post(post_device_rpc))
         .route("/v1/claude/approvals", post(post_approval))
-        .route("/v1/claude/approvals/{id}", get(get_approval))
         .route("/v1/claude/prompts", post(post_prompt))
-        .route("/v1/claude/prompts/{id}", get(get_prompt))
         .with_state(app_state)
 }
 
@@ -1284,19 +1084,6 @@ mod tests {
             WaitingPromptOption, WireFrame,
         },
     };
-
-    #[test]
-    fn coarse_types_map_to_fixed_labels_without_leaking_content() {
-        // Known tools map to a friendly category; unknown (e.g. MCP) tools collapse to a
-        // generic label so arbitrary tool names never reach the always-on screen (R2).
-        assert_eq!(coarse_tool_type("Bash"), "Bash command");
-        assert_eq!(coarse_tool_type("Write"), "File edit");
-        assert_eq!(coarse_tool_type("Read"), "File read");
-        assert_eq!(coarse_tool_type("mcp__github__create_issue"), "Tool request");
-        // Prompt kinds map to coarse labels, never the question or option text.
-        assert_eq!(coarse_prompt_type(WaitingPromptKind::AskUserQuestion), "Question");
-        assert_eq!(coarse_prompt_type(WaitingPromptKind::Elicitation), "Input request");
-    }
 
     #[test]
     fn resolved_serial_baud_prefers_env_override() {
@@ -1465,6 +1252,18 @@ mod tests {
             waiting_prompt: prompt,
             recv_ts: 123,
             claude_pid: None,
+        }
+    }
+
+    fn sample_approval(id: &str, transport_id: &str, tool_use_id: &str) -> PendingInteraction {
+        PendingInteraction {
+            id: id.into(),
+            transport_id: transport_id.into(),
+            session_id: "sess-1".into(),
+            tool_use_id: Some(tool_use_id.into()),
+            interaction: Interaction::Approval {
+                tool_name: "Bash".into(),
+            },
         }
     }
 
@@ -1685,7 +1484,7 @@ mod tests {
             .await?
             .error_for_status()?;
 
-        approval_state.sync_device_approvals().await;
+        approval_state.sync_device_pending().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
@@ -1810,25 +1609,15 @@ mod tests {
             .await;
         tokio::time::sleep(Duration::from_millis(350)).await;
 
-        // A tool permission then arrives. Cross-store priority: the approval preempts
-        // the prompt overlay — the prompt is dismissed and the approval is shown, with
-        // no double display.
+        // A tool permission then arrives. The approval preempts the prompt overlay —
+        // the prompt is dismissed and the approval is shown, with no double display.
         app_state
-            .approvals
-            .submit(
-                "approve-1".into(),
-                "approval-1".into(),
-                ApprovalRequest {
-                    tool_name: "Bash".into(),
-                    tool_input_summary: "ls".into(),
-                    permission_mode: "default".into(),
-                    session_id: "sess-1".into(),
-                    tool_use_id: Some("tool-2".into()),
-                    permission_suggestions: Vec::new(),
-                },
-            )
-            .await;
-        app_state.sync_device_approvals().await;
+            .state
+            .lock()
+            .await
+            .pending
+            .submit(sample_approval("approve-1", "approval-1", "tool-2"), Instant::now());
+        app_state.sync_device_pending().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let writes = writes.lock().expect("writes mutex poisoned");
@@ -1892,35 +1681,26 @@ mod tests {
         assert!(approval_state.serial_status().connected);
 
         approval_state
-            .approvals
-            .submit(
-                "approve-1".into(),
-                "approval-1".into(),
-                ApprovalRequest {
-                    tool_name: "Bash".into(),
-                    tool_input_summary: "rm -rf /tmp/test".into(),
-                    permission_mode: "default".into(),
-                    session_id: "sess-1".into(),
-                    tool_use_id: Some("tool-1".into()),
-                    permission_suggestions: Vec::new(),
-                },
-            )
-            .await;
-
-        approval_state.sync_device_approvals().await;
-        // Already showing it on the device: repeat overlay is a no-op.
-        let repeat = approval_state.approvals.next_device_overlay().await;
-        assert!(repeat.show.is_none() && repeat.dismiss.is_none());
-
-        approval_state.approvals.note_device_disconnected().await;
-        let retried = approval_state
-            .approvals
-            .next_device_overlay()
+            .state
+            .lock()
             .await
-            .show
-            .expect("pending should be shown again after disconnect");
-        assert_eq!(retried.id, "approve-1");
-        assert_eq!(retried.transport_id, "approval-1");
+            .pending
+            .submit(sample_approval("approve-1", "approval-1", "tool-1"), Instant::now());
+
+        approval_state.sync_device_pending().await;
+        let shown = approval_state.state.lock().await.device_shown.clone();
+        assert_eq!(shown.map(|item| item.id).as_deref(), Some("approve-1"));
+
+        // Claimed for the device even though the worker is gone: a repeat sync is a no-op.
+        approval_state.sync_device_pending().await;
+        let shown = approval_state.state.lock().await.device_shown.clone();
+        assert_eq!(shown.map(|item| item.id).as_deref(), Some("approve-1"));
+
+        // The queue still holds it, so it is claimed again after a disconnect.
+        approval_state.state.lock().await.device_shown = None;
+        approval_state.sync_device_pending().await;
+        let shown = approval_state.state.lock().await.device_shown.clone();
+        assert_eq!(shown.map(|item| item.transport_id).as_deref(), Some("approval-1"));
 
         Ok(())
     }
@@ -1987,7 +1767,8 @@ mod tests {
             },
         );
 
-        let mut guard = AgentState::new(Snapshot::empty(1), sessions);
+        let mut guard =
+            AgentState::new(Snapshot::empty(1), sessions, (&ApprovalConfig::default()).into());
         assert!(reconcile_session_map(&mut guard, PIDLESS_ACTIVE_SESSION_TIMEOUT_SECS + 2));
         let session = guard.sessions.get("sess-1").expect("session should remain tracked");
         assert_eq!(session.snapshot.status, "unknown");
