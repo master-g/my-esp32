@@ -161,6 +161,7 @@ void home_presenter_build(home_present_model_t *out, const home_snapshot_t *snap
     }
     out->sprite_state = map_run_state(snapshot->claude_run_state, snapshot->claude_connected);
     out->sprite_emotion = emotion_from_text(snapshot->claude_emotion);
+    out->claude_connected = snapshot->claude_connected;
 
     if (snapshot->claude_pending_kind != CLAUDE_PENDING_NONE) {
         const char *fallback = snapshot->claude_pending_kind == CLAUDE_PENDING_APPROVAL

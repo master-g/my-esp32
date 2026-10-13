@@ -58,6 +58,8 @@
 #define HOME_SPRITE_SCALE 512
 #define HOME_SPRITE_X_OFFSET -60
 #define HOME_SPRITE_Y_OFFSET 10
+/* Moves the scaled frame's right edge onto the screen edge for the waving greeting. */
+#define HOME_SPRITE_WAVE_SHIFT_X 28
 #define HOME_SPRITE_MOTION_PERIOD_MS 33
 
 #endif

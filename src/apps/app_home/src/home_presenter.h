@@ -12,6 +12,7 @@ typedef enum {
     SPRITE_STATE_WAITING,
     SPRITE_STATE_COMPACTING,
     SPRITE_STATE_SLEEPING,
+    SPRITE_STATE_WAVING, /* one-shot greeting, chosen by the view, never by the presenter */
     SPRITE_STATE_COUNT,
 } sprite_state_t;
 
@@ -37,6 +38,7 @@ typedef struct {
     char weather_text[64];
     sprite_state_t sprite_state;
     sprite_emotion_t sprite_emotion;
+    bool claude_connected;
     bool bubble_visible;
     bool bubble_sticky; /* pending interaction: bubble stays up until cleared (no 5s fade) */
     bool alert_flash;   /* pending interaction: flash the Home background for salience */

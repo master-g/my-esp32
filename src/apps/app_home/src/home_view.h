@@ -36,6 +36,10 @@ typedef struct {
     const sprite_anim_def_t *sprite_anim;
     const sprite_motion_def_t *sprite_motion;
     uint8_t frame_idx;
+    bool was_connected;
+    uint8_t wave_frames_left; /* >0 while the greeting plays over the model's sprite */
+    sprite_state_t model_state;
+    sprite_emotion_t model_emotion;
     lv_timer_t *sprite_timer;
     lv_timer_t *motion_timer;
     lv_timer_t *bubble_timer;

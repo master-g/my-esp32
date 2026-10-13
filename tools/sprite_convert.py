@@ -23,7 +23,7 @@ FRAME = 64
 # (symbol, frames). The PNG is tools/sprite_assets/<symbol>.png, 64px tall.
 SPRITES = [
     ("idle", 6),
-    ("idle_happy", 6),
+    ("idle_happy", 20),
     ("idle_sad", 6),
     ("idle_sob", 6),
     ("idle_elated", 17),
@@ -38,7 +38,11 @@ SPRITES = [
     ("compacting", 5),
     ("sleeping", 6),
     ("sleeping_happy", 6),
+    ("waving", 25),
 ]
+
+# Drawn peeking in from the left edge of its frame; Home shows it at the right screen edge.
+MIRRORED = {"waving"}
 
 
 def to_rgb565(r, g, b):
@@ -56,7 +60,10 @@ def load_frames(symbol, num_frames):
         raise ValueError(f"{symbol}: expected {num_frames} frames of {FRAME}x{FRAME}")
     frames = []
     for fi in range(num_frames):
-        pixels = img.crop((fi * FRAME, 0, (fi + 1) * FRAME, FRAME)).get_flattened_data()
+        cell = img.crop((fi * FRAME, 0, (fi + 1) * FRAME, FRAME))
+        if symbol in MIRRORED:
+            cell = cell.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        pixels = cell.get_flattened_data()
         frame = []
         for r, g, b, a in pixels:
             if a not in (0, 255):

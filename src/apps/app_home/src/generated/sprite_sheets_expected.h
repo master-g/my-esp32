@@ -13,7 +13,7 @@ typedef struct {
 } sprite_expected_t;
 
 static const uint32_t sprite_idle_hashes[] = {0x54b6399du, 0xf0216d3bu, 0xf0216d3bu, 0x54b6399du, 0xa0c099aeu, 0xcc1ae935u};
-static const uint32_t sprite_idle_happy_hashes[] = {0x0a69888bu, 0x0a5f7726u, 0x0a5f7726u, 0x4563498cu, 0x2f76f898u, 0x4aa5ac49u};
+static const uint32_t sprite_idle_happy_hashes[] = {0x407bdce1u, 0x6763a83eu, 0x1dd824b7u, 0xa151a04fu, 0xbb263559u, 0x16b04479u, 0xbb263559u, 0xdfabf399u, 0xbb263559u, 0x37c603dfu, 0xb3535304u, 0xb1538080u, 0xba4d1c7fu, 0xc5e15e11u, 0xc3415bf1u, 0xc5e15e11u, 0x639cb965u, 0xc5e15e11u, 0x9328211fu, 0x716665f2u};
 static const uint32_t sprite_idle_sad_hashes[] = {0x76ffddcfu, 0x040ba5dfu, 0xf3823869u, 0xa6031931u, 0x34ba617du, 0x694bfa97u};
 static const uint32_t sprite_idle_sob_hashes[] = {0x274e7b64u, 0xa8bef93au, 0xb5c29be6u, 0xe43c453au, 0x599a5c07u, 0x599a5c07u};
 static const uint32_t sprite_idle_elated_hashes[] = {0x407bdce1u, 0x81c46b49u, 0x7320bcceu, 0x7c732c82u, 0x7320bcceu, 0xbeb03c7cu, 0x75c676b6u, 0xf72bc4e6u, 0x75c676b6u, 0x3195ce76u, 0x7320bcceu, 0x7c732c82u, 0x7320bcceu, 0xa9f1e891u, 0x75c676b6u, 0xf72bc4e6u, 0x75c676b6u};
@@ -28,6 +28,7 @@ static const uint32_t sprite_waiting_sob_hashes[] = {0x6c2f8a98u, 0xc437d9ccu, 0
 static const uint32_t sprite_compacting_hashes[] = {0xe295c8eau, 0xe8d8ed2fu, 0x1427291bu, 0xa8ae4645u, 0x54b6399du};
 static const uint32_t sprite_sleeping_hashes[] = {0x0523d6afu, 0x9a8d5ae3u, 0xaaccc4bcu, 0x5e901fa4u, 0x680e12e1u, 0x20560d13u};
 static const uint32_t sprite_sleeping_happy_hashes[] = {0xc7f62e87u, 0x4803d316u, 0x08689c39u, 0xe754e02cu, 0x9a728612u, 0x9a728612u};
+static const uint32_t sprite_waving_hashes[] = {0x22702421u, 0xc48af58fu, 0x936b30c7u, 0xa5927cd0u, 0x22f46ee7u, 0x8016e3beu, 0xc9e1d024u, 0x1c1f05b2u, 0x8ef6ea21u, 0xb509ebeau, 0x9ed297b5u, 0x6da93b2fu, 0x9ed297b5u, 0x6da93b2fu, 0x9ed297b5u, 0x6da93b2fu, 0x9ed297b5u, 0x6da93b2fu, 0xb509ebeau, 0x126a622eu, 0xc0b1ed2du, 0x591ef19bu, 0x83063b94u, 0xd544b993u, 0x634ddda5u};
 
 static const sprite_expected_t sprite_expected[] = {
     {"idle", &sprite_idle, sprite_idle_hashes},
@@ -46,6 +47,7 @@ static const sprite_expected_t sprite_expected[] = {
     {"compacting", &sprite_compacting, sprite_compacting_hashes},
     {"sleeping", &sprite_sleeping, sprite_sleeping_hashes},
     {"sleeping_happy", &sprite_sleeping_happy, sprite_sleeping_happy_hashes},
+    {"waving", &sprite_waving, sprite_waving_hashes},
 };
 
 #endif

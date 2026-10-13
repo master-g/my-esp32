@@ -21,5 +21,6 @@ extern const sprite_sheet_t sprite_waiting_sob;
 extern const sprite_sheet_t sprite_compacting;
 extern const sprite_sheet_t sprite_sleeping;
 extern const sprite_sheet_t sprite_sleeping_happy;
+extern const sprite_sheet_t sprite_waving;
 
 #endif

@@ -24,7 +24,7 @@ static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT][SPRITE_EMOTION
     [SPRITE_STATE_IDLE] =
         {
             [SPRITE_EMOTION_NEUTRAL] = {&sprite_idle, 333},
-            [SPRITE_EMOTION_HAPPY] = {&sprite_idle_happy, 333},
+            [SPRITE_EMOTION_HAPPY] = {&sprite_idle_happy, 143},
             [SPRITE_EMOTION_SAD] = {&sprite_idle_sad, 333},
             [SPRITE_EMOTION_SOB] = {&sprite_idle_sob, 333},
             [SPRITE_EMOTION_ELATED] = {&sprite_idle_elated, 143},
@@ -51,6 +51,10 @@ static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT][SPRITE_EMOTION
         {
             [SPRITE_EMOTION_NEUTRAL] = {&sprite_sleeping, 500},
             [SPRITE_EMOTION_HAPPY] = {&sprite_sleeping_happy, 500},
+        },
+    [SPRITE_STATE_WAVING] =
+        {
+            [SPRITE_EMOTION_NEUTRAL] = {&sprite_waving, 104},
         },
 };
 
@@ -290,12 +294,20 @@ static void motion_timer_cb(lv_timer_t *timer)
     apply_sprite_transform(view, 0, round_x10_to_coord(bob_offset_y_x10), sway_angle_x10);
 }
 
+static void refresh_sprite(home_view_t *view, sprite_state_t new_state,
+                           sprite_emotion_t new_emotion);
+
 static void sprite_timer_cb(lv_timer_t *timer)
 {
     home_view_t *view = lv_timer_get_user_data(timer);
     const sprite_anim_def_t *anim;
 
     if (view == NULL || view->sprite_img == NULL) {
+        return;
+    }
+
+    if (view->wave_frames_left > 0U && --view->wave_frames_left == 0U) {
+        refresh_sprite(view, view->model_state, view->model_emotion);
         return;
     }
 
@@ -358,6 +370,7 @@ static void refresh_sprite(home_view_t *view, sprite_state_t new_state,
     view->sprite_anim = anim;
     view->sprite_motion = motion;
     view->frame_idx = 0;
+    view->sprite_base_translate_x = new_state == SPRITE_STATE_WAVING ? HOME_SPRITE_WAVE_SHIFT_X : 0;
     show_sprite_frame(view, anim, 0);
     if (view->sprite_timer != NULL) {
         lv_timer_set_period(view->sprite_timer, anim->period_ms);
@@ -661,7 +674,21 @@ void home_view_apply(home_view_t *view, const home_present_model_t *model)
     view->alert_c_claude = model->claude_color;
     view->alert_c_weather = model->weather_color;
 
-    refresh_sprite(view, model->sprite_state, model->sprite_emotion);
+    /* Greet once when the host comes online; a pending interaction outranks it. */
+    if (model->claude_connected && !view->was_connected) {
+        view->wave_frames_left = sprite_waving.frame_count;
+    }
+    if (model->bubble_sticky) {
+        view->wave_frames_left = 0;
+    }
+    view->was_connected = model->claude_connected;
+    view->model_state = model->sprite_state;
+    view->model_emotion = model->sprite_emotion;
+    if (view->wave_frames_left > 0U) {
+        refresh_sprite(view, SPRITE_STATE_WAVING, SPRITE_EMOTION_NEUTRAL);
+    } else {
+        refresh_sprite(view, model->sprite_state, model->sprite_emotion);
+    }
     refresh_bubble(view, model);
 
     if (model->alert_flash) {
