@@ -266,7 +266,7 @@ fi
 
 # Every event takes the same path. The device is a read-only notifier, so the
 # hook never prints a decision and Claude Code's own prompt stays in charge.
-"$BIN" claude ingest --event-from-stdin
+"$BIN" claude ingest --event-from-stdin >/dev/null 2>&1
 exit 0
 "#
     )

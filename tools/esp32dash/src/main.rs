@@ -727,7 +727,8 @@ fn run_hooks_command(command: HooksCommand) -> Result<()> {
 fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
     let waiting_prompt = extract_waiting_prompt(&raw);
     let message = raw.message.or(raw.reason).and_then(|message| sanitize_message(&message));
-    let prompt_raw = raw.prompt.filter(|prompt| !prompt.trim().is_empty());
+    let prompt_raw =
+        raw.prompt.filter(|prompt| !prompt.trim().is_empty() && !is_system_injected_prompt(prompt));
     let prompt_preview = prompt_raw.as_deref().and_then(sanitize_prompt_preview);
     let permission_mode = raw
         .permission_mode
@@ -750,6 +751,20 @@ fn sanitize_raw_event(raw: RawHookInput) -> LocalHookEvent {
         recv_ts: now_epoch(),
         claude_pid: hook_claude_pid(),
     }
+}
+
+/// Claude Code also fires UserPromptSubmit for text it injects itself (background
+/// task results, reminders, messages from other agents). That is not something the
+/// user typed, so it is neither shown on the device nor analyzed.
+fn is_system_injected_prompt(prompt: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "<task-notification>",
+        "<system-reminder>",
+        "[SYSTEM NOTIFICATION",
+        "<agent-message from=",
+    ];
+    let prompt = prompt.trim_start();
+    PREFIXES.iter().any(|prefix| prompt.starts_with(prefix))
 }
 
 fn extract_waiting_prompt(raw: &RawHookInput) -> Option<WaitingPrompt> {
@@ -948,9 +963,16 @@ fn json_escape_path(path: PathBuf) -> String {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // launchd redirects stdout into a log file; escape codes only belong on a terminal.
-    let ansi = std::io::IsTerminal::is_terminal(&io::stdout());
-    let _ = fmt().with_env_filter(filter).with_target(false).with_ansi(ansi).try_init();
+    // Logs go to stderr: Claude Code reads a hook's stdout as extra context, and
+    // command output (JSON, status lines) owns stdout. launchd redirects stderr
+    // into a log file; escape codes only belong on a terminal.
+    let ansi = std::io::IsTerminal::is_terminal(&io::stderr());
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(ansi)
+        .with_writer(io::stderr)
+        .try_init();
 }
 
 #[cfg(test)]
@@ -1046,6 +1068,19 @@ mod tests {
 
         assert_eq!(event.prompt_raw.as_deref(), Some("first line\nsecond line"));
         assert_eq!(event.prompt_preview.as_deref(), Some("first line"));
+    }
+
+    #[test]
+    fn system_injected_prompts_are_not_treated_as_user_prompts() {
+        for injected in [
+            "<task-notification>\n<task-id>x</task-id>",
+            "  <system-reminder>hi</system-reminder>",
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]",
+            "<agent-message from=\"worker\">done</agent-message>",
+        ] {
+            assert!(is_system_injected_prompt(injected), "{injected}");
+        }
+        assert!(!is_system_injected_prompt("fix the <task-notification> parser"));
     }
 
     #[test]

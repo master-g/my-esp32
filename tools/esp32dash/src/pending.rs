@@ -128,6 +128,11 @@ impl PendingQueue {
         cleared
     }
 
+    /// Drop every interaction that belongs to a session that is gone.
+    pub fn clear_for_session(&mut self, session_id: &str) {
+        self.entries.retain(|entry| entry.item.session_id != session_id);
+    }
+
     /// The interaction the device should show: the freshest approval, else the
     /// freshest prompt.
     pub fn current(&mut self, now: Instant) -> Option<&PendingInteraction> {
@@ -313,6 +318,19 @@ mod tests {
 
         queue.clear_for_event(&event("PostToolUse", "sess-2", None, Some("tool-1")));
         assert_eq!(current_id(&mut queue, now).as_deref(), Some("prompt-2"));
+    }
+
+    #[test]
+    fn a_gone_session_takes_its_interactions_with_it() {
+        let now = Instant::now();
+        let mut queue = PendingQueue::new(timeouts());
+        queue.submit(approval("approve-a", "sess-a", "tool-a", "Bash"), now);
+        queue.submit(approval("approve-b", "sess-b", "tool-b", "Bash"), now);
+
+        queue.clear_for_session("sess-b");
+        assert_eq!(current_id(&mut queue, now).as_deref(), Some("approve-a"));
+        queue.clear_for_session("sess-a");
+        assert_eq!(current_id(&mut queue, now), None);
     }
 
     #[test]

@@ -628,12 +628,13 @@ fn reconcile_session_map(guard: &mut AgentState, now: u64) -> bool {
         if session_liveness_lost(session, now) {
             mark_session_idle(session, now);
             session.snapshot.emotion = Emotion::Neutral.as_str().to_string();
-            lost_keys.push(key.clone());
+            lost_keys.push((key.clone(), session.snapshot.session_id.clone()));
             changed = true;
         }
     }
-    for key in lost_keys {
+    for (key, session_id) in lost_keys {
         guard.emotions.remove(&key);
+        guard.pending.clear_for_session(&session_id);
     }
 
     let before = guard.sessions.len();
@@ -643,7 +644,9 @@ fn reconcile_session_map(guard: &mut AgentState, now: u64) -> bool {
         .filter_map(|(key, session)| should_prune_session(session, now).then_some(key.clone()))
         .collect();
     for key in &pruned_keys {
-        guard.sessions.remove(key);
+        if let Some(session) = guard.sessions.remove(key) {
+            guard.pending.clear_for_session(&session.snapshot.session_id);
+        }
         guard.emotions.remove(key);
     }
     changed |= guard.sessions.len() != before;
@@ -766,15 +769,16 @@ fn build_prompt_id(event: &LocalHookEvent, prompt: &crate::model::WaitingPrompt)
     let session_key = session_key_for(event);
     match prompt.kind {
         crate::model::WaitingPromptKind::AskUserQuestion => {
-            let tool_part = event
-                .tool_use_id
-                .as_deref()
-                .or(event.tool_name.as_deref())
-                .unwrap_or(prompt.question.as_str());
+            let tool_part =
+                event.tool_use_id.as_deref().or(event.tool_name.as_deref()).unwrap_or("question");
             format!("{}-{session_key}-{tool_part}", prompt.kind.as_str())
         }
         crate::model::WaitingPromptKind::Elicitation => {
-            format!("{}-{session_key}-{}-{}", prompt.kind.as_str(), prompt.title, prompt.question)
+            // Ids end up in logs, so they carry a digest of the text, not the text.
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (&prompt.title, &prompt.question).hash(&mut hasher);
+            format!("{}-{session_key}-{:016x}", prompt.kind.as_str(), hasher.finish())
         }
     }
 }
@@ -861,7 +865,13 @@ fn persist_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
     let json = serde_json::to_string_pretty(state)?;
     let tmp_path = path.with_extension("json.tmp");
 
-    let mut file = fs::File::create(&tmp_path)
+    // The snapshot carries a prompt preview; keep it readable by the owner only.
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(&tmp_path)
         .with_context(|| format!("failed to create temp state file {}", tmp_path.display()))?;
     file.write_all(json.as_bytes())?;
     file.sync_all()?;

@@ -40,3 +40,4 @@ target/
 # Local vendor / experiments not tracked in this repo
 /esp-idf/
 /esp-idf-*/
+/plans/

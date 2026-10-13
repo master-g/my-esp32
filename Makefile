@@ -22,7 +22,7 @@ ESP32DASH_LAUNCHD_PLIST ?= $(HOME)/Library/LaunchAgents/$(ESP32DASH_LAUNCHD_LABE
 	fmt fmt-check \
 	font-install font-build font-generate \
 	agent-run agent-status \
-	test-host
+	test-host check
 
 define run_idf
 $(IDF_ACTIVATE) && \
@@ -154,7 +154,10 @@ test-host: ## Run firmware host tests against protocol/fixtures (needs: brew ins
 		src/apps/app_home/test_host/test_sprite_codec.c -o build-host/test_sprite_codec
 	@build-host/test_sprite_codec
 
-fmt: ## Format the Rust host tool (firmware C code has no repo formatter configured)
+check: fmt-check test-host ## Run every fast check: Rust format + tests, firmware host tests (not the firmware build)
+	@$(CARGO) test --manifest-path tools/esp32dash/Cargo.toml
+
+fmt: ## Format the Rust host tool (firmware C is formatted by the pre-commit clang-format hook)
 	@$(CARGO) fmt --all --manifest-path tools/esp32dash/Cargo.toml
 
 fmt-check: ## Check Rust formatting without rewriting files
