@@ -584,6 +584,28 @@ fn finalize_guard_state(
 
 fn apply_event_to_sessions(guard: &mut AgentState, event: &LocalHookEvent) {
     let key = session_key_for(event);
+
+    // One Claude process runs one session. When its session id changes (/clear,
+    // /resume), the old entry gets no further events, and its pid stays alive, so
+    // nothing else would ever retire it: a stale "waiting" entry would then hold
+    // the display over every other project.
+    // ponytail: assumes one session per process; if in-process teammates ever
+    // report their own session ids, key the sessions by (pid, agent) instead.
+    if let Some(pid) = event.claude_pid {
+        let superseded: Vec<String> = guard
+            .sessions
+            .iter()
+            .filter(|(other, session)| **other != key && session.claude_pid == Some(pid))
+            .map(|(other, _)| other.clone())
+            .collect();
+        for other in superseded {
+            if let Some(session) = guard.sessions.remove(&other) {
+                guard.pending.clear_for_session(&session.snapshot.session_id);
+            }
+            guard.emotions.remove(&other);
+        }
+    }
+
     let entry = guard.sessions.entry(key.clone()).or_insert_with(|| PersistedSessionState {
         key: key.clone(),
         snapshot: Snapshot::empty(event.recv_ts),
@@ -1485,6 +1507,41 @@ mod tests {
         let selected = select_display_snapshot(&sessions, 11);
         assert_eq!(selected.session_id, "waiting");
         assert_eq!(selected.status, "waiting_for_input");
+    }
+
+    #[test]
+    fn a_new_session_id_from_the_same_process_replaces_the_old_session() {
+        let mut state = AgentState::new(
+            Snapshot::empty(1),
+            BTreeMap::new(),
+            (&ApprovalConfig::default()).into(),
+        );
+        let mut waiting =
+            waiting_prompt_event("old-id", "PermissionRequest", Some("Bash"), None, None);
+        waiting.claude_pid = Some(4242);
+        apply_event_to_sessions(&mut state, &waiting);
+        state.pending.submit(sample_approval("approve-1", "tool-1"), Instant::now());
+        state.pending.clear_for_session("sess-1");
+        state.pending.submit(
+            PendingInteraction {
+                session_id: "old-id".into(),
+                ..sample_approval("approve-2", "tool-2")
+            },
+            Instant::now(),
+        );
+
+        let mut other = waiting_prompt_event("other", "UserPromptSubmit", None, None, None);
+        other.claude_pid = Some(7);
+        apply_event_to_sessions(&mut state, &other);
+        assert_eq!(state.sessions.len(), 2, "a different process keeps its own session");
+
+        let mut renamed = waiting_prompt_event("new-id", "UserPromptSubmit", None, None, None);
+        renamed.claude_pid = Some(4242);
+        apply_event_to_sessions(&mut state, &renamed);
+
+        assert!(!state.sessions.contains_key("old-id"));
+        assert!(state.sessions.contains_key("new-id") && state.sessions.contains_key("other"));
+        assert!(state.pending.current(Instant::now()).is_none());
     }
 
     #[test]

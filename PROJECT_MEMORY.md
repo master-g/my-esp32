@@ -33,6 +33,7 @@
 - [2026-10-13] 电源:板子只走 USB、屏幕常亮 100%。电池/DIM/SLEEP/过热分支和 `system_state` 的 alert 标志、活动计数从未接入,已删;`power_policy` 只按前台 app 给行情 REALTIME/BACKGROUND_CACHE。显示是 `RENDER_MODE_FULL`(每次重绘整帧旋转推送),所以 Home 角色晃动定时器降到 50 ms、屏保直绘限到 33 ms。
 - [2026-10-13] Home 布局:时钟保持整行 44 号 `HH:MM:SS`(试过把秒缩成 22 号,两种字体不协调,用户否决);项目名(快照 `workspace`)和 working 已用时长是角色脚下的 11 号小标签(放屏幕中间用 22 号字被用户否决为「出戏」);气泡在时钟与角色之间(`HOME_SESSION_X/W`,底色 `SURFACE_SECONDARY`,左下对齐),不再盖住角色。气泡在无 pending 时显示 `detail`(提示词预览/工具名),这是有意保留的。
 - [2026-10-13] 主机:日志一律写 stderr(hook 的 stdout 会进 Claude 上下文);以 `<task-notification>`、`<system-reminder>`、`[SYSTEM NOTIFICATION`、`<agent-message from=` 开头的 UserPromptSubmit 不当作用户提示词;会话失活或被清理时连带清掉它的 pending;`state.json` 0600,pending id 用摘要不含问题文本。`make check` = fmt-check + `make test-host` + `cargo test`(不含固件构建;clippy 有 23 条既有警告未纳入)。
+- [2026-10-13] 主机会话表:一个 Claude 进程只保留一条会话。`/clear`、`/resume` 会让同一 pid 换 session id,旧条目收不到事件、pid 又活着,不会被对账清掉;若它停在 waiting_for_input(优先级最高)就会一直占着屏幕。现在同 pid 的新 id 到来时删掉旧条目及其 pending(`apply_event_to_sessions`)。授权后到工具跑完之间 Claude Code 不发 hook,所以长命令期间提示会一直留到 PostToolUse。
 
 ## 上次会话
 <!-- 上次运行做了什么、停在何处。滚动记录,超长时最旧条目优先淘汰。 -->
