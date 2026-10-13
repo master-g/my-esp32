@@ -106,7 +106,7 @@ The hook config added by `hooks install` covers:
 - `PostCompact`
 - `PermissionRequest`
 
-The device is a read-only notifier. Only `PermissionRequest` goes through `claude respond`, which pushes a coarse overlay and returns no decision, so Claude Code's native prompt still decides. `AskUserQuestion` and `Elicitation` reach the device's read-only prompt overlay through the normal ingest path.
+The device is a read-only notifier. Every hook event, including `PermissionRequest`, `AskUserQuestion` and `Elicitation`, goes through `claude ingest`; the agent queues the pending interaction and pushes only its coarse type to the device. The hook never prints a decision, so Claude Code's native prompt still decides.
 
 ## launchd
 

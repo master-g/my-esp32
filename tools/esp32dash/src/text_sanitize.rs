@@ -7,7 +7,6 @@ pub const TITLE_MAX_BYTES: usize = 40;
 pub const DETAIL_MAX_BYTES: usize = 96;
 pub const PROMPT_MAX_BYTES: usize = 96;
 pub const TOOL_NAME_MAX_BYTES: usize = 48;
-pub const APPROVAL_DESC_MAX_BYTES: usize = 80;
 pub const APPROVAL_ID_MAX_BYTES: usize = 31;
 pub const MESSAGE_MAX_BYTES: usize = 96;
 pub const PERMISSION_MODE_MAX_BYTES: usize = 16;
@@ -74,20 +73,12 @@ pub fn sanitize_snapshot_detail(input: &str) -> String {
     sanitize_display_text(input, DETAIL_MAX_BYTES)
 }
 
-pub fn sanitize_approval_summary(input: &str) -> String {
-    sanitize_display_text(input, APPROVAL_DESC_MAX_BYTES)
-}
-
 pub fn build_workspace(cwd: &str) -> String {
     Path::new(cwd)
         .file_name()
         .and_then(|name| name.to_str())
         .map(|name| sanitize_display_text(name, WORKSPACE_MAX_BYTES))
         .unwrap_or_default()
-}
-
-pub fn build_approval_id(now_epoch: u64, sequence: u64) -> String {
-    truncate_ascii_token(&format!("approval-{now_epoch:x}-{sequence:x}"), APPROVAL_ID_MAX_BYTES)
 }
 
 pub fn sanitize_transport_id(input: &str) -> String {
@@ -169,8 +160,7 @@ fn fnv1a_32(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_approval_id, build_workspace, sanitize_approval_summary, sanitize_display_text,
-        sanitize_tool_name, sanitize_transport_id,
+        build_workspace, sanitize_display_text, sanitize_tool_name, sanitize_transport_id,
     };
 
     #[test]
@@ -189,11 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn approval_summary_uses_device_limit() {
-        assert_eq!(sanitize_approval_summary("创建文件 test.rs 并写入"), "创建文件 test.rs 并写入");
-    }
-
-    #[test]
     fn workspace_uses_last_path_component() {
         assert_eq!(build_workspace("/tmp/project-foo"), "project-foo");
     }
@@ -201,18 +186,6 @@ mod tests {
     #[test]
     fn tool_name_is_byte_safe() {
         assert_eq!(sanitize_tool_name("exec_command").as_deref(), Some("exec_command"));
-    }
-
-    #[test]
-    fn approval_id_is_ascii_and_bounded() {
-        let approval_id = build_approval_id(1_775_742_746, 7);
-        assert!(approval_id.is_ascii());
-        assert!(approval_id.len() <= 31);
-    }
-
-    #[test]
-    fn approval_id_changes_with_sequence() {
-        assert_ne!(build_approval_id(42, 1), build_approval_id(42, 2));
     }
 
     #[test]

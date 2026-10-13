@@ -264,19 +264,10 @@ if [ ! -x "$BIN" ]; then
   fi
 fi
 
-# Read stdin so we can inspect and re-pipe it
-INPUT=$(cat)
-
-# Only PermissionRequest takes the respond path; AskUserQuestion and Elicitation
-# reach the device overlay through ingest.
-EVENT_NAME=$(printf '%s' "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-
-if [ "$EVENT_NAME" = "PermissionRequest" ]; then
-  printf '%s' "$INPUT" | exec "$BIN" claude respond --event-from-stdin
-else
-  printf '%s' "$INPUT" | "$BIN" claude ingest --event-from-stdin
-  exit 0
-fi
+# Every event takes the same path. The device is a read-only notifier, so the
+# hook never prints a decision and Claude Code's own prompt stays in charge.
+"$BIN" claude ingest --event-from-stdin
+exit 0
 "#
     )
 }
@@ -692,15 +683,13 @@ mod tests {
     }
 
     #[test]
-    fn render_hook_script_routes_only_permission_request_to_respond() {
+    fn render_hook_script_sends_every_event_through_ingest() {
         let script = render_hook_script(Path::new("/tmp/esp32dash"));
-        let respond_line = script.find("exec \"$BIN\" claude respond").unwrap();
-        let condition = &script[..respond_line];
 
-        assert!(condition.contains(r#"if [ "$EVENT_NAME" = "PermissionRequest" ]; then"#));
-        let routing = &condition[condition.find("EVENT_NAME=").unwrap()..];
-        assert!(!routing.contains("Elicitation"));
-        assert!(!routing.contains("AskUserQuestion"));
+        assert!(script.contains(r#""$BIN" claude ingest --event-from-stdin"#));
+        assert!(script.trim_end().ends_with("exit 0"));
+        assert!(!script.contains("respond"));
+        assert!(!script.contains("PermissionRequest"));
     }
 
     #[test]

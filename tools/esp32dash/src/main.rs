@@ -17,10 +17,7 @@ use std::{
     fs::{self, File},
     io::{self, BufWriter, Read},
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -43,14 +40,11 @@ use crate::{
         WaitingPromptOption, WireFrame,
     },
     text_sanitize::{
-        build_approval_id, sanitize_approval_summary, sanitize_message, sanitize_permission_mode,
-        sanitize_prompt_preview, sanitize_snapshot_detail, sanitize_snapshot_title,
-        sanitize_tool_name,
+        sanitize_message, sanitize_permission_mode, sanitize_prompt_preview,
+        sanitize_snapshot_detail, sanitize_snapshot_title, sanitize_tool_name,
     },
 };
 
-static NEXT_APPROVAL_ID_SEQ: AtomicU64 = AtomicU64::new(1);
-static NEXT_PROMPT_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 const CHIBI_SCREENSAVER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -134,14 +128,6 @@ enum AgentCommand {
 enum ClaudeCommand {
     #[command(about = "Read a Claude hook event JSON object from stdin and ingest it")]
     Ingest {
-        #[arg(long, help = "Read the hook event payload from stdin")]
-        event_from_stdin: bool,
-    },
-    #[command(
-        about = "Handle a user-input hook event (PermissionRequest, Elicitation, AskUserQuestion): submit to agent, wait for device response, output decision JSON",
-        alias = "approve"
-    )]
-    Respond {
         #[arg(long, help = "Read the hook event payload from stdin")]
         event_from_stdin: bool,
     },
@@ -387,16 +373,6 @@ async fn main() -> Result<()> {
                 return Err(anyhow!("ingest requires --event-from-stdin"));
             }
             ingest_from_stdin().await
-        }
-        Command::Claude {
-            command: ClaudeCommand::Respond {
-                event_from_stdin,
-            },
-        } => {
-            if !event_from_stdin {
-                return Err(anyhow!("respond requires --event-from-stdin"));
-            }
-            respond_from_stdin().await
         }
         Command::Device {
             command,
@@ -954,13 +930,6 @@ fn now_epoch() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-fn now_epoch_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 fn admin_base_url() -> String {
     format!("http://{}", compat::admin_addr())
 }
@@ -1028,285 +997,6 @@ fn write_screenshot_png(path: &PathBuf, screenshot: &DeviceScreenshot) -> Result
 
 fn json_escape_path(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-async fn respond_from_stdin() -> Result<()> {
-    let mut stdin = String::new();
-    io::stdin().read_to_string(&mut stdin).context("failed to read stdin")?;
-
-    let raw: Value = match serde_json::from_str(&stdin) {
-        Ok(v) => v,
-        Err(err) => {
-            debug!("ignoring invalid hook JSON: {err}");
-            return Ok(());
-        }
-    };
-
-    let event_name = raw.get("hook_event_name").and_then(|v| v.as_str()).unwrap_or("unknown");
-
-    match event_name {
-        "PermissionRequest" => handle_permission_request(&stdin, &raw).await,
-        "Elicitation" => handle_elicitation(&stdin, &raw).await,
-        "PreToolUse" => handle_ask_user_question(&stdin, &raw).await,
-        _ => {
-            debug!("respond: unknown event type {event_name}, falling through");
-            Ok(())
-        }
-    }
-}
-
-async fn handle_permission_request(stdin: &str, raw: &Value) -> Result<()> {
-    let tool_name = raw.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-    let display_tool_name = sanitize_tool_name(&tool_name).unwrap_or_else(|| "unknown".into());
-
-    let tool_input_summary = summarize_tool_input(raw);
-
-    let permission_mode = raw
-        .get("permission_mode")
-        .and_then(|v| v.as_str())
-        .map(sanitize_permission_mode)
-        .filter(|mode| !mode.is_empty())
-        .unwrap_or_else(|| "default".into());
-
-    let approval_id = next_approval_id();
-    let event = serde_json::from_str::<RawHookInput>(stdin).ok().map(sanitize_raw_event);
-
-    // Also ingest as a normal event so the dashboard updates
-    if let Some(event) = event.as_ref() {
-        let client = Client::new();
-        let _ = client
-            .post(format!("{}/v1/claude/events", admin_base_url()))
-            .json(&event)
-            .timeout(std::time::Duration::from_millis(100))
-            .send()
-            .await;
-    }
-
-    let permission_suggestions =
-        raw.get("permission_suggestions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-
-    // Submit approval to agent
-    let client = Client::new();
-    let submit_response = client
-        .post(format!("{}/v1/claude/approvals", admin_base_url()))
-        .json(&json!({
-            "id": approval_id,
-            "tool_name": display_tool_name,
-            "tool_input_summary": tool_input_summary,
-            "permission_mode": permission_mode,
-            "session_id": event.as_ref().map(|value| value.session_id.as_str()).unwrap_or_default(),
-            "tool_use_id": event.as_ref().and_then(|value| value.tool_use_id.as_deref()),
-            "permission_suggestions": permission_suggestions,
-        }))
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await;
-
-    match submit_response {
-        Ok(response) if response.status().is_success() => {}
-        Ok(response) => {
-            warn!("approval submit failed with status {}", response.status());
-            return Ok(());
-        }
-        Err(err) => {
-            warn!("agent unavailable for approval: {err}");
-            // Agent not running — let Claude Code show its normal permission dialog
-            return Ok(());
-        }
-    }
-
-    // Read-only device: the request was pushed for display only. Return without emitting
-    // a decision so Claude Code falls through to its native prompt — a locked Mac withholds
-    // that prompt, which is the security property. The device cannot resolve any request.
-    Ok(())
-}
-
-async fn handle_elicitation(stdin: &str, raw: &Value) -> Result<()> {
-    let prompt = parse_elicitation_prompt_from_raw(raw);
-
-    // Read-only device: never emit a decision. Complex object schemas (allOf/anyOf/oneOf
-    // compositions included) can't be summarized as a coarse type, so skip the device
-    // notify and let Claude Code's native prompt handle them.
-    let is_form_mode =
-        raw.get("requested_schema").and_then(|v| v.get("type")).and_then(Value::as_str)
-            == Some("object");
-
-    if is_form_mode {
-        return Ok(());
-    }
-
-    let Some(prompt) = prompt else {
-        // Unparseable prompt — nothing to display; the native prompt handles it.
-        return Ok(());
-    };
-
-    let prompt_id = next_prompt_id();
-    let event = serde_json::from_str::<RawHookInput>(stdin).ok().map(sanitize_raw_event);
-
-    // Also ingest as a normal event so the dashboard updates
-    if let Some(event) = event.as_ref() {
-        let client = Client::new();
-        let _ = client
-            .post(format!("{}/v1/claude/events", admin_base_url()))
-            .json(&event)
-            .timeout(std::time::Duration::from_millis(100))
-            .send()
-            .await;
-    }
-
-    // Submit prompt to agent
-    let client = Client::new();
-    let submit_response = client
-        .post(format!("{}/v1/claude/prompts", admin_base_url()))
-        .json(&json!({
-            "id": prompt_id,
-            "kind": "elicitation",
-            "title": prompt.title,
-            "question": prompt.question,
-            "options": prompt.options,
-            "session_id": event.as_ref().map(|e| e.session_id.as_str()).unwrap_or_default(),
-            "tool_use_id": event.as_ref().and_then(|e| e.tool_use_id.as_deref()),
-        }))
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await;
-
-    match submit_response {
-        Ok(response) if response.status().is_success() => {}
-        Ok(response) => {
-            warn!("prompt submit failed with status {}", response.status());
-            return Ok(());
-        }
-        Err(err) => {
-            warn!("agent unavailable for prompt: {err}");
-            return Ok(());
-        }
-    }
-
-    // Read-only device: the prompt was pushed for display only. Return without a decision
-    // so Claude Code's native prompt resolves it.
-    Ok(())
-}
-
-async fn handle_ask_user_question(stdin: &str, raw: &Value) -> Result<()> {
-    let event = serde_json::from_str::<RawHookInput>(stdin).ok();
-    let tool_input = raw.get("tool_input");
-    let prompt = tool_input.and_then(parse_ask_user_question_prompt);
-
-    let Some(prompt) = prompt else {
-        warn!("AskUserQuestion: failed to parse prompt");
-        return Ok(());
-    };
-
-    let prompt_id = next_prompt_id();
-
-    // Also ingest as a normal event so the dashboard updates
-    if let Some(event) = event.as_ref() {
-        let sanitized = sanitize_raw_event(event.clone());
-        let client = Client::new();
-        let _ = client
-            .post(format!("{}/v1/claude/events", admin_base_url()))
-            .json(&sanitized)
-            .timeout(std::time::Duration::from_millis(100))
-            .send()
-            .await;
-    }
-
-    // Submit prompt to agent
-    let client = Client::new();
-    let submit_response = client
-        .post(format!("{}/v1/claude/prompts", admin_base_url()))
-        .json(&json!({
-            "id": prompt_id,
-            "kind": "ask_user_question",
-            "title": prompt.title,
-            "question": prompt.question,
-            "options": prompt.options,
-            "session_id": event.as_ref().map(|e| e.session_id.as_str()).unwrap_or_default(),
-            "tool_use_id": event.as_ref().and_then(|e| e.tool_use_id.as_deref()),
-        }))
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await;
-
-    match submit_response {
-        Ok(response) if response.status().is_success() => {}
-        Ok(response) => {
-            warn!("prompt submit failed with status {}", response.status());
-            return Ok(());
-        }
-        Err(err) => {
-            warn!("agent unavailable for prompt: {err}");
-            return Ok(());
-        }
-    }
-
-    // Read-only device: the question was pushed for display only. Return without a decision
-    // so Claude Code's native prompt resolves it.
-    Ok(())
-}
-
-fn next_approval_id() -> String {
-    let sequence = NEXT_APPROVAL_ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    build_approval_id(now_epoch_millis(), sequence)
-}
-
-fn next_prompt_id() -> String {
-    let sequence = NEXT_PROMPT_ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("prompt-{}", build_approval_id(now_epoch_millis(), sequence))
-}
-
-fn parse_elicitation_prompt_from_raw(raw: &Value) -> Option<WaitingPrompt> {
-    let title = raw
-        .get("title")
-        .or_else(|| raw.get("header"))
-        .or_else(|| raw.get("label"))
-        .and_then(Value::as_str)
-        .and_then(sanitize_waiting_title)
-        .unwrap_or_else(|| "Awaiting input".into());
-    let question = raw
-        .get("question")
-        .or_else(|| raw.get("prompt"))
-        .or_else(|| raw.get("message"))
-        .and_then(Value::as_str)
-        .and_then(sanitize_waiting_detail)?;
-    let options = raw
-        .get("options")
-        .and_then(parse_waiting_options)
-        .or_else(|| raw.get("choices").and_then(parse_waiting_options))
-        .unwrap_or_default();
-
-    if options.is_empty() {
-        return None;
-    }
-
-    Some(WaitingPrompt {
-        kind: WaitingPromptKind::Elicitation,
-        title,
-        question,
-        options,
-    })
-}
-
-fn summarize_tool_input(raw: &Value) -> String {
-    let tool_input = match raw.get("tool_input") {
-        Some(input) => input,
-        None => return String::new(),
-    };
-
-    // For Bash, show the command
-    if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
-        return sanitize_approval_summary(cmd);
-    }
-    // For Edit/Write, show the file path
-    if let Some(path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
-        return sanitize_approval_summary(path);
-    }
-    // For other tools, compact JSON
-    match serde_json::to_string(tool_input) {
-        Ok(s) => sanitize_approval_summary(&s),
-        Err(_) => String::new(),
-    }
 }
 
 fn init_tracing() {
@@ -1479,74 +1169,6 @@ mod tests {
         assert_eq!(snapshot.detail, "Heads up");
         assert_eq!(snapshot.attention, Attention::High);
     }
-
-    #[test]
-    fn prompt_and_approval_ids_use_separate_sequences() {
-        let approval1 = next_approval_id();
-        let prompt1 = next_prompt_id();
-        let approval2 = next_approval_id();
-        let prompt2 = next_prompt_id();
-
-        // Approval IDs should not contain "prompt-"
-        assert!(!approval1.contains("prompt-"));
-        assert!(!approval2.contains("prompt-"));
-
-        // Prompt IDs should contain "prompt-"
-        assert!(prompt1.starts_with("prompt-"));
-        assert!(prompt2.starts_with("prompt-"));
-
-        // Verify sequences are independent by checking that prompt IDs increment
-        // without affecting approval IDs and vice versa
-        let approval_seq1 = approval1.split('-').last().unwrap().parse::<u64>().unwrap();
-        let approval_seq2 = approval2.split('-').last().unwrap().parse::<u64>().unwrap();
-        let prompt_seq1 = prompt1.split('-').last().unwrap().parse::<u64>().unwrap();
-        let prompt_seq2 = prompt2.split('-').last().unwrap().parse::<u64>().unwrap();
-
-        // Approval sequence should increment by 1
-        assert_eq!(approval_seq2, approval_seq1 + 1);
-        // Prompt sequence should increment by 1
-        assert_eq!(prompt_seq2, prompt_seq1 + 1);
-        // They should not be interleaved (approval_seq1 and prompt_seq1 should be independent)
-        // The exact values don't matter, only that each sequence increments independently
-    }
-
-    #[test]
-    fn parse_elicitation_prompt_returns_none_for_empty_options() {
-        let raw = json!({
-            "title": "Test",
-            "question": "Choose one",
-            "options": []
-        });
-        let result = parse_elicitation_prompt_from_raw(&raw);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn parse_elicitation_prompt_returns_none_when_no_options_field() {
-        let raw = json!({
-            "title": "Test",
-            "question": "Choose one"
-        });
-        let result = parse_elicitation_prompt_from_raw(&raw);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn parse_elicitation_prompt_succeeds_with_valid_options() {
-        let raw = json!({
-            "title": "Test",
-            "question": "Choose one",
-            "options": ["A", "B"]
-        });
-        let result = parse_elicitation_prompt_from_raw(&raw);
-        assert!(result.is_some());
-        let prompt = result.unwrap();
-        assert_eq!(prompt.options.len(), 2);
-        assert_eq!(prompt.options[0].label, "A");
-        assert_eq!(prompt.options[1].label, "B");
-    }
-
-    // --- CLI structure tests ---
 
     #[test]
     fn hooks_install_accepts_force_flag() {

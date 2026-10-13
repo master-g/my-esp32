@@ -15,6 +15,7 @@
 - [2026-06-25] 底层 direct-mode 画屏(`bsp_display_show_fatal_screen`)画完若 `end_direct_mode` + 解锁,`lvgl_port_task` 会随后用 `lv_timer_handler` 重绘界面、盖掉刚画的内容——U3 错误屏初版栽在这,红屏闪一下就被覆盖。要让画面留到重启/halt,终态必须保持独占:不 end direct mode、不放 LVGL 锁。(code review 两名审查员印证)
 - [2026-06-25] event_bus 事件 payload 一律传 NULL,订阅者以事件类型为信号、自行 query 服务取数据(CLAUDE.md 约定)。`system_state` 原本给 `POWER_CHANGED` 传 `payload=&output`(栈指针);把 publish 移出 `s_mutex` 后这既违约、又是悬垂隐患(仅因同步 dispatch 侥幸安全)。已核实所有订阅者都不读 payload。新发事件别再塞栈指针。
 - [2026-09-14] `cargo install` 覆盖 `~/.cargo/bin/esp32dash` 后立刻 `launchctl kickstart -k`,新进程第一次启动会被系统以 `OS_REASON_CODESIGNING` 杀掉,KeepAlive 节流约 10s 后自动拉起成功;这不是二进制损坏。
+- [2026-10-13] agent 占着串口时 `esp32dash device screenshot` 会失败(两个进程抢读)。可行做法:`kill -STOP <agent pid>` → 截图 → `kill -CONT`;烧录同理(`PORT_BUSY_OK=1 make flash`),设备复位后 launchd 会自动重启 agent。
 
 ## 已验证的事实(续)
 
@@ -29,12 +30,11 @@
 - [2026-06-25] 用 /bootstrap-claude 初始化上下文：补全 CLAUDE.md 的技术栈/命令/代码风格/禁止文件/审查规则/项目记忆 六节，创建本文件。AGENTS.md 已是指向 CLAUDE.md 的 symlink。
 - [2026-06-25] 经 /ce-plan + /ce-work 实现固件健壮性加固 U1–U5(分支 `refactor/firmware-robustness-guards`):LVGL 任务断言、UI 锁有限超时、system_state publish 移出锁、丢包串口日志、bootstrap 失败错误屏 + 有界重试。每单元 `make build` 通过(用 `make build`,该 shell 无 idf.py;ESP-IDF 经 `~/.espressif/tools/activate_idf_v6.0.sh`)。随后 /ce-code-review 抓出并修复 5 个问题(见失败尝试前两条,以及 RTC 重启计数改 magic word、magic number 命名)。**未做真机验证**——无固件单测,需 flash 上板。
 - [2026-09-14] 检查并调整 esp32dash 主机侧:删除 OMP 支持与仓库里过时的 `tools/esp32dash/hooks/esp32dash-hook.sh`;hook 脚本只让 PermissionRequest 走 `respond`(dotfiles 副本同步更新,未提交);launchd 日志加大小轮转、去 ANSI、去掉每秒 hello 日志。`cargo test` 114/114,已 `cargo install` 并重启服务,设备连接与 hook 事件送达均验证。改动未提交。
-- [2026-10-13] 已做未提交:(a) `service_claude.c` 的 `claude_service_apply_remote_snapshot` 保住 `has_pending_prompt`(原先被每帧 `claude.update` 清零,Need input 气泡数秒即消失),`make build` 通过,**未真机验证**;(b) 候选 2:`approvals.rs`+`prompts.rs` 合并为 `tools/esp32dash/src/pending.rs`(`PendingQueue`,时间作入参),agent 用「当前应显示」对比 `device_shown` 发四个旧帧,两条无调用方的 `GET .../{id}` 路由已删,`cargo test` 112/112。发送失败仍保留 claim(只在 device worker 已死时失败),与旧行为一致。
+- [2026-10-13] 已提交(本地分支,未合并未推送):`fix/claude-update-preserve-pending-prompt`(f07162a,真机验证:Need input 气泡 20 秒后仍在)→ `refactor/pending-interaction-queue`(9dece4e,`pending.rs` 的 `PendingQueue`)→ `refactor/hooks-single-ingest`(删 `claude respond` 与四条 approvals/prompts 路由,PermissionRequest 在 ingest 内入队,hook 脚本不再分流)。三者都经截图在真机核对。新 hook 脚本已写入 `~/archdotfiles/ai/.claude/hooks/esp32dash-hook.sh`(dotfiles 未提交)。
 
 ## 下次运行
 <!-- 计划要做的任务和优先级。长期保留,不随压缩淘汰。 -->
 - [2026-06-25] 仓库尚无 CONTRIBUTING.md / CODEOWNERS / PR 模板，也未见固件单元测试；按需补充。
 - [2026-06-25] 真机验证 `refactor/firmware-robustness-guards`:重点确认 U3 错误屏留存到重启、RTC 重启计数 N=3 按预期 halt、U5 死锁路径不再死锁。验证后再决定 merge/PR。`BOOT_FAIL_RESTART_LIMIT`(N=3)若不合实际启动失败模式可调。
 - [2026-08-31] 实机「Time not synced」已修(见已验证的事实):98c1ec5 在 main 本地、**未 push**。RTC 电池疑似缺失(掉电即丢时间,靠 NTP 回写)——若在意断电守时可考虑装电池,非 bug。
-- [2026-09-14] `claude respond` 里的 Elicitation/AskUserQuestion 分支与 agent `/v1/claude/prompts` 已无 hook 调用方(这两类事件走 ingest),可评估删除;需要时再做。
-- [2026-10-13] 接着做候选 3(删 `claude respond`、PermissionRequest 在 ingest 内入队、hook 脚本不再分流、删两份过时 openspec spec),然后候选 1、5、4。开工前确认 bug 修复与候选 2 是否已各自提交到 `fix/claude-update-preserve-pending-prompt` 与 `refactor/pending-interaction-queue`。
+- [2026-10-13] 剩余:候选 1(电平下发、删四帧与 `home_approval`、显示 coarse type、写 ADR 0001)→ 5(`protocol/fixtures/`)→ 4(`device_protocol` component、NVS 归还)。`openspec/specs/` 下 `prompt-store-cleanup`、`device-prompt-ui` 也已过时,未处理。

@@ -33,10 +33,7 @@ use crate::{
     },
     normalizer::{apply_notification_status, materially_equal, normalize},
     pending::{Interaction, PendingInteraction, PendingQueue, PendingTimeouts},
-    text_sanitize::{
-        sanitize_snapshot_detail, sanitize_snapshot_title, sanitize_tool_name,
-        sanitize_transport_id,
-    },
+    text_sanitize::sanitize_transport_id,
 };
 
 const RING_BUFFER_CAPACITY: usize = 64;
@@ -319,8 +316,31 @@ impl AppState {
             self.device_manager.send_snapshot(snapshot);
         }
 
+        self.maybe_submit_approval_for_event(&event).await;
         self.maybe_submit_prompt_for_event(&event).await;
         self.maybe_analyze_emotion_for_event(&event).await;
+    }
+
+    async fn maybe_submit_approval_for_event(&self, event: &LocalHookEvent) {
+        if event.hook_event_name != "PermissionRequest" {
+            return;
+        }
+
+        let id = build_approval_id(event);
+        let tool_name = event.tool_name.clone().unwrap_or_else(|| "unknown".into());
+        self.state.lock().await.pending.submit(
+            PendingInteraction {
+                transport_id: sanitize_transport_id(&id),
+                id: id.clone(),
+                session_id: event.session_id.clone(),
+                tool_use_id: event.tool_use_id.clone(),
+                interaction: Interaction::Approval {
+                    tool_name,
+                },
+            },
+            Instant::now(),
+        );
+        info!(approval_id = id, session_id = event.session_id, "queued approval");
     }
 
     async fn maybe_submit_prompt_for_event(&self, event: &LocalHookEvent) {
@@ -796,6 +816,12 @@ fn process_exists(pid: u32) -> bool {
     matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
 }
 
+fn build_approval_id(event: &LocalHookEvent) -> String {
+    let tool_part =
+        event.tool_use_id.as_deref().or(event.tool_name.as_deref()).unwrap_or("unknown");
+    format!("approval-{}-{tool_part}", session_key_for(event))
+}
+
 fn build_prompt_id(event: &LocalHookEvent, prompt: &crate::model::WaitingPrompt) -> String {
     let session_key = session_key_for(event);
     match prompt.kind {
@@ -853,90 +879,6 @@ async fn post_device_rpc(
             }),
         )),
     }
-}
-
-use serde::Deserialize;
-
-// The CLI still posts the full request; only what the queue needs is read.
-#[derive(Debug, Deserialize)]
-struct SubmitApprovalBody {
-    id: String,
-    tool_name: String,
-    #[serde(default)]
-    session_id: String,
-    #[serde(default)]
-    tool_use_id: Option<String>,
-}
-
-async fn post_approval(
-    State(state): State<AppState>,
-    Json(body): Json<SubmitApprovalBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let tool_name = sanitize_tool_name(&body.tool_name).unwrap_or_else(|| "unknown".into());
-    let state = Arc::new(state);
-    info!(approval_id = body.id, tool = tool_name, "approval submitted");
-    state.state.lock().await.pending.submit(
-        PendingInteraction {
-            transport_id: sanitize_transport_id(&body.id),
-            id: body.id.clone(),
-            session_id: body.session_id.trim().to_string(),
-            tool_use_id: body
-                .tool_use_id
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            interaction: Interaction::Approval {
-                tool_name,
-            },
-        },
-        Instant::now(),
-    );
-    state.sync_device_pending().await;
-
-    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": body.id })))
-}
-
-#[derive(Debug, Deserialize)]
-struct SubmitPromptBody {
-    id: String,
-    kind: String,
-    title: String,
-    question: String,
-    #[serde(default)]
-    options: Vec<crate::model::WaitingPromptOption>,
-    #[serde(default)]
-    session_id: String,
-    #[serde(default)]
-    tool_use_id: Option<String>,
-}
-
-async fn post_prompt(
-    State(state): State<AppState>,
-    Json(body): Json<SubmitPromptBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let prompt = crate::model::WaitingPrompt {
-        kind: match body.kind.as_str() {
-            "elicitation" => crate::model::WaitingPromptKind::Elicitation,
-            _ => crate::model::WaitingPromptKind::AskUserQuestion,
-        },
-        title: sanitize_snapshot_title(&body.title),
-        question: sanitize_snapshot_detail(&body.question),
-        options: body.options.into_iter().take(4).collect(),
-    };
-    let state = Arc::new(state);
-    info!(prompt_id = body.id, "prompt submitted");
-    state.state.lock().await.pending.submit(
-        PendingInteraction {
-            transport_id: sanitize_transport_id(&body.id),
-            id: body.id.clone(),
-            session_id: body.session_id.trim().to_string(),
-            tool_use_id: body.tool_use_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
-            interaction: Interaction::Prompt(prompt),
-        },
-        Instant::now(),
-    );
-    state.sync_device_pending().await;
-
-    (StatusCode::CREATED, Json(serde_json::json!({ "ok": true, "id": body.id })))
 }
 
 fn load_state(path: &PathBuf) -> Option<PersistedState> {
@@ -1052,8 +994,6 @@ fn build_router(app_state: AppState) -> Router {
         .route("/v1/status", get(get_status))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/device/rpc", post(post_device_rpc))
-        .route("/v1/claude/approvals", post(post_approval))
-        .route("/v1/claude/prompts", post(post_prompt))
         .with_state(app_state)
 }
 
@@ -1436,33 +1376,22 @@ mod tests {
         let addr = listener.local_addr()?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
 
-        Client::new()
-            .post(format!("http://{addr}/v1/claude/approvals"))
-            .json(&serde_json::json!({
-                "id": "approval-1",
-                "tool_name": "Bash",
-                "tool_input_summary": "rm -rf /tmp/test",
-                "permission_mode": "default",
-                "session_id": "sess-1",
-                "tool_use_id": "tool-1",
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Client::new()
-            .post(format!("http://{addr}/v1/claude/approvals"))
-            .json(&serde_json::json!({
-                "id": "approval-2",
-                "tool_name": "Edit",
-                "tool_input_summary": "edit src/main.rs",
-                "permission_mode": "default",
-                "session_id": "sess-2",
-                "tool_use_id": "tool-2",
-            }))
-            .send()
-            .await?
-            .error_for_status()?;
+        for (session_id, tool_name, tool_use_id) in
+            [("sess-1", "Bash", "tool-1"), ("sess-2", "Edit", "tool-2")]
+        {
+            Client::new()
+                .post(format!("http://{addr}/v1/claude/events"))
+                .json(&waiting_prompt_event(
+                    session_id,
+                    "PermissionRequest",
+                    Some(tool_name),
+                    Some(tool_use_id),
+                    None,
+                ))
+                .send()
+                .await?
+                .error_for_status()?;
+        }
 
         Client::new()
             .post(format!("http://{addr}/v1/claude/events"))
@@ -1489,8 +1418,11 @@ mod tests {
 
         let writes = writes.lock().expect("writes mutex poisoned");
         let request_ids = approval_request_ids(&writes);
-        assert_eq!(request_ids, vec!["approval-1".to_string(), "approval-2".to_string()]);
-        assert!(has_approval_dismiss(&writes, "approval-1"));
+        assert_eq!(
+            request_ids,
+            vec!["approval-sess-1-tool-1".to_string(), "approval-sess-2-tool-2".to_string()]
+        );
+        assert!(has_approval_dismiss(&writes, "approval-sess-1-tool-1"));
 
         server.abort();
         Ok(())
