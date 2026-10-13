@@ -10,6 +10,7 @@
 #include "app_manager.h"
 #include "bsp_board_config.h"
 #include "cJSON.h"
+#include "device_protocol.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_app_desc.h"
@@ -23,7 +24,6 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "net_manager.h"
-#include "nvs.h"
 #include "power_policy.h"
 #include "service_claude.h"
 #include "service_market.h"
@@ -37,7 +37,6 @@
 
 #define DEVICE_LINK_PROTOCOL_PREFIX "@esp32dash "
 #define DEVICE_LINK_PROTOCOL_VERSION 1
-#define DEVICE_LINK_LINE_MAX 768
 #define DEVICE_LINK_HELLO_INTERVAL_MS 1000
 #define DEVICE_LINK_WRITE_TIMEOUT_MS 20
 #define DEVICE_LINK_WRITE_CHUNK_BYTES 128
@@ -105,13 +104,6 @@ typedef struct {
     weather_location_config_t weather;
 } pending_config_t;
 
-static const char *capabilities[] = {
-    "device.info",   "device.reboot",        "config.export",         "config.set_many",
-    "wifi.scan",     "wifi.profiles.list",   "wifi.profile.add",      "wifi.profile.remove",
-    "claude.update", "claude.heartbeat",     "protocol.error",        "home.screensaver",
-    "app.switch",    "screen.capture.start", "debug.market_snapshot",
-};
-
 static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
 {
     switch ((wifi_auth_mode_t)auth_mode) {
@@ -134,29 +126,6 @@ static const char *wifi_auth_mode_to_string(uint8_t auth_mode)
     default:
         return "unknown";
     }
-}
-
-static claude_run_state_t claude_status_from_text(const char *status)
-{
-    if (status == NULL) {
-        return CLAUDE_RUN_UNKNOWN;
-    }
-    if (strcmp(status, "waiting_for_input") == 0) {
-        return CLAUDE_RUN_WAITING_FOR_INPUT;
-    }
-    if (strcmp(status, "processing") == 0) {
-        return CLAUDE_RUN_PROCESSING;
-    }
-    if (strcmp(status, "running_tool") == 0) {
-        return CLAUDE_RUN_RUNNING_TOOL;
-    }
-    if (strcmp(status, "compacting") == 0) {
-        return CLAUDE_RUN_COMPACTING;
-    }
-    if (strcmp(status, "ended") == 0) {
-        return CLAUDE_RUN_ENDED;
-    }
-    return CLAUDE_RUN_UNKNOWN;
 }
 
 static void write_protocol_json(cJSON *root)
@@ -400,8 +369,8 @@ static void note_protocol_overflow(size_t dropped_bytes)
 
     cJSON_AddStringToObject(payload, "code", "line_too_long");
     cJSON_AddNumberToObject(payload, "line_bytes", (double)dropped_bytes);
-    cJSON_AddNumberToObject(payload, "line_limit", DEVICE_LINK_LINE_MAX);
-    send_event_frame("protocol.error", payload);
+    cJSON_AddNumberToObject(payload, "line_limit", DEVICE_PROTOCOL_LINE_MAX);
+    send_event_frame(DP_METHOD_PROTOCOL_ERROR, payload);
 }
 
 static void send_hello(void)
@@ -420,8 +389,8 @@ static void send_hello(void)
     cJSON_AddNumberToObject(root, "protocol_version", DEVICE_LINK_PROTOCOL_VERSION);
     cJSON_AddStringToObject(root, "device_id", s_device_id);
     cJSON_AddStringToObject(root, "product", BSP_BOARD_NAME);
-    for (i = 0; i < sizeof(capabilities) / sizeof(capabilities[0]); ++i) {
-        cJSON_AddItemToArray(caps, cJSON_CreateString(capabilities[i]));
+    for (i = 0; i < device_protocol_method_count; ++i) {
+        cJSON_AddItemToArray(caps, cJSON_CreateString(device_protocol_methods[i]));
     }
     cJSON_AddItemToObject(root, "capabilities", caps);
     write_protocol_json(root);
@@ -436,56 +405,6 @@ static void hello_task(void *arg)
         send_hello();
         vTaskDelay(pdMS_TO_TICKS(DEVICE_LINK_HELLO_INTERVAL_MS));
     }
-}
-
-static bool copy_json_string(const cJSON *object, const char *key, char *dst, size_t dst_size)
-{
-    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
-
-    if (!cJSON_IsString(item) || item->valuestring == NULL) {
-        return false;
-    }
-
-    snprintf(dst, dst_size, "%s", item->valuestring);
-    return true;
-}
-
-static esp_err_t write_namespace_strings(const char *namespace_name, const char *const *keys,
-                                         const char *const *values, const bool *writes,
-                                         size_t count)
-{
-    nvs_handle_t handle = 0;
-    esp_err_t err = ESP_OK;
-    size_t i = 0;
-    bool dirty = false;
-
-    for (i = 0; i < count; ++i) {
-        if (writes[i]) {
-            dirty = true;
-            break;
-        }
-    }
-
-    if (!dirty) {
-        return ESP_OK;
-    }
-
-    ESP_RETURN_ON_ERROR(nvs_open(namespace_name, NVS_READWRITE, &handle), TAG,
-                        "failed to open namespace %s", namespace_name);
-    for (i = 0; i < count; ++i) {
-        if (!writes[i]) {
-            continue;
-        }
-        err = nvs_set_str(handle, keys[i], values[i]);
-        if (err != ESP_OK) {
-            nvs_close(handle);
-            return err;
-        }
-    }
-
-    err = nvs_commit(handle);
-    nvs_close(handle);
-    return err;
 }
 
 static cJSON *build_config_export(void)
@@ -628,11 +547,6 @@ static esp_err_t apply_pending_config(const pending_config_t *pending, cJSON **r
     }
 
     if (time_changed) {
-        const char *keys[] = {"timezone_name", "timezone"};
-        const char *values[] = {final_timezone_name, final_timezone_tz};
-        bool writes[] = {pending->set_timezone_name, pending->set_timezone_tz};
-        ESP_RETURN_ON_ERROR(write_namespace_strings("time", keys, values, writes, 2), TAG,
-                            "failed to persist time config");
         ESP_RETURN_ON_ERROR(
             time_service_apply_timezone_config(final_timezone_name, final_timezone_tz), TAG,
             "failed to apply timezone config");
@@ -645,13 +559,6 @@ static esp_err_t apply_pending_config(const pending_config_t *pending, cJSON **r
     }
 
     if (weather_changed) {
-        const char *keys[] = {"city_label", "latitude", "longitude"};
-        const char *values[] = {current_weather.city_label, current_weather.latitude,
-                                current_weather.longitude};
-        bool writes[] = {pending->set_weather_city, pending->set_weather_latitude,
-                         pending->set_weather_longitude};
-        ESP_RETURN_ON_ERROR(write_namespace_strings("weather", keys, values, writes, 3), TAG,
-                            "failed to persist weather config");
         ESP_RETURN_ON_ERROR(weather_service_apply_location_config(&current_weather), TAG,
                             "failed to apply weather config");
         if (pending->set_weather_city) {
@@ -929,58 +836,6 @@ static cJSON *build_market_snapshot_debug(void)
     return result;
 }
 
-/* `pending` is null/absent or {"kind": "approval"|"prompt", "type": "<coarse type>"}. */
-static void parse_claude_pending(const cJSON *pending, claude_snapshot_t *snapshot)
-{
-    char kind[16] = {0};
-
-    snapshot->pending_kind = CLAUDE_PENDING_NONE;
-    snapshot->pending_type[0] = '\0';
-    if (!cJSON_IsObject(pending)) {
-        return;
-    }
-
-    copy_json_string(pending, "kind", kind, sizeof(kind));
-    if (strcmp(kind, "approval") == 0) {
-        snapshot->pending_kind = CLAUDE_PENDING_APPROVAL;
-    } else if (strcmp(kind, "prompt") == 0) {
-        snapshot->pending_kind = CLAUDE_PENDING_PROMPT;
-    } else {
-        return;
-    }
-    copy_json_string(pending, "type", snapshot->pending_type, sizeof(snapshot->pending_type));
-}
-
-static esp_err_t parse_claude_update(const cJSON *payload, claude_snapshot_t *snapshot)
-{
-    const cJSON *seq = cJSON_GetObjectItemCaseSensitive(payload, "seq");
-    const cJSON *unread = cJSON_GetObjectItemCaseSensitive(payload, "unread");
-    const cJSON *ts = cJSON_GetObjectItemCaseSensitive(payload, "ts");
-    char status[32] = {0};
-
-    if (!cJSON_IsObject(payload) || snapshot == NULL || !cJSON_IsNumber(seq) ||
-        !cJSON_IsBool(unread) || !cJSON_IsNumber(ts)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    memset(snapshot, 0, sizeof(*snapshot));
-    snapshot->seq = (uint32_t)seq->valuedouble;
-    snapshot->unread = cJSON_IsTrue(unread);
-    snapshot->updated_at_epoch_s = (uint32_t)ts->valuedouble;
-    copy_json_string(payload, "session_id", snapshot->session_id, sizeof(snapshot->session_id));
-    copy_json_string(payload, "workspace", snapshot->workspace, sizeof(snapshot->workspace));
-    copy_json_string(payload, "title", snapshot->title, sizeof(snapshot->title));
-    copy_json_string(payload, "detail", snapshot->detail, sizeof(snapshot->detail));
-    copy_json_string(payload, "emotion", snapshot->emotion, sizeof(snapshot->emotion));
-    copy_json_string(payload, "event", snapshot->event, sizeof(snapshot->event));
-    copy_json_string(payload, "permission_mode", snapshot->permission_mode,
-                     sizeof(snapshot->permission_mode));
-    copy_json_string(payload, "status", status, sizeof(status));
-    snapshot->run_state = claude_status_from_text(status);
-    parse_claude_pending(cJSON_GetObjectItemCaseSensitive(payload, "pending"), snapshot);
-    return ESP_OK;
-}
-
 static void handle_event_frame(const cJSON *root)
 {
     const cJSON *method = cJSON_GetObjectItemCaseSensitive(root, "method");
@@ -990,10 +845,11 @@ static void handle_event_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "claude.update") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_CLAUDE_UPDATE) == 0) {
         claude_snapshot_t snapshot = {0};
-        esp_err_t err = parse_claude_update(payload, &snapshot);
-        if (err == ESP_OK) {
+        esp_err_t err = ESP_OK;
+
+        if (device_protocol_parse_claude_update(payload, &snapshot)) {
             /* Bring Home forward only when an interaction starts waiting; a user
              * who then navigates away is left alone while it stays pending. */
             if (claude_service_apply_remote_snapshot(&snapshot)) {
@@ -1003,12 +859,12 @@ static void handle_event_frame(const cJSON *root)
                 }
             }
         } else {
-            ESP_LOGW(TAG, "claude.update: parse failed (0x%x)", (unsigned)err);
+            ESP_LOGW(TAG, "claude.update: invalid payload");
         }
         return;
     }
 
-    if (strcmp(method->valuestring, "claude.heartbeat") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_CLAUDE_HEARTBEAT) == 0) {
         claude_service_note_transport_alive();
         return;
     }
@@ -1026,12 +882,12 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "device.info") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_DEVICE_INFO) == 0) {
         send_response_ok(id->valuestring, build_device_info());
         return;
     }
 
-    if (strcmp(method->valuestring, "device.reboot") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_DEVICE_REBOOT) == 0) {
         cJSON *result = cJSON_CreateObject();
         cJSON_AddBoolToObject(result, "restarting", true);
         send_response_ok(id->valuestring, result);
@@ -1040,12 +896,12 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "config.export") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_CONFIG_EXPORT) == 0) {
         send_response_ok(id->valuestring, build_config_export());
         return;
     }
 
-    if (strcmp(method->valuestring, "config.set_many") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_CONFIG_SET_MANY) == 0) {
         pending_config_t pending = {0};
         cJSON *result = NULL;
         esp_err_t err = parse_set_many_params(params, &pending);
@@ -1061,7 +917,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "wifi.scan") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_WIFI_SCAN) == 0) {
         cJSON *result = build_wifi_scan_result();
         if (result == NULL) {
             send_response_error(id->valuestring, "scan_failed", "Wi-Fi scan failed");
@@ -1071,7 +927,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "wifi.profiles.list") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_WIFI_PROFILES_LIST) == 0) {
         cJSON *result = build_wifi_profiles_result();
         if (result == NULL) {
             send_response_error(id->valuestring, "list_failed", "Wi-Fi profile list failed");
@@ -1081,7 +937,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "wifi.profile.add") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_WIFI_PROFILE_ADD) == 0) {
         const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(params, "ssid");
         const cJSON *password = cJSON_GetObjectItemCaseSensitive(params, "password");
         const cJSON *hidden = cJSON_GetObjectItemCaseSensitive(params, "hidden");
@@ -1112,7 +968,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "wifi.profile.remove") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_WIFI_PROFILE_REMOVE) == 0) {
         const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(params, "ssid");
         esp_err_t err;
 
@@ -1130,7 +986,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "home.screensaver") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_HOME_SCREENSAVER) == 0) {
         const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(params, "enabled");
         const cJSON *effect = cJSON_GetObjectItemCaseSensitive(params, "effect");
         const char *effect_name = cJSON_IsString(effect) ? effect->valuestring : NULL;
@@ -1145,7 +1001,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "app.switch") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_APP_SWITCH) == 0) {
         const cJSON *app = cJSON_GetObjectItemCaseSensitive(params, "app");
         app_id_t app_id = APP_ID_INVALID;
         esp_err_t err;
@@ -1169,7 +1025,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "screen.capture.start") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_SCREEN_CAPTURE_START) == 0) {
         app_screenshot_t capture = {0};
         uint8_t *buffer = NULL;
         char capture_id[32];
@@ -1220,7 +1076,7 @@ static void handle_request_frame(const cJSON *root)
         return;
     }
 
-    if (strcmp(method->valuestring, "debug.market_snapshot") == 0) {
+    if (strcmp(method->valuestring, DP_METHOD_DEBUG_MARKET_SNAPSHOT) == 0) {
         cJSON *result = build_market_snapshot_debug();
 
         if (result == NULL) {
@@ -1264,11 +1120,8 @@ static void process_protocol_line(const char *line)
 
 static void reader_task(void *arg)
 {
-    char line[DEVICE_LINK_LINE_MAX];
+    device_protocol_line_t assembler = {0};
     uint8_t buffer[128];
-    size_t line_len = 0;
-    size_t dropped_bytes = 0;
-    bool discarding_line = false;
 
     (void)arg;
 
@@ -1287,37 +1140,17 @@ static void reader_task(void *arg)
         }
 
         for (int i = 0; i < bytes_read; ++i) {
-            char ch = (char)buffer[i];
+            size_t dropped_bytes = 0;
 
-            if (ch == '\r') {
-                continue;
-            }
-            if (ch == '\n') {
-                if (discarding_line) {
-                    note_protocol_overflow(dropped_bytes);
-                    dropped_bytes = 0;
-                    discarding_line = false;
-                } else {
-                    line[line_len] = '\0';
-                    if (line_len > 0) {
-                        process_protocol_line(line);
-                    }
-                }
-                line_len = 0;
-                continue;
-            }
-
-            if (discarding_line) {
-                dropped_bytes++;
-                continue;
-            }
-
-            if (line_len + 1 < sizeof(line)) {
-                line[line_len++] = ch;
-            } else {
-                dropped_bytes = line_len + 1;
-                discarding_line = true;
-                line_len = 0;
+            switch (device_protocol_line_feed(&assembler, (char)buffer[i], &dropped_bytes)) {
+            case DEVICE_PROTOCOL_LINE_READY:
+                process_protocol_line(assembler.line);
+                break;
+            case DEVICE_PROTOCOL_LINE_OVERFLOW:
+                note_protocol_overflow(dropped_bytes);
+                break;
+            default:
+                break;
             }
         }
     }

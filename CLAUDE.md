@@ -28,6 +28,7 @@ ESP-IDF / LVGL / FreeRTOS
 
 - **app_manager** (`src/components/core_app_manager/`): Manages the fixed app roster, handles app lifecycle (init, resume, suspend). Uses a FreeRTOS queue to route events — producers (timer, Wi-Fi, USB) enqueue event types, the LVGL task drains the queue and dispatches to the foreground app.
 - **event_bus** (`src/components/core_event_bus/`): Central event distribution system. Event payloads are NULL; subscribers use event type as a signal and query services for data.
+- **device_protocol** (`src/components/device_protocol/`): The hardware-free part of the host/device serial protocol — line assembly with the overflow guard, `claude.update` parsing, and the method list the device declares. Depends only on cJSON and libc; `device_link` is the serial adapter on top of it. `make test-host` builds it with the system `cc` and checks it against `protocol/fixtures/`, the same sample frames the Rust agent's tests read.
 - **BSP Layer** (`src/components/bsp_board/`): Board support package abstracting display (AXS15231B QSPI LCD), touch (I2C), and RTC (PCF85063). The LVGL task calls a registered UI callback (`bsp_display_set_ui_callback`) each tick to process queued events.
 - **Services**: Background data services for time (NTP+RTC), weather, market data, and Claude Code status. Each service protects its snapshot with a FreeRTOS mutex and exposes a copy-out getter (`void get(X *out)`) — callers receive a stack copy, never a live pointer.
 - **Power Policy** (`src/components/power_policy/`): Manages display states (ACTIVE/DIM/SLEEP) and data collection modes based on power source.
@@ -201,6 +202,7 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 ## 命令
 - 固件构建/烧录见上文「Build Commands」：`idf.py build`、`idf.py -p <PORT> flash monitor`、`idf.py fullclean`。
 - 宿主代理: `cd tools/esp32dash && cargo build` / `cargo run -- agent run` / `cargo test`。
+- 固件主机侧测试: `make test-host`(纯 C,需 `brew install cjson`),覆盖 `device_protocol` 与 `protocol/fixtures/` 的契约。
 - 提交前格式化: `pre-commit run --all-files`（需 `pip install pre-commit` 后 `pre-commit install`）。
 
 ## 代码风格

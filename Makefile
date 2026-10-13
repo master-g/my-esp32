@@ -21,7 +21,8 @@ ESP32DASH_LAUNCHD_PLIST ?= $(HOME)/Library/LaunchAgents/$(ESP32DASH_LAUNCHD_LABE
 	port ports flash flash-slow monitor flash-monitor \
 	fmt fmt-check \
 	font-install font-build font-generate \
-	agent-run agent-status
+	agent-run agent-status \
+	test-host
 
 define run_idf
 $(IDF_ACTIVATE) && \
@@ -133,6 +134,21 @@ monitor: ## Open ESP-IDF serial monitor on PORT (PORT=auto will auto-detect)
 
 flash-monitor: ## Flash firmware, then open the serial monitor
 	@$(call run_idf_with_port_guard,-b $(BAUD) flash monitor)
+
+HOST_TEST_BIN := build-host/test_device_protocol
+HOST_TEST_SRCS := src/components/device_protocol/src/device_protocol.c \
+	src/components/device_protocol/test_host/test_device_protocol.c
+HOST_TEST_INCLUDES := -Isrc/components/device_protocol/include \
+	-Isrc/components/service_claude/include \
+	-Isrc/components/device_protocol/test_host/stubs
+
+test-host: ## Run firmware host tests against protocol/fixtures (needs: brew install cjson)
+	@pkg-config --exists libcjson || { echo "cJSON not found. Install it with: brew install cjson"; exit 1; }
+	@mkdir -p build-host
+	@cc -std=c11 -Wall -Wextra -Werror $(HOST_TEST_INCLUDES) \
+		$$(pkg-config --cflags libcjson) -I$$(pkg-config --variable=includedir libcjson)/cjson \
+		$(HOST_TEST_SRCS) $$(pkg-config --libs libcjson) -o $(HOST_TEST_BIN)
+	@$(HOST_TEST_BIN) protocol/fixtures
 
 fmt: ## Format the Rust host tool (firmware C code has no repo formatter configured)
 	@$(CARGO) fmt --all --manifest-path tools/esp32dash/Cargo.toml

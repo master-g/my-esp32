@@ -373,6 +373,26 @@ void weather_service_get_location_config(weather_location_config_t *config)
     weather_service_copy_runtime_state(config, NULL, NULL, NULL, NULL);
 }
 
+static esp_err_t save_location_config_to_nvs(const weather_location_config_t *config)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open("weather", NVS_READWRITE, &handle);
+
+    ESP_RETURN_ON_ERROR(err, TAG, "failed to open weather namespace");
+    err = nvs_set_str(handle, "city_label", config->city_label);
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, "latitude", config->latitude);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, "longitude", config->longitude);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
 esp_err_t weather_service_apply_location_config(const weather_location_config_t *config)
 {
     if (config == NULL || config->city_label[0] == '\0' || config->latitude[0] == '\0' ||
@@ -382,6 +402,8 @@ esp_err_t weather_service_apply_location_config(const weather_location_config_t 
         strlen(config->longitude) >= sizeof(s_location_config.longitude)) {
         return ESP_ERR_INVALID_ARG;
     }
+    ESP_RETURN_ON_ERROR(save_location_config_to_nvs(config), TAG,
+                        "failed to persist weather config");
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     memcpy(&s_location_config, config, sizeof(s_location_config));

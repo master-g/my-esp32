@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "src/device_protocol.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        cjson
+        service_claude
+)

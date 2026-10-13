@@ -414,6 +414,23 @@ void time_service_get_timezone_tz(char *out, size_t out_size)
     xSemaphoreGive(s_mutex);
 }
 
+static esp_err_t save_timezone_to_nvs(const char *timezone_name, const char *timezone_tz)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open("time", NVS_READWRITE, &handle);
+
+    ESP_RETURN_ON_ERROR(err, TAG, "failed to open time namespace");
+    err = nvs_set_str(handle, "timezone_name", timezone_name);
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, "timezone", timezone_tz);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
 esp_err_t time_service_apply_timezone_config(const char *timezone_name, const char *timezone_tz)
 {
     if (timezone_tz == NULL || timezone_tz[0] == '\0' ||
@@ -423,6 +440,8 @@ esp_err_t time_service_apply_timezone_config(const char *timezone_name, const ch
     if (timezone_name == NULL || strlen(timezone_name) >= sizeof(s_timezone_name)) {
         return ESP_ERR_INVALID_ARG;
     }
+    ESP_RETURN_ON_ERROR(save_timezone_to_nvs(timezone_name, timezone_tz), TAG,
+                        "failed to persist timezone config");
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     snprintf(s_timezone, sizeof(s_timezone), "%s", timezone_tz);

@@ -9,13 +9,13 @@ idf_component_register(
         core_app_manager
         core_event_bus
         core_types
+        device_protocol
         esp_app_format
         esp_driver_usb_serial_jtag
         esp_system
         esp_wifi
         mbedtls
         net_manager
-        nvs_flash
         service_claude
         service_market
         service_time
