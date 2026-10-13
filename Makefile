@@ -149,6 +149,10 @@ test-host: ## Run firmware host tests against protocol/fixtures (needs: brew ins
 		$$(pkg-config --cflags libcjson) -I$$(pkg-config --variable=includedir libcjson)/cjson \
 		$(HOST_TEST_SRCS) $$(pkg-config --libs libcjson) -o $(HOST_TEST_BIN)
 	@$(HOST_TEST_BIN) protocol/fixtures
+	@cc -std=c11 -Wall -Wextra -Werror -Isrc/apps/app_home/src \
+		src/apps/app_home/src/sprite_codec.c src/apps/app_home/src/generated/sprite_sheets.c \
+		src/apps/app_home/test_host/test_sprite_codec.c -o build-host/test_sprite_codec
+	@build-host/test_sprite_codec
 
 fmt: ## Format the Rust host tool (firmware C code has no repo formatter configured)
 	@$(CARGO) fmt --all --manifest-path tools/esp32dash/Cargo.toml

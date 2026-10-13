@@ -1,145 +1,226 @@
 #!/usr/bin/env python3
-"""Convert Notchi sprite sheets to LVGL v9 C arrays (ARGB8888 format)."""
+"""Convert the Home sprite sheets in tools/sprite_assets into compact C tables.
+
+Each sheet becomes one palette (RGB565, index 0 = transparent), one crop rectangle
+shared by its frames, and one run-length stream per distinct frame. The firmware
+decodes a frame into a 64x64 ARGB8888 buffer with sprite_decode_frame().
+
+The script refuses to write output unless every frame round-trips: decoding the
+emitted data must equal the source image reduced to RGB565 (the panel's depth).
+"""
 
 import os
 import sys
+
 from PIL import Image
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ASSETS_DIR = os.path.join(
-    REPO_ROOT,
-    "docs/research/notchi/notchi/notchi/Assets.xcassets",
-)
+ASSETS_DIR = os.path.join(REPO_ROOT, "tools/sprite_assets")
 OUTPUT_DIR = os.path.join(REPO_ROOT, "src/apps/app_home/src/generated")
 
-FRAME_W = 64
-FRAME_H = 64
-BYTES_PER_PIXEL = 4  # ARGB8888
-FRAME_DATA_SIZE = FRAME_W * FRAME_H * BYTES_PER_PIXEL
-STRIDE = FRAME_W * BYTES_PER_PIXEL
+FRAME = 64
 
+# (symbol, frames). The PNG is tools/sprite_assets/<symbol>.png, 64px tall.
 SPRITES = [
-    ("idle", "idle_neutral", 6),
-    ("idle_happy", "idle_happy", 6),
-    ("idle_sad", "idle_sad", 6),
-    ("idle_sob", "idle_sob", 6),
-    ("working", "working_neutral", 6),
-    ("working_happy", "working_happy", 6),
-    ("working_sad", "working_sad", 6),
-    ("waiting", "waiting_neutral", 6),
-    ("waiting_happy", "waiting_happy", 6),
-    ("waiting_sad", "waiting_sad", 6),
-    ("compacting", "compacting_neutral", 5),
-    ("sleeping", "sleeping_neutral", 6),
-    ("sleeping_happy", "sleeping_happy", 6),
+    ("idle", 6),
+    ("idle_happy", 6),
+    ("idle_sad", 6),
+    ("idle_sob", 6),
+    ("working", 6),
+    ("working_happy", 6),
+    ("working_sad", 6),
+    ("waiting", 6),
+    ("waiting_happy", 6),
+    ("waiting_sad", 6),
+    ("compacting", 5),
+    ("sleeping", 6),
+    ("sleeping_happy", 6),
 ]
 
 
-def convert_sheet(symbol_name: str, asset_name: str, num_frames: int) -> str:
-    """Convert one sprite sheet PNG to LVGL C source."""
-    png_path = os.path.join(ASSETS_DIR, f"{asset_name}.imageset", "sprite_sheet.png")
-    img = Image.open(png_path).convert("RGBA")
+def to_rgb565(r, g, b):
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
 
-    if img.height != FRAME_H or img.width % FRAME_W != 0:
-        raise ValueError(
-            f"{asset_name} must be {FRAME_H}px tall and a multiple of {FRAME_W}px wide"
-        )
 
-    actual_frames = img.width // FRAME_W
-    if actual_frames != num_frames:
-        raise ValueError(f"{asset_name} has {actual_frames} frames, expected {num_frames}")
+def expand_bgra(c565):
+    r5, g6, b5 = c565 >> 11, (c565 >> 5) & 0x3F, c565 & 0x1F
+    return bytes(((b5 << 3) | (b5 >> 2), (g6 << 2) | (g6 >> 4), (r5 << 3) | (r5 >> 2), 0xFF))
 
-    lines = [
-        f'/* Auto-generated from {asset_name} — do not edit */',
-        '#include "lvgl.h"',
-        "",
-    ]
 
-    # Emit raw data for all frames as one contiguous array
-    data_var = f"sprite_{symbol_name}_data"
-    lines.append(f"static const uint8_t {data_var}[] = {{")
-
+def load_frames(symbol, num_frames):
+    img = Image.open(os.path.join(ASSETS_DIR, f"{symbol}.png")).convert("RGBA")
+    if img.height != FRAME or img.width != FRAME * num_frames:
+        raise ValueError(f"{symbol}: expected {num_frames} frames of {FRAME}x{FRAME}")
+    frames = []
     for fi in range(num_frames):
-        frame = img.crop((fi * FRAME_W, 0, (fi + 1) * FRAME_W, FRAME_H))
-        pixels = list(frame.getdata())  # [(R,G,B,A), ...]
-
-        lines.append(f"    /* frame {fi} */")
+        pixels = img.crop((fi * FRAME, 0, (fi + 1) * FRAME, FRAME)).get_flattened_data()
+        frame = []
         for r, g, b, a in pixels:
-            for byte in (b, g, r, a):
-                lines.append(f"    0x{byte:02x},")
-
-    lines.append("};")
-    lines.append("")
-
-    # Emit descriptor array
-    dsc_var = f"sprite_{symbol_name}_frames"
-    lines.append(f"const lv_image_dsc_t {dsc_var}[{num_frames}] = {{")
-    for fi in range(num_frames):
-        offset = fi * FRAME_DATA_SIZE
-        lines.append("    {")
-        lines.append("        .header.magic = LV_IMAGE_HEADER_MAGIC,")
-        lines.append("        .header.cf = LV_COLOR_FORMAT_ARGB8888,")
-        lines.append(f"        .header.w = {FRAME_W},")
-        lines.append(f"        .header.h = {FRAME_H},")
-        lines.append(f"        .header.stride = {STRIDE},")
-        lines.append(f"        .data_size = {FRAME_DATA_SIZE},")
-        lines.append(f"        .data = &{data_var}[{offset}],")
-        lines.append("    },")
-    lines.append("};")
-    lines.append("")
-
-    return "\n".join(lines)
+            if a not in (0, 255):
+                raise ValueError(f"{symbol}: partial alpha is not supported")
+            frame.append(None if a == 0 else to_rgb565(r, g, b))
+        frames.append(frame)
+    return frames
 
 
-def generate_header() -> str:
-    """Generate the shared header with extern declarations."""
-    lines = [
-        "/* Auto-generated — do not edit */",
-        "#ifndef SPRITE_FRAMES_H",
-        "#define SPRITE_FRAMES_H",
-        "",
-        '#include "lvgl.h"',
-        "",
-        f"#define SPRITE_FRAME_W {FRAME_W}",
-        f"#define SPRITE_FRAME_H {FRAME_H}",
-        "",
-    ]
+def encode_sheet(symbol, frames):
+    xs = [i % FRAME for f in frames for i, c in enumerate(f) if c is not None]
+    ys = [i // FRAME for f in frames for i, c in enumerate(f) if c is not None]
+    x0, y0, w, h = min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
 
-    for symbol_name, _, num_frames in SPRITES:
-        lines.append(f"#define SPRITE_{symbol_name.upper()}_FRAME_COUNT {num_frames}")
-    lines.append("")
+    palette = [0] + sorted({c for f in frames for c in f if c is not None})
+    if len(palette) > 256:
+        raise ValueError(f"{symbol}: {len(palette) - 1} colours do not fit an 8-bit index")
+    index = {c: i for i, c in enumerate(palette) if i > 0}
+    index[None] = 0
 
-    for symbol_name, _, _ in SPRITES:
-        lines.append(
-            f"extern const lv_image_dsc_t sprite_{symbol_name}_frames"
-            f"[SPRITE_{symbol_name.upper()}_FRAME_COUNT];"
-        )
+    streams = []
+    for frame in frames:
+        cropped = [index[frame[(y0 + y) * FRAME + x0 + x]] for y in range(h) for x in range(w)]
+        stream = bytearray()
+        i = 0
+        while i < len(cropped):
+            j = i
+            while j < len(cropped) and j - i < 255 and cropped[j] == cropped[i]:
+                j += 1
+            stream += bytes((j - i, cropped[i]))
+            i = j
+        streams.append(bytes(stream))
+    return (x0, y0, w, h), palette, streams
 
-    lines.extend(["", "#endif /* SPRITE_FRAMES_H */", ""])
-    return "\n".join(lines)
+
+def decode_frame(rect, palette, stream):
+    """Reference decoder; sprite_decode_frame() in C must produce the same bytes."""
+    x0, y0, w, h = rect
+    out = bytearray(FRAME * FRAME * 4)
+    pos = 0
+    for k in range(0, len(stream), 2):
+        run, idx = stream[k], stream[k + 1]
+        if idx != 0:
+            bgra = expand_bgra(palette[idx])
+            for p in range(pos, pos + run):
+                off = ((y0 + p // w) * FRAME + x0 + p % w) * 4
+                out[off : off + 4] = bgra
+        pos += run
+    if pos != w * h:
+        raise ValueError("run-length stream does not cover the crop rectangle")
+    return bytes(out)
+
+
+def expected_frame(frame):
+    out = bytearray()
+    for c in frame:
+        out += bytes(4) if c is None else expand_bgra(c)
+    return bytes(out)
+
+
+def fnv1a(data):
+    h = 0x811C9DC5
+    for byte in data:
+        h = ((h ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def c_bytes(data, per_line=20):
+    return "\n".join(
+        "    " + " ".join(f"0x{b:02x}," for b in data[i : i + per_line])
+        for i in range(0, len(data), per_line)
+    )
 
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    src = [
+        "/* Auto-generated by tools/sprite_convert.py — do not edit */",
+        "/* clang-format off */",
+        '#include "sprite_sheets.h"',
+        "",
+    ]
+    hdr = [
+        "/* Auto-generated by tools/sprite_convert.py — do not edit */",
+        "/* clang-format off */",
+        "#ifndef SPRITE_SHEETS_H",
+        "#define SPRITE_SHEETS_H",
+        "",
+        '#include "../sprite_codec.h"',
+        "",
+    ]
+    exp = [
+        "/* Auto-generated by tools/sprite_convert.py — do not edit */",
+        "/* clang-format off */",
+        "/* FNV-1a of every decoded frame, checked by `make test-host`. */",
+        "#ifndef SPRITE_SHEETS_EXPECTED_H",
+        "#define SPRITE_SHEETS_EXPECTED_H",
+        "",
+        '#include "sprite_sheets.h"',
+        "",
+        "typedef struct {",
+        "    const char *name;",
+        "    const sprite_sheet_t *sheet;",
+        "    const uint32_t *frame_hashes;",
+        "} sprite_expected_t;",
+        "",
+    ]
+    table = []
+    total = 0
 
-    for symbol_name, asset_name, num_frames in SPRITES:
-        c_src = convert_sheet(symbol_name, asset_name, num_frames)
-        out_path = os.path.join(OUTPUT_DIR, f"sprite_{symbol_name}.c")
-        with open(out_path, "w") as f:
-            f.write(c_src)
-        size_kb = os.path.getsize(out_path) / 1024
-        print(f"  {out_path} ({size_kb:.0f} KB)")
+    for symbol, num_frames in SPRITES:
+        frames = load_frames(symbol, num_frames)
+        rect, palette, streams = encode_sheet(symbol, frames)
+        hashes = []
+        for fi, (frame, stream) in enumerate(zip(frames, streams)):
+            want = expected_frame(frame)
+            if decode_frame(rect, palette, stream) != want:
+                raise SystemExit(f"{symbol} frame {fi}: round-trip mismatch, nothing written")
+            hashes.append(fnv1a(want))
 
-    header = generate_header()
-    header_path = os.path.join(OUTPUT_DIR, "sprite_frames.h")
-    with open(header_path, "w") as f:
-        f.write(header)
-    print(f"  {header_path}")
+        distinct = {}
+        for stream in streams:
+            distinct.setdefault(stream, len(distinct))
+        size = len(palette) * 2 + sum(len(s) for s in distinct)
+        total += size
+        print(
+            f"  {symbol:16} {num_frames} frames ({len(distinct)} distinct), "
+            f"{len(palette) - 1:3} colours, crop {rect[2]}x{rect[3]}, {size} bytes"
+        )
 
-    total_frames = sum(nf for _, _, nf in SPRITES)
-    total_bytes = total_frames * FRAME_DATA_SIZE
-    print(f"\nTotal: {total_frames} frames, {total_bytes / 1024:.0f} KB raw data in flash")
+        var = f"sprite_{symbol}"
+        src.append(f"static const uint16_t {var}_palette[] = {{")
+        src.append("    " + " ".join(f"0x{c:04x}," for c in palette))
+        src.append("};")
+        for stream, di in distinct.items():
+            src.append(f"static const uint8_t {var}_rle{di}[] = {{")
+            src.append(c_bytes(stream))
+            src.append("};")
+        refs = ", ".join(f"{var}_rle{distinct[s]}" for s in streams)
+        src.append(f"static const uint8_t *const {var}_frames[] = {{{refs}}};")
+        src.append(f"const sprite_sheet_t {var} = {{")
+        src.append(f"    .x = {rect[0]}, .y = {rect[1]}, .w = {rect[2]}, .h = {rect[3]},")
+        src.append(f"    .frame_count = {num_frames},")
+        src.append(f"    .palette = {var}_palette,")
+        src.append(f"    .frames = {var}_frames,")
+        src.append("};")
+        src.append("")
+        hdr.append(f"extern const sprite_sheet_t {var};")
+        exp.append(
+            f"static const uint32_t {var}_hashes[] = {{"
+            + ", ".join(f"0x{h:08x}u" for h in hashes)
+            + "};"
+        )
+        table.append(f'    {{"{symbol}", &{var}, {var}_hashes}},')
+
+    hdr += ["", "#endif", ""]
+    exp += ["", "static const sprite_expected_t sprite_expected[] = {"] + table + ["};", "", "#endif", ""]
+
+    for name, lines in (
+        ("sprite_sheets.c", src),
+        ("sprite_sheets.h", hdr),
+        ("sprite_sheets_expected.h", exp),
+    ):
+        with open(os.path.join(OUTPUT_DIR, name), "w") as f:
+            f.write("\n".join(lines))
+    print(f"Wrote {len(SPRITES)} sheets, {total} bytes of sprite data")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -25,6 +25,7 @@
 - [2026-09-14] OMP 不再支持,`hooks install/uninstall` 不再接受 target,只管 Claude Code。hook 脚本中 `$HOME` 下的可执行文件渲染为 `"${HOME}/..."`,与 `~/archdotfiles/ai/.claude/hooks/esp32dash-hook.sh`(被 `~/.claude/hooks/` 软链)逐字一致;`esp32dash hooks install` 返回 `script_written:false` 即为一致。
 - [2026-10-13] 架构加深共识(grilling 定稿,术语见 GLOSSARY.md):顺序为 bug 修复 → 候选 2 合并队列 → 3 删 `claude respond` 全走 ingest → 1 pending interaction 以电平随 `claude.update` 下发并删四个 request/dismiss 帧、删 `home_approval` → 5 `protocol/fixtures/` 两侧共用样例帧 → 4 新建 `device_protocol` component 并把 NVS 写入还给 service_time/service_weather。超时只在主机队列,按 kind 取配置(600/120/180 秒);设备只在 pending 从无到有时切回 Home;主机侧 C 测试用 `cc`+`assert`+Homebrew cJSON,入口 `make test-host`;候选 1 完成时写 `docs/adr/0001-pending-interaction-as-snapshot-level.md`。每个候选一个分支,提交/合并/推送等用户发话。
 - [2026-10-13] 线协议现状:pending interaction 以电平随 `claude.update` 的 `pending` 字段下发(ADR 0001),无 request/dismiss 帧;`service_claude` 持有该状态并设置 `alert_active`;方法名只在 `device_protocol.h` 的 `DP_METHOD_*` 定义;时区/天气的 NVS 读写都在各自 service 内。协议未带版本号,主机与固件必须一起更新。
+- [2026-10-13] Home sprite 存储:源图在 `tools/sprite_assets/*.png`(取自 notchi `ed1e9cf`,不再依赖被 gitignore 的克隆;上游已改名并删了 `sleeping_happy`),`tools/sprite_convert.py` 生成 `generated/sprite_sheets.c`(整张图共用 RGB565 调色板 + 裁剪 + RLE,77 帧共 93 KB,原 ARGB8888 为 1.26 MB),`sprite_codec.c` 每次换帧解到一块 16 KB 的 ARGB8888 缓冲,渲染路径不变。没用 LVGL 原生 I8:它要求 `LV_BIN_DECODER_RAM_LOAD`,且带缩放旋转时每次重绘都从 64 KB 的 LVGL 堆临时分 16 KB。app 分区已从 4 MB 扩到 8 MB(NVS 偏移未变,配置保留),固件 2.19 MB,余 74%。
 
 ## 上次会话
 <!-- 上次运行做了什么、停在何处。滚动记录,超长时最旧条目优先淘汰。 -->
@@ -38,4 +39,4 @@
 - [2026-06-25] 仓库尚无 CONTRIBUTING.md / CODEOWNERS / PR 模板，也未见固件单元测试；按需补充。
 - [2026-06-25] 真机验证 `refactor/firmware-robustness-guards`:重点确认 U3 错误屏留存到重启、RTC 重启计数 N=3 按预期 halt、U5 死锁路径不再死锁。验证后再决定 merge/PR。`BOOT_FAIL_RESTART_LIMIT`(N=3)若不合实际启动失败模式可调。
 - [2026-08-31] 实机「Time not synced」已修(见已验证的事实):98c1ec5 在 main 本地、**未 push**。RTC 电池疑似缺失(掉电即丢时间,靠 NTP 回写)——若在意断电守时可考虑装电池,非 bug。
-- [2026-10-13] 待用户决定:把 `refactor/device-protocol-component` 合回 main 并推送;提交 dotfiles 里的 hook 脚本。遗留:`openspec/specs/` 下 `prompt-store-cleanup`、`device-prompt-ui`、`device-link-atomicity` 描述的是已删除的结构,未处理;`parse_set_many_params` 仍在 `device_link.c`(依赖 service 的配置类型,未搬进 `device_protocol`);行溢出保护只有主机测试,未在真机上发超长行验证。
+- [2026-10-13] 待用户决定:把 `refactor/device-protocol-component` 合回 main 并推送;提交 dotfiles 里的 hook 脚本。遗留:`openspec/specs/` 下 `prompt-store-cleanup`、`device-prompt-ui`、`device-link-atomicity` 描述的是已删除的结构,未处理;`parse_set_many_params` 仍在 `device_link.c`(依赖 service 的配置类型,未搬进 `device_protocol`);行溢出保护只有主机测试,未在真机上发超长行验证。 新增分支 `refactor/sprite-indexed-storage`(叠在最后,含全部),已烧录并截图核对。notchi 跟进未做:过滤 `<task-notification>` 等系统注入的 UserPromptSubmit、去 `<pasted_content>` 标签;可选新素材 `elated`、`waiting_sob`、`working_sob`(现在空间足够)。

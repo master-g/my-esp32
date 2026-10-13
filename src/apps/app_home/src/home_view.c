@@ -4,13 +4,13 @@
 
 #include "bsp_board_config.h"
 #include "generated/app_home_status_font.h"
-#include "generated/sprite_frames.h"
+#include "esp_heap_caps.h"
+#include "generated/sprite_sheets.h"
 #include "home_internal.h"
 #include "ui_fonts.h"
 
 struct sprite_anim_def_t {
-    const lv_image_dsc_t *frames;
-    uint8_t num_frames;
+    const sprite_sheet_t *sheet;
     uint16_t period_ms;
 };
 
@@ -23,51 +23,31 @@ struct sprite_motion_def_t {
 static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT][SPRITE_EMOTION_COUNT] = {
     [SPRITE_STATE_IDLE] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {sprite_idle_frames, SPRITE_IDLE_FRAME_COUNT, 333},
-            [SPRITE_EMOTION_HAPPY] = {sprite_idle_happy_frames, SPRITE_IDLE_HAPPY_FRAME_COUNT, 333},
-            [SPRITE_EMOTION_SAD] = {sprite_idle_sad_frames, SPRITE_IDLE_SAD_FRAME_COUNT, 333},
-            [SPRITE_EMOTION_SOB] = {sprite_idle_sob_frames, SPRITE_IDLE_SOB_FRAME_COUNT, 333},
+            [SPRITE_EMOTION_NEUTRAL] = {&sprite_idle, 333},
+            [SPRITE_EMOTION_HAPPY] = {&sprite_idle_happy, 333},
+            [SPRITE_EMOTION_SAD] = {&sprite_idle_sad, 333},
+            [SPRITE_EMOTION_SOB] = {&sprite_idle_sob, 333},
         },
     [SPRITE_STATE_WORKING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {sprite_working_frames, SPRITE_WORKING_FRAME_COUNT, 250},
-            [SPRITE_EMOTION_HAPPY] =
-                {
-                    sprite_working_happy_frames,
-                    SPRITE_WORKING_HAPPY_FRAME_COUNT,
-                    250,
-                },
-            [SPRITE_EMOTION_SAD] = {sprite_working_sad_frames, SPRITE_WORKING_SAD_FRAME_COUNT, 250},
+            [SPRITE_EMOTION_NEUTRAL] = {&sprite_working, 250},
+            [SPRITE_EMOTION_HAPPY] = {&sprite_working_happy, 250},
+            [SPRITE_EMOTION_SAD] = {&sprite_working_sad, 250},
         },
     [SPRITE_STATE_WAITING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {sprite_waiting_frames, SPRITE_WAITING_FRAME_COUNT, 333},
-            [SPRITE_EMOTION_HAPPY] =
-                {
-                    sprite_waiting_happy_frames,
-                    SPRITE_WAITING_HAPPY_FRAME_COUNT,
-                    333,
-                },
-            [SPRITE_EMOTION_SAD] = {sprite_waiting_sad_frames, SPRITE_WAITING_SAD_FRAME_COUNT, 333},
+            [SPRITE_EMOTION_NEUTRAL] = {&sprite_waiting, 333},
+            [SPRITE_EMOTION_HAPPY] = {&sprite_waiting_happy, 333},
+            [SPRITE_EMOTION_SAD] = {&sprite_waiting_sad, 333},
         },
     [SPRITE_STATE_COMPACTING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] =
-                {
-                    sprite_compacting_frames,
-                    SPRITE_COMPACTING_FRAME_COUNT,
-                    167,
-                },
+            [SPRITE_EMOTION_NEUTRAL] = {&sprite_compacting, 167},
         },
     [SPRITE_STATE_SLEEPING] =
         {
-            [SPRITE_EMOTION_NEUTRAL] = {sprite_sleeping_frames, SPRITE_SLEEPING_FRAME_COUNT, 500},
-            [SPRITE_EMOTION_HAPPY] =
-                {
-                    sprite_sleeping_happy_frames,
-                    SPRITE_SLEEPING_HAPPY_FRAME_COUNT,
-                    500,
-                },
+            [SPRITE_EMOTION_NEUTRAL] = {&sprite_sleeping, 500},
+            [SPRITE_EMOTION_HAPPY] = {&sprite_sleeping_happy, 500},
         },
 };
 
@@ -115,9 +95,20 @@ static const sprite_motion_def_t *current_motion(const home_view_t *view)
     return view->sprite_motion;
 }
 
+/* Decode one frame into the view's buffer and have the image widget redraw it. */
+static void show_sprite_frame(home_view_t *view, const sprite_anim_def_t *anim, uint8_t frame)
+{
+    if (view->sprite_buf == NULL) {
+        return;
+    }
+    sprite_decode_frame(anim->sheet, frame, view->sprite_buf);
+    lv_image_set_src(view->sprite_img, &view->sprite_dsc);
+    lv_obj_invalidate(view->sprite_img);
+}
+
 static bool anim_ready(const sprite_anim_def_t *anim)
 {
-    return anim != NULL && anim->frames != NULL && anim->num_frames != 0U;
+    return anim != NULL && anim->sheet != NULL && anim->sheet->frame_count != 0U;
 }
 
 static bool motion_ready(const sprite_motion_def_t *motion)
@@ -304,8 +295,8 @@ static void sprite_timer_cb(lv_timer_t *timer)
         return;
     }
 
-    view->frame_idx = (uint8_t)((view->frame_idx + 1U) % anim->num_frames);
-    lv_image_set_src(view->sprite_img, &anim->frames[view->frame_idx]);
+    view->frame_idx = (uint8_t)((view->frame_idx + 1U) % anim->sheet->frame_count);
+    show_sprite_frame(view, anim, view->frame_idx);
 }
 
 static void bubble_fade_cb(lv_timer_t *timer)
@@ -358,7 +349,7 @@ static void refresh_sprite(home_view_t *view, sprite_state_t new_state,
     view->sprite_anim = anim;
     view->sprite_motion = motion;
     view->frame_idx = 0;
-    lv_image_set_src(view->sprite_img, &anim->frames[0]);
+    show_sprite_frame(view, anim, 0);
     if (view->sprite_timer != NULL) {
         lv_timer_set_period(view->sprite_timer, anim->period_ms);
     }
@@ -581,8 +572,21 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_obj_set_style_text_font(view->weather_label, ui_font_text_11(), 0);
     lv_obj_set_style_text_color(view->weather_label, lv_color_hex(HOME_WEATHER_TEXT_COLOR), 0);
 
+    view->sprite_buf = heap_caps_malloc(SPRITE_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (view->sprite_buf == NULL) {
+        view->sprite_buf = heap_caps_malloc(SPRITE_FRAME_BYTES, MALLOC_CAP_8BIT);
+    }
+    view->sprite_dsc = (lv_image_dsc_t){
+        .header.magic = LV_IMAGE_HEADER_MAGIC,
+        .header.cf = LV_COLOR_FORMAT_ARGB8888,
+        .header.w = SPRITE_FRAME_W,
+        .header.h = SPRITE_FRAME_H,
+        .header.stride = SPRITE_FRAME_W * 4,
+        .data_size = SPRITE_FRAME_BYTES,
+        .data = view->sprite_buf,
+    };
     view->sprite_img = lv_image_create(view->root);
-    lv_image_set_src(view->sprite_img, &sprite_idle_frames[0]);
+    show_sprite_frame(view, fallback_anim(), 0);
     lv_image_set_scale(view->sprite_img, HOME_SPRITE_SCALE);
     lv_image_set_pivot(view->sprite_img, SPRITE_FRAME_W / 2, SPRITE_FRAME_H - 8);
     lv_image_set_rotation(view->sprite_img, 0);

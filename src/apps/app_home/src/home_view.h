@@ -26,6 +26,8 @@ typedef struct {
     lv_obj_t *claude_icon;
     lv_obj_t *claude_dot;
     lv_obj_t *sprite_img;
+    lv_image_dsc_t sprite_dsc; /* describes sprite_buf, the one decoded frame */
+    uint8_t *sprite_buf;
     lv_obj_t *bubble_box;
     lv_obj_t *bubble_label;
     sprite_state_t sprite_state;

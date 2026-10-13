@@ -41,3 +41,12 @@ Notes
   host-side sanitizer and the device font stay aligned.
 - If the supported character set changes, regenerate the font first, then rebuild `tools/esp32dash`
   so its build script refreshes the sanitizer character table.
+
+`sprite_sheets`
+- Purpose: the Home sprite animations, stored as indexed, cropped, run-length encoded frames
+  (about 93 KB for 77 frames; the previous ARGB8888 arrays took 1.26 MB).
+- Source: `tools/sprite_assets/*.png`, 64px-tall sheets taken from the Notchi project
+  (`sk-ruban/notchi`, `Assets.xcassets` at commit `ed1e9cf`).
+- Regeneration: `python3 tools/sprite_convert.py`. It refuses to write unless every frame decodes
+  back to the source image at RGB565. `sprite_sheets_expected.h` holds per-frame hashes that
+  `make test-host` checks against the C decoder in `src/sprite_codec.c`.
