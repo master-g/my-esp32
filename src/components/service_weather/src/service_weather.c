@@ -14,7 +14,6 @@
 #include "freertos/task.h"
 #include "net_manager.h"
 #include "nvs.h"
-#include "power_policy.h"
 #include "weather_client.h"
 #include "weather_mapper.h"
 
@@ -24,6 +23,7 @@ static weather_location_config_t s_location_config;
 static SemaphoreHandle_t s_mutex;
 static QueueHandle_t s_command_queue;
 static int64_t s_last_request_us;
+static int64_t s_last_attempt_us;
 static int64_t s_last_success_us;
 static bool s_refresh_in_progress;
 
@@ -154,20 +154,28 @@ static void weather_service_update_failure(void)
 {
     s_snapshot.last_error_epoch_s = current_epoch_s();
     s_snapshot.state = (s_last_success_us > 0) ? WEATHER_STALE : WEATHER_ERROR;
+    s_last_attempt_us = esp_timer_get_time();
 }
 
 static bool weather_service_should_auto_refresh(void)
 {
-    power_policy_output_t policy;
     const int64_t now_us = esp_timer_get_time();
     int64_t last_request_us = 0;
     int64_t last_success_us = 0;
+    int64_t last_attempt_us;
     bool refresh_in_progress = false;
 
-    power_policy_get_output(&policy);
     weather_service_copy_runtime_state(NULL, &last_request_us, &last_success_us,
                                        &refresh_in_progress, NULL);
-    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || refresh_in_progress) {
+    if (!net_manager_is_connected() || refresh_in_progress) {
+        return false;
+    }
+
+    /* A failed fetch is retried once a minute, not on every 1 s tick. */
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    last_attempt_us = s_last_attempt_us;
+    xSemaphoreGive(s_mutex);
+    if (last_attempt_us != 0 && (now_us - last_attempt_us) < WEATHER_MANUAL_REFRESH_GUARD_US) {
         return false;
     }
 
@@ -184,17 +192,15 @@ static bool weather_service_should_auto_refresh(void)
 
 static bool weather_service_should_refresh_on_reconnect(void)
 {
-    power_policy_output_t policy;
     const int64_t now_us = esp_timer_get_time();
     int64_t last_request_us = 0;
     int64_t last_success_us = 0;
     bool refresh_in_progress = false;
     weather_state_t state = WEATHER_EMPTY;
 
-    power_policy_get_output(&policy);
     weather_service_copy_runtime_state(NULL, &last_request_us, &last_success_us,
                                        &refresh_in_progress, &state);
-    if (!net_manager_is_connected() || !policy.weather_refresh_allowed || refresh_in_progress) {
+    if (!net_manager_is_connected() || refresh_in_progress) {
         return false;
     }
 
@@ -309,6 +315,7 @@ esp_err_t weather_service_init(void)
         return ESP_ERR_NO_MEM;
     }
     s_last_request_us = 0;
+    s_last_attempt_us = 0;
     s_last_success_us = 0;
     s_refresh_in_progress = false;
     ESP_RETURN_ON_ERROR(event_bus_subscribe(weather_service_event_handler, NULL), TAG,
@@ -324,11 +331,9 @@ esp_err_t weather_service_init(void)
 void weather_service_request_refresh(void)
 {
     weather_service_cmd_t cmd = WEATHER_CMD_REFRESH;
-    power_policy_output_t policy;
     const int64_t now_us = esp_timer_get_time();
 
-    power_policy_get_output(&policy);
-    if (!net_manager_is_connected() || !policy.weather_refresh_allowed) {
+    if (!net_manager_is_connected()) {
         return;
     }
 
@@ -347,13 +352,11 @@ void weather_service_request_refresh(void)
 
 bool weather_service_can_refresh(void)
 {
-    power_policy_output_t policy;
     int64_t last_request_us = 0;
     bool refresh_in_progress = false;
 
-    power_policy_get_output(&policy);
     weather_service_copy_runtime_state(NULL, &last_request_us, NULL, &refresh_in_progress, NULL);
-    if (!net_manager_is_connected() || refresh_in_progress || !policy.weather_refresh_allowed) {
+    if (!net_manager_is_connected() || refresh_in_progress) {
         return false;
     }
 
@@ -411,6 +414,7 @@ esp_err_t weather_service_apply_location_config(const weather_location_config_t 
     s_snapshot.state = WEATHER_EMPTY;
     snprintf(s_snapshot.city, sizeof(s_snapshot.city), "%s", s_location_config.city_label);
     s_last_request_us = 0;
+    s_last_attempt_us = 0;
     s_last_success_us = 0;
     s_refresh_in_progress = false;
     xSemaphoreGive(s_mutex);

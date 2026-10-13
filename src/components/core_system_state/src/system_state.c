@@ -9,8 +9,6 @@
 #include "power_policy.h"
 
 static power_policy_input_t s_input;
-static uint32_t s_user_activity_seq;
-static bool s_alert_active;
 static SemaphoreHandle_t s_mutex;
 static bool s_initialized;
 
@@ -41,11 +39,7 @@ esp_err_t system_state_init(void)
     }
 
     memset(&s_input, 0, sizeof(s_input));
-    s_input.power_source = POWER_SOURCE_USB;
-    s_input.display_state = DISPLAY_STATE_ACTIVE;
     s_input.foreground_app = APP_ID_HOME;
-    s_user_activity_seq = 0;
-    s_alert_active = false;
     s_initialized = true;
 
     // init 跑在启动期单线程,无竞争;直接算并发布初始状态。
@@ -64,44 +58,6 @@ void system_state_get_power_policy_input(power_policy_input_t *out)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     *out = s_input;
     xSemaphoreGive(s_mutex);
-}
-
-uint32_t system_state_get_user_activity_seq(void)
-{
-    uint32_t seq = 0;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    seq = s_user_activity_seq;
-    xSemaphoreGive(s_mutex);
-    return seq;
-}
-
-void system_state_set_power_source(power_source_t power_source)
-{
-    bool changed;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_input.power_source = power_source;
-    changed = recompute_locked();
-    xSemaphoreGive(s_mutex);
-
-    if (changed) {
-        publish_power_changed();
-    }
-}
-
-void system_state_set_display_state(display_state_t display_state)
-{
-    bool changed;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_input.display_state = display_state;
-    changed = recompute_locked();
-    xSemaphoreGive(s_mutex);
-
-    if (changed) {
-        publish_power_changed();
-    }
 }
 
 void system_state_set_foreground_app(app_id_t app_id)
@@ -130,45 +86,4 @@ void system_state_set_wifi_connected(bool wifi_connected)
     if (changed) {
         publish_power_changed();
     }
-}
-
-void system_state_set_user_interacting(bool user_interacting)
-{
-    bool changed;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_input.user_interacting = user_interacting;
-    changed = recompute_locked();
-    xSemaphoreGive(s_mutex);
-
-    if (changed) {
-        publish_power_changed();
-    }
-}
-
-void system_state_note_user_activity(void)
-{
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_user_activity_seq++;
-    xSemaphoreGive(s_mutex);
-}
-
-void system_state_set_alert_active(bool alert_active)
-{
-    /* No recompute_locked()/publish_power_changed(): the alert flag never feeds
-     * power_policy, and emitting POWER_CHANGED on each show/hide would force an
-     * apply_policy_output() that fights the backlight breathe. */
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_alert_active = alert_active;
-    xSemaphoreGive(s_mutex);
-}
-
-bool system_state_get_alert_active(void)
-{
-    bool alert_active;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    alert_active = s_alert_active;
-    xSemaphoreGive(s_mutex);
-    return alert_active;
 }

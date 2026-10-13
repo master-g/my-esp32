@@ -20,7 +20,6 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lvgl.h"
-#include "system_state.h"
 #include "ui_theme.h"
 
 extern esp_err_t bsp_backlight_init(void);
@@ -370,7 +369,6 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
     s_touch_gesture.last_x = (uint16_t)ui_x;
     s_touch_gesture.last_y = (uint16_t)ui_y;
-    system_state_note_user_activity();
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = point.x;
     data->point.y = point.y;

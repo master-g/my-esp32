@@ -24,49 +24,9 @@ static power_policy_output_t compute_output(const power_policy_input_t *input)
     power_policy_output_t output;
 
     memset(&output, 0, sizeof(output));
-
-    switch (input->display_state) {
-    case DISPLAY_STATE_ACTIVE:
-        output.brightness_percent = (input->power_source == POWER_SOURCE_USB) ? 100 : 60;
-        break;
-    case DISPLAY_STATE_DIM:
-        output.brightness_percent = (input->power_source == POWER_SOURCE_USB) ? 35 : 20;
-        break;
-    case DISPLAY_STATE_SLEEP:
-    default:
-        output.brightness_percent = 0;
-        break;
-    }
-
-    output.weather_refresh_allowed = (input->display_state != DISPLAY_STATE_SLEEP);
-    output.should_enter_sleep = (input->display_state == DISPLAY_STATE_SLEEP);
-
-    if (input->display_state == DISPLAY_STATE_SLEEP) {
-        output.claude_mode = REFRESH_MODE_PAUSED;
-        output.market_mode = REFRESH_MODE_PAUSED;
-    } else if (input->display_state == DISPLAY_STATE_DIM) {
-        output.claude_mode = REFRESH_MODE_BACKGROUND_CACHE;
-        output.market_mode = REFRESH_MODE_PAUSED;
-    } else if (input->power_source == POWER_SOURCE_USB) {
-        output.claude_mode = (input->foreground_app == APP_ID_HOME) ? REFRESH_MODE_REALTIME
-                                                                    : REFRESH_MODE_BACKGROUND_CACHE;
-        output.market_mode = (input->foreground_app == APP_ID_TRADING)
-                                 ? REFRESH_MODE_REALTIME
-                                 : REFRESH_MODE_BACKGROUND_CACHE;
-    } else {
-        output.claude_mode = (input->foreground_app == APP_ID_HOME) ? REFRESH_MODE_INTERACTIVE_POLL
-                                                                    : REFRESH_MODE_BACKGROUND_CACHE;
-        output.market_mode = (input->foreground_app == APP_ID_TRADING)
-                                 ? REFRESH_MODE_INTERACTIVE_POLL
-                                 : REFRESH_MODE_PAUSED;
-    }
-
-    if (input->thermal_throttled || input->voltage_guard_triggered) {
-        if (output.market_mode == REFRESH_MODE_REALTIME) {
-            output.market_mode = REFRESH_MODE_INTERACTIVE_POLL;
-        }
-    }
-
+    output.brightness_percent = 100;
+    output.market_mode = (input->foreground_app == APP_ID_TRADING) ? REFRESH_MODE_REALTIME
+                                                                   : REFRESH_MODE_BACKGROUND_CACHE;
     return output;
 }
 
@@ -79,8 +39,6 @@ esp_err_t power_policy_init(void)
 
     memset(&s_input, 0, sizeof(s_input));
     memset(&s_output, 0, sizeof(s_output));
-    s_input.power_source = POWER_SOURCE_USB;
-    s_input.display_state = DISPLAY_STATE_ACTIVE;
     s_input.foreground_app = APP_ID_HOME;
     s_output = compute_output(&s_input);
     return ESP_OK;
@@ -104,17 +62,6 @@ bool power_policy_on_input_changed(const power_policy_input_t *input)
     return changed;
 }
 
-void power_policy_get_input(power_policy_input_t *out)
-{
-    if (out == NULL) {
-        return;
-    }
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    *out = s_input;
-    xSemaphoreGive(s_mutex);
-}
-
 void power_policy_get_output(power_policy_output_t *out)
 {
     if (out == NULL) {
@@ -124,23 +71,4 @@ void power_policy_get_output(power_policy_output_t *out)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     *out = s_output;
     xSemaphoreGive(s_mutex);
-}
-
-bool power_policy_is_refresh_mode(refresh_mode_t expected, app_id_t app_id)
-{
-    bool result = false;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    switch (app_id) {
-    case APP_ID_HOME:
-        result = (s_output.claude_mode == expected);
-        break;
-    case APP_ID_TRADING:
-        result = (s_output.market_mode == expected);
-        break;
-    default:
-        break;
-    }
-    xSemaphoreGive(s_mutex);
-    return result;
 }

@@ -1,5 +1,6 @@
 #include "market_http.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -99,6 +100,11 @@ esp_err_t market_http_get_json(const char *url, size_t capacity, char **out_body
 int32_t market_scale_double(double value, uint32_t factor)
 {
     double scaled = value * (double)factor;
+
+    /* Out-of-range and NaN inputs must not reach the cast (undefined behaviour). */
+    if (!(scaled > (double)INT32_MIN && scaled < (double)INT32_MAX)) {
+        return (scaled > 0.0) ? INT32_MAX : (scaled < 0.0) ? INT32_MIN : 0;
+    }
 
     if (scaled >= 0.0) {
         return (int32_t)(scaled + 0.5);

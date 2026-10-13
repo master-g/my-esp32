@@ -713,11 +713,14 @@ static void retry_timer_cb(TimerHandle_t timer)
     if (s_retry_requires_rescan) {
         /* Do NOT call rebuild_candidate_list() here — it runs a blocking Wi-Fi scan
          * (esp_wifi_scan_start block=true) which would freeze the timer task for ~1.5 s.
-         * Instead, reset the candidate position and round-robin the existing stored
-         * profiles.  A fresh scan happens the next time the user opens Wi-Fi settings. */
+         * Instead, move on to the next stored profile and wrap to the first only once
+         * the list is exhausted, so an unreachable first profile cannot starve the
+         * others.  A fresh scan happens the next time the user opens Wi-Fi settings. */
         s_retry_requires_rescan = false;
         xSemaphoreTake(s_mutex, portMAX_DELAY);
-        s_candidate_pos = 0;
+        if (s_candidate_pos >= s_candidate_count) {
+            s_candidate_pos = 0;
+        }
         xSemaphoreGive(s_mutex);
         if (advance_to_next_candidate() == ESP_OK) {
             return;

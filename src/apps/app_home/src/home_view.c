@@ -429,6 +429,15 @@ static void apply_alert_colors(home_view_t *view, bool flash_phase)
         lv_obj_set_style_text_color(
             view->time_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_EMPHASIS), 0);
     }
+    if (view->secs_label != NULL) {
+        lv_obj_set_style_text_color(
+            view->secs_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
+        lv_obj_set_style_text_color(view->project_label,
+                                    flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_PRIMARY),
+                                    0);
+        lv_obj_set_style_text_color(
+            view->elapsed_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
+    }
     if (view->date_label != NULL) {
         lv_obj_set_style_text_color(
             view->date_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_SECONDARY), 0);
@@ -486,6 +495,52 @@ static void stop_alert_flash(home_view_t *view)
         lv_obj_set_style_bg_color(view->root, lv_color_hex(HOME_BG_BASE_COLOR), 0);
     }
     apply_alert_colors(view, false); /* restore the theme text colors */
+}
+
+static void set_label_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (strcmp(lv_label_get_text(label), text) != 0) {
+        lv_label_set_text(label, text);
+    }
+}
+
+/* "HH:MM:SS" -> big "HH:MM" plus small "SS" hanging off its lower right. */
+static void set_time_text(home_view_t *view, const char *time_text)
+{
+    char hm[6];
+    size_t len = strlen(time_text);
+
+    snprintf(hm, sizeof(hm), "%s", time_text);
+    set_label_text_if_changed(view->time_label, hm);
+    set_label_text_if_changed(view->secs_label, len > 6 ? time_text + 6 : "");
+    lv_obj_update_layout(view->time_label);
+    lv_obj_align_to(view->secs_label, view->time_label, LV_ALIGN_OUT_RIGHT_BOTTOM,
+                    HOME_SECONDS_GAP_X, HOME_SECONDS_OFFSET_Y);
+}
+
+/* Which project is talking, and for how long it has been working. The timer is
+ * local: it starts when the shown session turns to working and restarts when a
+ * different project takes over the screen. */
+static void refresh_session(home_view_t *view, const home_present_model_t *model)
+{
+    char elapsed[16] = "";
+
+    set_label_text_if_changed(view->project_label, model->project);
+    if (model->sprite_state == SPRITE_STATE_WORKING) {
+        uint32_t secs;
+
+        if (!view->working || strcmp(view->working_project, model->project) != 0) {
+            view->working = true;
+            view->working_since_ms = lv_tick_get();
+            snprintf(view->working_project, sizeof(view->working_project), "%s", model->project);
+        }
+        secs = lv_tick_elaps(view->working_since_ms) / 1000U;
+        snprintf(elapsed, sizeof(elapsed), "%u:%02u", (unsigned)(secs / 60U),
+                 (unsigned)(secs % 60U));
+    } else {
+        view->working = false;
+    }
+    set_label_text_if_changed(view->elapsed_label, elapsed);
 }
 
 lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
@@ -569,6 +624,26 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_obj_set_style_text_color(view->time_label, ui_theme_color(UI_THEME_COLOR_TEXT_EMPHASIS), 0);
     lv_obj_align(view->time_label, LV_ALIGN_TOP_LEFT, 0, HOME_TIME_Y);
 
+    view->secs_label = lv_label_create(view->root);
+    lv_obj_set_style_text_font(view->secs_label, ui_font_text_22(), 0);
+    lv_obj_set_style_text_color(view->secs_label, ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
+    lv_label_set_text(view->secs_label, "");
+
+    view->project_label = lv_label_create(view->root);
+    lv_obj_set_width(view->project_label, HOME_SESSION_W);
+    lv_label_set_long_mode(view->project_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(view->project_label, ui_font_text_22(), 0);
+    lv_obj_set_style_text_color(view->project_label, ui_theme_color(UI_THEME_COLOR_TEXT_PRIMARY),
+                                0);
+    lv_label_set_text(view->project_label, "");
+    lv_obj_align(view->project_label, LV_ALIGN_TOP_LEFT, HOME_SESSION_X, HOME_SESSION_Y);
+
+    view->elapsed_label = lv_label_create(view->root);
+    lv_obj_set_style_text_font(view->elapsed_label, ui_font_text_11(), 0);
+    lv_obj_set_style_text_color(view->elapsed_label, ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
+    lv_label_set_text(view->elapsed_label, "");
+    lv_obj_align(view->elapsed_label, LV_ALIGN_TOP_LEFT, HOME_SESSION_X, HOME_ELAPSED_Y);
+
     view->date_label = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->date_label, ui_font_text_22(), 0);
     lv_obj_set_style_text_color(view->date_label, ui_theme_color(UI_THEME_COLOR_TEXT_SECONDARY), 0);
@@ -625,11 +700,11 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_obj_set_size(view->bubble_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_max_width(view->bubble_box, HOME_BUBBLE_MAX_W, 0);
     lv_obj_set_style_bg_color(view->bubble_box, lv_color_hex(HOME_BUBBLE_BG_COLOR), 0);
-    lv_obj_set_style_bg_opa(view->bubble_box, LV_OPA_80, 0);
+    lv_obj_set_style_bg_opa(view->bubble_box, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(view->bubble_box, HOME_BUBBLE_RADIUS, 0);
     lv_obj_set_style_pad_hor(view->bubble_box, HOME_BUBBLE_PAD_H, 0);
     lv_obj_set_style_pad_ver(view->bubble_box, HOME_BUBBLE_PAD_V, 0);
-    lv_obj_align(view->bubble_box, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_align(view->bubble_box, LV_ALIGN_BOTTOM_LEFT, HOME_SESSION_X, 0);
     lv_obj_add_flag(view->bubble_box, LV_OBJ_FLAG_HIDDEN);
 
     view->bubble_label = lv_label_create(view->bubble_box);
@@ -659,14 +734,15 @@ void home_view_apply(home_view_t *view, const home_present_model_t *model)
         return;
     }
 
-    lv_label_set_text(view->time_label, model->time_text);
-    lv_label_set_text(view->date_label, model->date_line);
+    set_time_text(view, model->time_text);
+    set_label_text_if_changed(view->date_label, model->date_line);
+    refresh_session(view, model);
 
     lv_label_set_text_static(view->wifi_icon, model->wifi_symbol);
     set_status_dot_visible(view->wifi_dot, model->wifi_dot_visible);
     set_status_dot_visible(view->claude_dot, model->claude_dot_visible);
     lv_label_set_text_static(view->weather_icon, model->weather_symbol);
-    lv_label_set_text(view->weather_label, model->weather_text);
+    set_label_text_if_changed(view->weather_label, model->weather_text);
 
     /* Cache the dynamic icon/weather colors; the color actually applied may be
      * inverted to dark on the pink flash phase (see apply_alert_colors). */
@@ -701,7 +777,7 @@ void home_view_apply(home_view_t *view, const home_present_model_t *model)
 
 void home_view_set_hidden(home_view_t *view, bool hidden)
 {
-    lv_obj_t *objects[4];
+    lv_obj_t *objects[7];
     size_t i;
 
     if (view == NULL) {
@@ -714,6 +790,9 @@ void home_view_set_hidden(home_view_t *view, bool hidden)
     objects[1] = view->time_label;
     objects[2] = view->date_label;
     objects[3] = view->weather_row;
+    objects[4] = view->secs_label;
+    objects[5] = view->project_label;
+    objects[6] = view->elapsed_label;
 
     for (i = 0; i < sizeof(objects) / sizeof(objects[0]); ++i) {
         if (objects[i] == NULL) {
@@ -783,5 +862,5 @@ void home_view_update_time(home_view_t *view, const char *time_text)
         return;
     }
 
-    lv_label_set_text(view->time_label, time_text);
+    set_time_text(view, time_text);
 }

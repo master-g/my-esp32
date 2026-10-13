@@ -756,13 +756,9 @@ static const char *refresh_mode_to_string(refresh_mode_t mode)
     switch (mode) {
     case REFRESH_MODE_REALTIME:
         return "realtime";
-    case REFRESH_MODE_INTERACTIVE_POLL:
-        return "interactive_poll";
     case REFRESH_MODE_BACKGROUND_CACHE:
-        return "background_cache";
-    case REFRESH_MODE_PAUSED:
     default:
-        return "paused";
+        return "background_cache";
     }
 }
 
@@ -793,7 +789,6 @@ static cJSON *build_market_snapshot_debug(void)
     market_snapshot_t market = {0};
     market_debug_stats_t market_debug = {0};
     app_manager_debug_stats_t app_debug = {0};
-    power_policy_input_t policy_input = {0};
     power_policy_output_t policy_output = {0};
     cJSON *result = cJSON_CreateObject();
 
@@ -804,7 +799,6 @@ static cJSON *build_market_snapshot_debug(void)
     market_service_get_snapshot(&market);
     market_service_get_debug_stats(&market_debug);
     app_manager_get_debug_stats(&app_debug);
-    power_policy_get_input(&policy_input);
     power_policy_get_output(&policy_output);
 
     cJSON_AddStringToObject(result, "state", market_state_to_string(market.state));
@@ -821,10 +815,6 @@ static cJSON *build_market_snapshot_debug(void)
     cJSON_AddNumberToObject(result, "source_error_count", market.source_error_count);
     cJSON_AddStringToObject(result, "foreground_app",
                             app_id_to_string(app_manager_get_foreground_app()));
-    cJSON_AddStringToObject(result, "display_state",
-                            (policy_input.display_state == DISPLAY_STATE_ACTIVE) ? "active"
-                            : (policy_input.display_state == DISPLAY_STATE_DIM)  ? "dim"
-                                                                                 : "sleep");
     cJSON_AddStringToObject(result, "market_mode",
                             refresh_mode_to_string(policy_output.market_mode));
     cJSON_AddNumberToObject(result, "market_command_queue_drops",

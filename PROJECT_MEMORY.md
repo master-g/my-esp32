@@ -30,6 +30,9 @@
 - [2026-10-13] 情绪提示词与计分照 notchi(`emotion.rs`/`emotion_state.rs`):分类器只答 happy/sad/neutral 加 `intensity`,其余标签按 neutral;每条消息加 `intensity × 0.5`,另一种情绪 ×0.9,neutral 两边 ×0.85,每分钟 ×0.92;happy ≥ 0.6、sad ≥ 0.45 才显示,≥ 0.9 升级为 elated/sob;分析失败不改分数。未用真实接口验证(本机未配 `[emotion]`)。没做:无手填配置时读 Claude Code `settings.json` 的 `ANTHROPIC_AUTH_TOKEN` 等。
 - [2026-10-13] 新增情绪 `elated`(设备无对应图时退回 happy)与素材 `idle_elated`(17 帧,143 ms/帧)、`working_sob`、`waiting_sob`,取自 notchi `e6f8b8a`。现共 16 张 106 帧 111 KB。`chibi test --emotion elated` 可直接看。
 - [2026-10-13] `idle_happy` 换成上游重画的 20 帧版(143 ms/帧);新增 `waving`(25 帧,104 ms/帧,播一遍 2.6 秒):Home 视图在 `claude_connected` 由假变真时播一次,有 pending interaction 时不播。源图是从画框左边探身进来的,转换脚本的 `MIRRORED` 把它水平翻转,视图再右移 `HOME_SPRITE_WAVE_SHIFT_X` 贴到屏幕右边缘。现共 17 张 145 帧 120 KB。真机看挥手:先 `launchctl bootout` 卸掉代理服务(否则设备重启后 launchd 新拉起的代理抢串口),`esp32dash device reboot` 后重试 `chibi test` 直到发出,立刻截图,最后 `launchctl bootstrap` 恢复。
+- [2026-10-13] 电源:板子只走 USB、屏幕常亮 100%。电池/DIM/SLEEP/过热分支和 `system_state` 的 alert 标志、活动计数从未接入,已删;`power_policy` 只按前台 app 给行情 REALTIME/BACKGROUND_CACHE。显示是 `RENDER_MODE_FULL`(每次重绘整帧旋转推送),所以 Home 角色晃动定时器降到 50 ms、屏保直绘限到 33 ms。
+- [2026-10-13] Home 布局:时钟拆成 44 号 `HH:MM` + 22 号秒;时钟与角色之间是会话栏(`HOME_SESSION_X/W`):项目名(快照 `workspace`)、working 状态的已用时长(视图本地计时,切换项目重置)、气泡(底色 `SURFACE_SECONDARY`,左下对齐,不再盖住角色)。气泡在无 pending 时显示 `detail`(提示词预览/工具名),这是有意保留的。
+- [2026-10-13] 主机:日志一律写 stderr(hook 的 stdout 会进 Claude 上下文);以 `<task-notification>`、`<system-reminder>`、`[SYSTEM NOTIFICATION`、`<agent-message from=` 开头的 UserPromptSubmit 不当作用户提示词;会话失活或被清理时连带清掉它的 pending;`state.json` 0600,pending id 用摘要不含问题文本。`make check` = fmt-check + `make test-host` + `cargo test`(不含固件构建;clippy 有 23 条既有警告未纳入)。
 
 ## 上次会话
 <!-- 上次运行做了什么、停在何处。滚动记录,超长时最旧条目优先淘汰。 -->
@@ -37,6 +40,7 @@
 - [2026-06-25] 经 /ce-plan + /ce-work 实现固件健壮性加固 U1–U5(分支 `refactor/firmware-robustness-guards`):LVGL 任务断言、UI 锁有限超时、system_state publish 移出锁、丢包串口日志、bootstrap 失败错误屏 + 有界重试。每单元 `make build` 通过(用 `make build`,该 shell 无 idf.py;ESP-IDF 经 `~/.espressif/tools/activate_idf_v6.0.sh`)。随后 /ce-code-review 抓出并修复 5 个问题(见失败尝试前两条,以及 RTC 重启计数改 magic word、magic number 命名)。**未做真机验证**——无固件单测,需 flash 上板。
 - [2026-09-14] 检查并调整 esp32dash 主机侧:删除 OMP 支持与仓库里过时的 `tools/esp32dash/hooks/esp32dash-hook.sh`;hook 脚本只让 PermissionRequest 走 `respond`(dotfiles 副本同步更新,未提交);launchd 日志加大小轮转、去 ANSI、去掉每秒 hello 日志。`cargo test` 114/114,已 `cargo install` 并重启服务,设备连接与 hook 事件送达均验证。改动未提交。
 - [2026-10-13] 五个架构候选与开头的 bug 修复全部完成,随后又做了素材存储、新情绪素材、挥手和 notchi 式情绪计分;全部已合入 main 并推送(2026-10-13),过程分支已删。每步都烧录并用截图/RPC 在真机核对;`cargo test` 105、`make test-host`、`make build` 通过。设备已刷最终固件,`~/.cargo/bin/esp32dash` 与 hook 脚本也是最终版。新 hook 脚本在 `~/archdotfiles/ai/.claude/hooks/esp32dash-hook.sh`,dotfiles **未提交**;旧脚本会调用已删除的 `claude respond`,不要还原。
+- [2026-10-13] /improve 审计后直接实现了 15 条发现和 3 个界面新增(索引在本地 `plans/README.md`,不入库):修 K 线纵坐标 int32 溢出、天气失败后每分钟才重试、Wi-Fi 慢重试轮换 profile、输密码时不重建键盘、Settings 去掉占位行、移除 pipes 屏保。真机截图核对了 Home 新布局、Settings、Trading;K 线溢出(1H/4H/1D)、Wi-Fi 轮换、天气退避、键盘重建只过了编译,未在真机复现。未推送。
 
 ## 下次运行
 <!-- 计划要做的任务和优先级。长期保留,不随压缩淘汰。 -->
@@ -44,3 +48,4 @@
 - [2026-06-25] 真机验证 `refactor/firmware-robustness-guards`:重点确认 U3 错误屏留存到重启、RTC 重启计数 N=3 按预期 halt、U5 死锁路径不再死锁。验证后再决定 merge/PR。`BOOT_FAIL_RESTART_LIMIT`(N=3)若不合实际启动失败模式可调。
 - [2026-08-31] 实机「Time not synced」已修(见已验证的事实):98c1ec5 在 main 本地、**未 push**。RTC 电池疑似缺失(掉电即丢时间,靠 NTP 回写)——若在意断电守时可考虑装电池,非 bug。
 - [2026-10-13] 待用户做:提交 dotfiles 里的 hook 脚本。遗留:`openspec/specs/` 下 `prompt-store-cleanup`、`device-prompt-ui`、`device-link-atomicity` 描述的是已删除的结构,未处理;`parse_set_many_params` 仍在 `device_link.c`(依赖 service 的配置类型,未搬进 `device_protocol`);行溢出保护只有主机测试,未在真机上发超长行验证。notchi 跟进未做:过滤 `<task-notification>` 等系统注入的 UserPromptSubmit、去 `<pasted_content>` 标签;情绪分析等用户填 `[emotion]` 配置后才会生效,尚未用真实接口验证。
+- [2026-10-13] /improve 里考虑过未做的:管理端口鉴权、串口 worker 写超时与积压折叠、持久化移出请求路径、`app_settings.c` 拆分、可选服务初始化失败不致命、cJSON/NVS 句柄泄漏、截图超时悬空写、渲染模式改 partial(先测帧耗时)。dotfiles 里的 hook 脚本副本还没加 `>/dev/null 2>&1`(二进制已不往 stdout 写日志,非必需)。

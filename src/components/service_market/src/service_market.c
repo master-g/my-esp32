@@ -24,9 +24,7 @@
 #define MARKET_SERVICE_TASK_STACK (20 * 1024)
 #define MARKET_SUMMARY_STALE_US (30LL * 1000 * 1000)
 #define MARKET_SUMMARY_REALTIME_US (5LL * 1000 * 1000)
-#define MARKET_SUMMARY_INTERACTIVE_US (20LL * 1000 * 1000)
 #define MARKET_CHART_REALTIME_US (15LL * 1000 * 1000)
-#define MARKET_CHART_INTERACTIVE_US (45LL * 1000 * 1000)
 #define MARKET_PRIMARY_RETRY_US (60LL * 1000 * 1000)
 #define MARKET_STREAM_RETRY_US (15LL * 1000 * 1000)
 #define MARKET_NVS_NAMESPACE "market"
@@ -351,7 +349,7 @@ static void publish_market_event(void)
 
 static bool refresh_mode_allows_network(refresh_mode_t mode)
 {
-    return mode == REFRESH_MODE_REALTIME || mode == REFRESH_MODE_INTERACTIVE_POLL;
+    return mode == REFRESH_MODE_REALTIME;
 }
 
 static int64_t summary_refresh_interval_us(refresh_mode_t mode)
@@ -359,8 +357,6 @@ static int64_t summary_refresh_interval_us(refresh_mode_t mode)
     switch (mode) {
     case REFRESH_MODE_REALTIME:
         return MARKET_SUMMARY_REALTIME_US;
-    case REFRESH_MODE_INTERACTIVE_POLL:
-        return MARKET_SUMMARY_INTERACTIVE_US;
     default:
         return 0;
     }
@@ -371,8 +367,6 @@ static int64_t chart_refresh_interval_us(refresh_mode_t mode)
     switch (mode) {
     case REFRESH_MODE_REALTIME:
         return MARKET_CHART_REALTIME_US;
-    case REFRESH_MODE_INTERACTIVE_POLL:
-        return MARKET_CHART_INTERACTIVE_US;
     default:
         return 0;
     }

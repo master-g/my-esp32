@@ -14,6 +14,9 @@ typedef struct {
     lv_obj_t *root;
     lv_obj_t *status_bar;
     lv_obj_t *time_label;
+    lv_obj_t *secs_label;
+    lv_obj_t *project_label;
+    lv_obj_t *elapsed_label;
     lv_obj_t *date_label;
     lv_obj_t *wifi_item;
     lv_obj_t *wifi_icon;
@@ -51,6 +54,9 @@ typedef struct {
     lv_coord_t sprite_motion_x;
     lv_coord_t sprite_motion_y;
     bool bubble_dismissed;
+    bool working;              /* elapsed timer is running */
+    uint32_t working_since_ms; /* lv_tick when the current working stretch began */
+    char working_project[CLAUDE_STR_WORKSPACE_MAX];
     lv_timer_t *alert_flash_timer;
     bool alert_flash_phase;
     uint32_t alert_c_wifi;    /* last model wifi icon color (for flash inversion) */

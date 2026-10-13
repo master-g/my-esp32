@@ -51,8 +51,6 @@ typedef enum {
     SETTINGS_PAGE_WIFI_INPUT,
     SETTINGS_PAGE_MARKET_HOME,
     SETTINGS_PAGE_MARKET_INTERVAL,
-    SETTINGS_PAGE_TIME_HOME,
-    SETTINGS_PAGE_WEATHER_HOME,
 } settings_page_t;
 
 typedef enum {
@@ -715,18 +713,6 @@ static void index_wifi_cb(lv_event_t *e)
     settings_render(runtime);
 }
 
-static void index_time_cb(lv_event_t *e)
-{
-    settings_runtime_t *runtime = lv_event_get_user_data(e);
-
-    if (runtime == NULL) {
-        return;
-    }
-
-    settings_nav_push(runtime, SETTINGS_PAGE_TIME_HOME, SETTINGS_INPUT_NONE, SETTINGS_CONFIRM_NONE);
-    settings_render(runtime);
-}
-
 static void index_market_cb(lv_event_t *e)
 {
     settings_runtime_t *runtime = lv_event_get_user_data(e);
@@ -736,19 +722,6 @@ static void index_market_cb(lv_event_t *e)
     }
 
     settings_nav_push(runtime, SETTINGS_PAGE_MARKET_HOME, SETTINGS_INPUT_NONE,
-                      SETTINGS_CONFIRM_NONE);
-    settings_render(runtime);
-}
-
-static void index_weather_cb(lv_event_t *e)
-{
-    settings_runtime_t *runtime = lv_event_get_user_data(e);
-
-    if (runtime == NULL) {
-        return;
-    }
-
-    settings_nav_push(runtime, SETTINGS_PAGE_WEATHER_HOME, SETTINGS_INPUT_NONE,
                       SETTINGS_CONFIRM_NONE);
     settings_render(runtime);
 }
@@ -1202,7 +1175,7 @@ static void render_index_page(settings_runtime_t *runtime)
     char wifi_detail[64];
     char market_detail[40];
 
-    settings_set_shell(runtime, "Settings", NULL, false);
+    settings_set_shell(runtime, "", NULL, false);
     panel = create_page_panel(runtime->body);
 
     snprintf(wifi_detail, sizeof(wifi_detail), "%s · %u saved",
@@ -1216,10 +1189,6 @@ static void render_index_page(settings_runtime_t *runtime)
                           runtime);
     create_section_button(rows, "Crypto Market", market_detail, SETTINGS_PANEL_ALT_COLOR,
                           index_market_cb, runtime);
-    create_section_button(rows, "Time", "Planned next", SETTINGS_PANEL_ALT_COLOR, index_time_cb,
-                          runtime);
-    create_section_button(rows, "Weather", "Planned next", SETTINGS_PANEL_ALT_COLOR,
-                          index_weather_cb, runtime);
 }
 
 static void render_market_home_page(settings_runtime_t *runtime)
@@ -1689,16 +1658,6 @@ static void render_input_page(settings_runtime_t *runtime)
     lv_anim_start(&anim);
 }
 
-static void render_placeholder_page(settings_runtime_t *runtime, const char *title,
-                                    const char *body)
-{
-    lv_obj_t *panel;
-
-    settings_set_shell(runtime, title, NULL, true);
-    panel = create_page_panel(runtime->body);
-    create_empty_state(panel, title, body);
-}
-
 static void render_body_page(settings_runtime_t *runtime, settings_page_t page)
 {
     switch (page) {
@@ -1725,14 +1684,6 @@ static void render_body_page(settings_runtime_t *runtime, settings_page_t page)
         break;
     case SETTINGS_PAGE_MARKET_INTERVAL:
         render_market_interval_page(runtime);
-        break;
-    case SETTINGS_PAGE_TIME_HOME:
-        render_placeholder_page(runtime, "Time",
-                                "Time settings will move here once the Wi-Fi flow is stable.");
-        break;
-    case SETTINGS_PAGE_WEATHER_HOME:
-        render_placeholder_page(runtime, "Weather",
-                                "Weather settings will move here once the Wi-Fi flow is stable.");
         break;
     default:
         render_index_page(runtime);
@@ -1799,7 +1750,7 @@ static lv_obj_t *app_settings_create_root(lv_obj_t *parent)
         s_runtime.page_label = lv_label_create(rail);
         lv_obj_set_width(s_runtime.page_label, SETTINGS_RAIL_W - 16);
         lv_label_set_long_mode(s_runtime.page_label, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(s_runtime.page_label, "Settings");
+        lv_label_set_text(s_runtime.page_label, "");
         lv_obj_set_style_text_font(s_runtime.page_label, ui_font_text_11(), 0);
         lv_obj_set_style_text_color(s_runtime.page_label, lv_color_hex(SETTINGS_TEXT_COLOR), 0);
         lv_obj_align(s_runtime.page_label, LV_ALIGN_TOP_LEFT, 8, 24);
@@ -1855,10 +1806,20 @@ static void app_settings_handle_event(const app_event_t *event)
 
     switch (event->type) {
     case APP_EVENT_ENTER:
+        settings_service_refresh(&s_runtime);
+        break;
     case APP_EVENT_DATA_SETTINGS:
     case APP_EVENT_DATA_MARKET:
     case APP_EVENT_NET_CHANGED:
-        settings_service_refresh(&s_runtime);
+        /* A full render rebuilds the keyboard, and Wi-Fi retries fire these
+         * events every few seconds: while the input sheet is up, only take the
+         * new data. The next navigation renders it. */
+        if (settings_current_page(&s_runtime) == SETTINGS_PAGE_WIFI_INPUT) {
+            settings_service_get_snapshot(&s_runtime.snapshot);
+            market_service_get_preferences(&s_runtime.market_preferences);
+        } else {
+            settings_service_refresh(&s_runtime);
+        }
         break;
     default:
         break;

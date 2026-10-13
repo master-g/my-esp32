@@ -12,6 +12,5 @@ idf_component_register(
         nvs_flash
         mbedtls
         net_manager
-        power_policy
         esp_timer
 )

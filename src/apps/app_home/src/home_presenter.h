@@ -43,6 +43,7 @@ typedef struct {
     bool bubble_sticky; /* pending interaction: bubble stays up until cleared (no 5s fade) */
     bool alert_flash;   /* pending interaction: flash the Home background for salience */
     char bubble_text[96];
+    char project[CLAUDE_STR_WORKSPACE_MAX]; /* workspace of the shown session; "" hides it */
     char screensaver_time_text[6];
 } home_present_model_t;
 

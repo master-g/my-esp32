@@ -31,7 +31,7 @@ ESP-IDF / LVGL / FreeRTOS
 - **device_protocol** (`src/components/device_protocol/`): The hardware-free part of the host/device serial protocol — line assembly with the overflow guard, `claude.update` parsing, and the method list the device declares. Depends only on cJSON and libc; `device_link` is the serial adapter on top of it. `make test-host` builds it with the system `cc` and checks it against `protocol/fixtures/`, the same sample frames the Rust agent's tests read.
 - **BSP Layer** (`src/components/bsp_board/`): Board support package abstracting display (AXS15231B QSPI LCD), touch (I2C), and RTC (PCF85063). The LVGL task calls a registered UI callback (`bsp_display_set_ui_callback`) each tick to process queued events.
 - **Services**: Background data services for time (NTP+RTC), weather, market data, and Claude Code status. Each service protects its snapshot with a FreeRTOS mutex and exposes a copy-out getter (`void get(X *out)`) — callers receive a stack copy, never a live pointer.
-- **Power Policy** (`src/components/power_policy/`): Manages display states (ACTIVE/DIM/SLEEP) and data collection modes based on power source.
+- **Power Policy** (`src/components/power_policy/`): Decides how hard each service may work for the foreground app. The board runs from USB with the screen always on at full brightness; there is no battery, dim or sleep state.
 
 ### Event-Driven App Interface
 
@@ -150,10 +150,10 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 - All LVGL operations happen on the LVGL task thread — other tasks enqueue events, never touch LVGL directly
 - Service getters use copy-out pattern (`void get(X *out)`) — callers get stack copies, never hold pointers into service state
 - Service layer handles all external data, broadcasts via event bus
-- Power policy controls data collection frequency based on power source and foreground app
-- Display uses partial double buffering (not full screen buffer) due to memory constraints
+- Power policy controls data collection frequency based on the foreground app
+- Display renders in `LV_DISPLAY_RENDER_MODE_FULL` with two full-frame PSRAM buffers plus a rotation buffer: every invalidation redraws, rotates and pushes the whole 640x172 frame, so keep Home's animation timers slow
 - Apps support explicit pause/resume; Home shows the coarse type of the one pending interaction (tool permission, Elicitation, AskUserQuestion; terms in GLOSSARY.md) as a **read-only** sprite bubble — it never returns a decision
-- The ESP32 is a read-only status notifier for Claude authorizations: every decision (allow / deny / allow_always, Elicitation, AskUserQuestion) is made on the Mac's native prompt, so a locked Mac cannot be bypassed from the device. The host decides which pending interaction to show and sends it as a level inside every `claude.update` (`pending`: kind + coarse type, or null); there are no request/dismiss frames and no decision frames or RPCs in either direction (docs/adr/0001). `service_claude` owns that state and the screen-lit alert flag; Home only renders it. The bubble shows only a coarse interaction type — never command, argument, or option content
+- The ESP32 is a read-only status notifier for Claude authorizations: every decision (allow / deny / allow_always, Elicitation, AskUserQuestion) is made on the Mac's native prompt, so a locked Mac cannot be bypassed from the device. The host decides which pending interaction to show and sends it as a level inside every `claude.update` (`pending`: kind + coarse type, or null); there are no request/dismiss frames and no decision frames or RPCs in either direction (docs/adr/0001). `service_claude` owns that state; Home only renders it. While an interaction is pending the bubble shows only its coarse type — never command, argument, or option content. With nothing pending the bubble shows the snapshot's `detail` (a prompt preview or tool name) next to the session's workspace name
 - `protocol.error` and the serial line-overflow guard are unrelated to approvals and stay load-bearing — do not revert them
 - Lock order: LVGL lock → service mutex. No service task may call LVGL directly
 

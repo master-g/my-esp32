@@ -8,7 +8,6 @@
 #include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "system_state.h"
 
 #define CLAUDE_STALENESS_TIMEOUT_US (120 * 1000000ULL)
 
@@ -24,19 +23,6 @@ static void publish_claude_event(void)
     };
 
     event_bus_publish(&event);
-}
-
-/* Keep the screen lit exactly while a pending interaction is known and the host
- * is still talking to us. Called after every change to either input. */
-static void sync_alert(void)
-{
-    bool alert;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    alert = s_snapshot.conn_state == CLAUDE_CONN_CONNECTED &&
-            s_snapshot.pending_kind != CLAUDE_PENDING_NONE;
-    xSemaphoreGive(s_mutex);
-    system_state_set_alert_active(alert);
 }
 
 esp_err_t claude_service_init(void)
@@ -67,7 +53,6 @@ void claude_service_stop(void)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_snapshot.conn_state = CLAUDE_CONN_DISCONNECTED;
     xSemaphoreGive(s_mutex);
-    sync_alert();
     publish_claude_event();
 }
 
@@ -88,7 +73,6 @@ bool claude_service_apply_remote_snapshot(const claude_snapshot_t *snapshot)
     s_last_transport_us = esp_timer_get_time();
     has_pending = s_snapshot.pending_kind != CLAUDE_PENDING_NONE;
     xSemaphoreGive(s_mutex);
-    sync_alert();
     publish_claude_event();
     return has_pending && !had_pending;
 }
@@ -102,7 +86,6 @@ void claude_service_note_transport_alive(void)
     s_snapshot.stale = false;
     s_last_transport_us = esp_timer_get_time();
     xSemaphoreGive(s_mutex);
-    sync_alert();
 }
 
 void claude_service_get_snapshot(claude_snapshot_t *out)
@@ -162,7 +145,6 @@ bool claude_service_check_staleness(void)
     xSemaphoreGive(s_mutex);
 
     if (became_stale) {
-        sync_alert();
         publish_claude_event();
     }
     return became_stale;

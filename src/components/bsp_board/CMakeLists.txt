@@ -9,7 +9,6 @@ idf_component_register(
         "include"
     REQUIRES
         core_event_bus
-        core_system_state
         core_types
         esp_driver_gpio
         esp_driver_i2c

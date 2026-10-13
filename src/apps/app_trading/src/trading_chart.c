@@ -10,6 +10,13 @@
 #define TRADING_CHART_DOWN ui_theme_color_hex(UI_THEME_COLOR_STATUS_ERROR)
 #define TRADING_CHART_NEUTRAL ui_theme_color_hex(UI_THEME_COLOR_TEXT_SECONDARY)
 
+/* delta and range are prices scaled by 1e4, so delta * plot_h overflows int32
+ * once a window spans more than ~1600 USDT; do the multiply in 64 bits. */
+static int32_t scaled_y(int32_t plot_y, int32_t plot_h, int32_t delta, int32_t range)
+{
+    return plot_y + (int32_t)(((int64_t)delta * plot_h) / range);
+}
+
 static lv_obj_t *create_plot_bar(lv_obj_t *parent, uint32_t color)
 {
     lv_obj_t *obj = lv_obj_create(parent);
@@ -149,10 +156,10 @@ void trading_chart_apply(trading_chart_t *chart, const trading_present_model_t *
         {
             const market_candle_t *candle = &model->candles.candles[i];
             int32_t x_center = plot_x + ((int32_t)i * step) + (step / 2);
-            int32_t high_y = plot_y + (((max_price - candle->high_scaled) * plot_h) / range);
-            int32_t low_y = plot_y + (((max_price - candle->low_scaled) * plot_h) / range);
-            int32_t open_y = plot_y + (((max_price - candle->open_scaled) * plot_h) / range);
-            int32_t close_y = plot_y + (((max_price - candle->close_scaled) * plot_h) / range);
+            int32_t high_y = scaled_y(plot_y, plot_h, max_price - candle->high_scaled, range);
+            int32_t low_y = scaled_y(plot_y, plot_h, max_price - candle->low_scaled, range);
+            int32_t open_y = scaled_y(plot_y, plot_h, max_price - candle->open_scaled, range);
+            int32_t close_y = scaled_y(plot_y, plot_h, max_price - candle->close_scaled, range);
             int32_t body_y = (open_y < close_y) ? open_y : close_y;
             int32_t body_h = (open_y > close_y) ? (open_y - close_y) : (close_y - open_y);
             uint32_t color = TRADING_CHART_NEUTRAL;

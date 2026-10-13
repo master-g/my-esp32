@@ -29,6 +29,7 @@ typedef struct {
     char claude_pending_type[CLAUDE_STR_PENDING_TYPE_MAX];
     claude_run_state_t claude_run_state;
     char claude_detail[96];
+    char claude_workspace[CLAUDE_STR_WORKSPACE_MAX];
     char claude_emotion[CLAUDE_STR_EMOTION_MAX];
 } home_snapshot_t;
 

@@ -199,7 +199,7 @@ static void tick(home_screensaver_t *screensaver)
                 screensaver->fx.perf_render_total_us, screensaver->fx.perf_frames);
             screensaver_direct_get_perf_snapshot(&direct_perf);
             if (frame_end_us >= screensaver->fx.perf_log_muted_until_us) {
-                ESP_LOGI(TAG,
+                ESP_LOGD(TAG,
                          "screensaver_perf fps=%u.%u int=%u.%u frm=%u.%u cmp=%u.%u txt=%u.%u "
                          "wait=%u.%u push=%u.%u",
                          screensaver->fx.fps_x10 / 10, screensaver->fx.fps_x10 % 10,
