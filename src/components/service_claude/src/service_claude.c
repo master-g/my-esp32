@@ -58,12 +58,18 @@ void claude_service_stop(void)
 
 void claude_service_apply_remote_snapshot(const claude_snapshot_t *snapshot)
 {
+    bool has_pending_prompt;
+
     if (snapshot == NULL) {
         return;
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    /* claude.update does not carry the pending-prompt flag; it is owned by the
+     * claude.prompt.request/dismiss frames, so keep it across the overwrite. */
+    has_pending_prompt = s_snapshot.has_pending_prompt;
     memcpy(&s_snapshot, snapshot, sizeof(s_snapshot));
+    s_snapshot.has_pending_prompt = has_pending_prompt;
     s_snapshot.conn_state = CLAUDE_CONN_CONNECTED;
     s_snapshot.stale = false;
     s_last_transport_us = esp_timer_get_time();
