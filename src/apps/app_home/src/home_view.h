@@ -14,9 +14,7 @@ typedef struct {
     lv_obj_t *root;
     lv_obj_t *status_bar;
     lv_obj_t *time_label;
-    lv_obj_t *secs_label;
-    lv_obj_t *project_label;
-    lv_obj_t *elapsed_label;
+    lv_obj_t *project_label; /* name tag under the sprite */
     lv_obj_t *date_label;
     lv_obj_t *wifi_item;
     lv_obj_t *wifi_icon;

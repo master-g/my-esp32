@@ -429,14 +429,9 @@ static void apply_alert_colors(home_view_t *view, bool flash_phase)
         lv_obj_set_style_text_color(
             view->time_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_EMPHASIS), 0);
     }
-    if (view->secs_label != NULL) {
+    if (view->project_label != NULL) {
         lv_obj_set_style_text_color(
-            view->secs_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
-        lv_obj_set_style_text_color(view->project_label,
-                                    flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_PRIMARY),
-                                    0);
-        lv_obj_set_style_text_color(
-            view->elapsed_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
+            view->project_label, flash_phase ? ink : ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
     }
     if (view->date_label != NULL) {
         lv_obj_set_style_text_color(
@@ -504,28 +499,14 @@ static void set_label_text_if_changed(lv_obj_t *label, const char *text)
     }
 }
 
-/* "HH:MM:SS" -> big "HH:MM" plus small "SS" hanging off its lower right. */
-static void set_time_text(home_view_t *view, const char *time_text)
-{
-    char hm[6];
-    size_t len = strlen(time_text);
-
-    snprintf(hm, sizeof(hm), "%s", time_text);
-    set_label_text_if_changed(view->time_label, hm);
-    set_label_text_if_changed(view->secs_label, len > 6 ? time_text + 6 : "");
-    lv_obj_update_layout(view->time_label);
-    lv_obj_align_to(view->secs_label, view->time_label, LV_ALIGN_OUT_RIGHT_BOTTOM,
-                    HOME_SECONDS_GAP_X, HOME_SECONDS_OFFSET_Y);
-}
-
-/* Which project is talking, and for how long it has been working. The timer is
- * local: it starts when the shown session turns to working and restarts when a
- * different project takes over the screen. */
+/* Name tag under the sprite: which project is talking and, while it works, for
+ * how long. The timer is local: it starts when the shown session turns to
+ * working and restarts when a different project takes over the screen. */
 static void refresh_session(home_view_t *view, const home_present_model_t *model)
 {
-    char elapsed[16] = "";
+    char tag[CLAUDE_STR_WORKSPACE_MAX + 16];
 
-    set_label_text_if_changed(view->project_label, model->project);
+    snprintf(tag, sizeof(tag), "%s", model->project);
     if (model->sprite_state == SPRITE_STATE_WORKING) {
         uint32_t secs;
 
@@ -535,12 +516,13 @@ static void refresh_session(home_view_t *view, const home_present_model_t *model
             snprintf(view->working_project, sizeof(view->working_project), "%s", model->project);
         }
         secs = lv_tick_elaps(view->working_since_ms) / 1000U;
-        snprintf(elapsed, sizeof(elapsed), "%u:%02u", (unsigned)(secs / 60U),
+        snprintf(tag, sizeof(tag), "%s%s%u:%02u", model->project,
+                 model->project[0] != '\0' ? "  " : "", (unsigned)(secs / 60U),
                  (unsigned)(secs % 60U));
     } else {
         view->working = false;
     }
-    set_label_text_if_changed(view->elapsed_label, elapsed);
+    set_label_text_if_changed(view->project_label, tag);
 }
 
 lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
@@ -624,25 +606,14 @@ lv_obj_t *home_view_create(home_view_t *view, lv_obj_t *parent)
     lv_obj_set_style_text_color(view->time_label, ui_theme_color(UI_THEME_COLOR_TEXT_EMPHASIS), 0);
     lv_obj_align(view->time_label, LV_ALIGN_TOP_LEFT, 0, HOME_TIME_Y);
 
-    view->secs_label = lv_label_create(view->root);
-    lv_obj_set_style_text_font(view->secs_label, ui_font_text_22(), 0);
-    lv_obj_set_style_text_color(view->secs_label, ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
-    lv_label_set_text(view->secs_label, "");
-
     view->project_label = lv_label_create(view->root);
-    lv_obj_set_width(view->project_label, HOME_SESSION_W);
+    lv_obj_set_width(view->project_label, HOME_NAME_TAG_W);
     lv_label_set_long_mode(view->project_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(view->project_label, ui_font_text_22(), 0);
-    lv_obj_set_style_text_color(view->project_label, ui_theme_color(UI_THEME_COLOR_TEXT_PRIMARY),
-                                0);
+    lv_obj_set_style_text_align(view->project_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(view->project_label, ui_font_text_11(), 0);
+    lv_obj_set_style_text_color(view->project_label, ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
     lv_label_set_text(view->project_label, "");
-    lv_obj_align(view->project_label, LV_ALIGN_TOP_LEFT, HOME_SESSION_X, HOME_SESSION_Y);
-
-    view->elapsed_label = lv_label_create(view->root);
-    lv_obj_set_style_text_font(view->elapsed_label, ui_font_text_11(), 0);
-    lv_obj_set_style_text_color(view->elapsed_label, ui_theme_color(UI_THEME_COLOR_TEXT_MUTED), 0);
-    lv_label_set_text(view->elapsed_label, "");
-    lv_obj_align(view->elapsed_label, LV_ALIGN_TOP_LEFT, HOME_SESSION_X, HOME_ELAPSED_Y);
+    lv_obj_align(view->project_label, LV_ALIGN_BOTTOM_RIGHT, HOME_NAME_TAG_X_OFFSET, 0);
 
     view->date_label = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->date_label, ui_font_text_22(), 0);
@@ -734,7 +705,7 @@ void home_view_apply(home_view_t *view, const home_present_model_t *model)
         return;
     }
 
-    set_time_text(view, model->time_text);
+    set_label_text_if_changed(view->time_label, model->time_text);
     set_label_text_if_changed(view->date_label, model->date_line);
     refresh_session(view, model);
 
@@ -777,7 +748,7 @@ void home_view_apply(home_view_t *view, const home_present_model_t *model)
 
 void home_view_set_hidden(home_view_t *view, bool hidden)
 {
-    lv_obj_t *objects[7];
+    lv_obj_t *objects[5];
     size_t i;
 
     if (view == NULL) {
@@ -790,9 +761,7 @@ void home_view_set_hidden(home_view_t *view, bool hidden)
     objects[1] = view->time_label;
     objects[2] = view->date_label;
     objects[3] = view->weather_row;
-    objects[4] = view->secs_label;
-    objects[5] = view->project_label;
-    objects[6] = view->elapsed_label;
+    objects[4] = view->project_label;
 
     for (i = 0; i < sizeof(objects) / sizeof(objects[0]); ++i) {
         if (objects[i] == NULL) {
@@ -862,5 +831,5 @@ void home_view_update_time(home_view_t *view, const char *time_text)
         return;
     }
 
-    set_time_text(view, time_text);
+    set_label_text_if_changed(view->time_label, time_text);
 }

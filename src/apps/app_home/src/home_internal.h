@@ -35,14 +35,12 @@
 #define HOME_ALERT_FLASH_PERIOD_MS 500
 #define HOME_BUBBLE_BG_COLOR ui_theme_color_hex(UI_THEME_COLOR_SURFACE_SECONDARY)
 #define HOME_BUBBLE_TEXT_COLOR ui_theme_color_hex(UI_THEME_COLOR_TEXT_PRIMARY)
-/* Session column: project name, elapsed time and the bubble sit between the
- * clock and the sprite, so the bubble never covers the character. */
+/* The bubble sits between the clock and the sprite so it never covers the
+ * character; the project name and elapsed time are a small tag under the sprite. */
 #define HOME_SESSION_X 236
 #define HOME_SESSION_W 210
-#define HOME_SESSION_Y 36
-#define HOME_ELAPSED_Y 62
-#define HOME_SECONDS_GAP_X 6
-#define HOME_SECONDS_OFFSET_Y -5
+#define HOME_NAME_TAG_W 168
+#define HOME_NAME_TAG_X_OFFSET -8 /* centers the tag under the sprite */
 #define HOME_BUBBLE_MAX_W HOME_SESSION_W
 #define HOME_BUBBLE_PAD_H 8
 #define HOME_BUBBLE_PAD_V 6
