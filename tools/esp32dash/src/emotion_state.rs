@@ -1,10 +1,14 @@
 use crate::emotion::{Emotion, EmotionAnalysis};
 
-const EMOTION_DECAY_FACTOR: f32 = 0.75;
-const HAPPY_THRESHOLD: f32 = 0.35;
-const ELATED_THRESHOLD: f32 = 0.9;
-const SAD_THRESHOLD: f32 = 0.35;
-const SOB_THRESHOLD: f32 = 0.8;
+// Scoring follows notchi's EmotionState: each message only nudges a score, so it
+// takes a few messages in a row to change the mood and sustained ones to escalate.
+const HAPPY_THRESHOLD: f32 = 0.6;
+const SAD_THRESHOLD: f32 = 0.45;
+const ESCALATION_THRESHOLD: f32 = 0.9;
+const INTENSITY_DAMPEN: f32 = 0.5;
+const DECAY_RATE: f32 = 0.92;
+const INTER_EMOTION_DECAY: f32 = 0.9;
+const NEUTRAL_COUNTER_DECAY: f32 = 0.85;
 
 #[derive(Debug, Clone, Default)]
 pub struct EmotionState {
@@ -14,47 +18,46 @@ pub struct EmotionState {
 
 impl EmotionState {
     pub fn record_emotion(&mut self, analysis: &EmotionAnalysis) {
+        let gain = analysis.intensity * INTENSITY_DAMPEN;
         match analysis.emotion {
             Emotion::Happy | Emotion::Elated => {
-                self.happy_score = self.happy_score.max(analysis.confidence.max(HAPPY_THRESHOLD));
-                self.sad_score *= 0.5;
+                self.happy_score = (self.happy_score + gain).min(1.0);
+                self.sad_score *= INTER_EMOTION_DECAY;
             }
-            Emotion::Sad => {
-                self.sad_score = self.sad_score.max(analysis.confidence.max(SAD_THRESHOLD));
-                self.happy_score *= 0.6;
-            }
-            Emotion::Sob => {
-                self.sad_score =
-                    self.sad_score.max((analysis.confidence.max(SOB_THRESHOLD)).min(1.0));
-                self.happy_score *= 0.4;
+            Emotion::Sad | Emotion::Sob => {
+                self.sad_score = (self.sad_score + gain).min(1.0);
+                self.happy_score *= INTER_EMOTION_DECAY;
             }
             Emotion::Neutral => {
-                self.happy_score *= 0.8;
-                self.sad_score *= 0.8;
+                self.happy_score *= NEUTRAL_COUNTER_DECAY;
+                self.sad_score *= NEUTRAL_COUNTER_DECAY;
             }
         }
     }
 
+    /// Called once a minute.
     pub fn decay(&mut self) {
-        self.happy_score *= EMOTION_DECAY_FACTOR;
-        self.sad_score *= EMOTION_DECAY_FACTOR;
-        if self.happy_score < 0.05 {
+        self.happy_score *= DECAY_RATE;
+        self.sad_score *= DECAY_RATE;
+        if self.happy_score < 0.01 {
             self.happy_score = 0.0;
         }
-        if self.sad_score < 0.05 {
+        if self.sad_score < 0.01 {
             self.sad_score = 0.0;
         }
     }
 
     pub fn current_emotion(&self) -> Emotion {
-        if self.sad_score >= SOB_THRESHOLD {
-            Emotion::Sob
-        } else if self.happy_score >= HAPPY_THRESHOLD && self.happy_score > self.sad_score {
-            if self.happy_score >= ELATED_THRESHOLD {
+        if self.happy_score > self.sad_score {
+            if self.happy_score >= ESCALATION_THRESHOLD {
                 Emotion::Elated
-            } else {
+            } else if self.happy_score >= HAPPY_THRESHOLD {
                 Emotion::Happy
+            } else {
+                Emotion::Neutral
             }
+        } else if self.sad_score >= ESCALATION_THRESHOLD {
+            Emotion::Sob
         } else if self.sad_score >= SAD_THRESHOLD {
             Emotion::Sad
         } else {
@@ -69,48 +72,67 @@ mod tests {
 
     use super::EmotionState;
 
-    #[test]
-    fn happy_analysis_turns_state_happy() {
-        let mut state = EmotionState::default();
+    fn record(state: &mut EmotionState, emotion: Emotion, intensity: f32) {
         state.record_emotion(&EmotionAnalysis {
-            emotion: Emotion::Happy,
-            confidence: 0.7,
+            emotion,
+            intensity,
         });
+    }
+
+    #[test]
+    fn one_happy_message_is_not_enough_but_two_are() {
+        let mut state = EmotionState::default();
+        record(&mut state, Emotion::Happy, 1.0);
+        assert_eq!(state.current_emotion(), Emotion::Neutral);
+        record(&mut state, Emotion::Happy, 0.4);
         assert_eq!(state.current_emotion(), Emotion::Happy);
     }
 
     #[test]
-    fn very_confident_happy_escalates_to_elated_then_decays_to_happy() {
+    fn sustained_praise_escalates_to_elated() {
         let mut state = EmotionState::default();
-        state.record_emotion(&EmotionAnalysis {
-            emotion: Emotion::Happy,
-            confidence: 0.95,
-        });
+        record(&mut state, Emotion::Happy, 1.0);
+        record(&mut state, Emotion::Happy, 0.7);
+        assert_eq!(state.current_emotion(), Emotion::Happy);
+        record(&mut state, Emotion::Happy, 0.2);
         assert_eq!(state.current_emotion(), Emotion::Elated);
-        state.decay();
-        assert_eq!(state.current_emotion(), Emotion::Happy);
     }
 
     #[test]
-    fn sob_analysis_turns_state_sob() {
+    fn one_strong_sad_message_shows_sad_and_two_show_sob() {
         let mut state = EmotionState::default();
-        state.record_emotion(&EmotionAnalysis {
-            emotion: Emotion::Sob,
-            confidence: 0.9,
-        });
+        record(&mut state, Emotion::Sad, 0.9);
+        assert_eq!(state.current_emotion(), Emotion::Sad);
+        record(&mut state, Emotion::Sad, 0.9);
         assert_eq!(state.current_emotion(), Emotion::Sob);
     }
 
     #[test]
-    fn decay_brings_scores_back_to_neutral() {
+    fn neutral_messages_and_time_bring_the_mood_back() {
         let mut state = EmotionState::default();
-        state.record_emotion(&EmotionAnalysis {
-            emotion: Emotion::Happy,
-            confidence: 0.7,
-        });
-        for _ in 0..10 {
+        record(&mut state, Emotion::Sad, 1.0);
+        record(&mut state, Emotion::Neutral, 0.0);
+        assert_eq!(state.current_emotion(), Emotion::Neutral);
+
+        let mut state = EmotionState::default();
+        record(&mut state, Emotion::Happy, 1.0);
+        record(&mut state, Emotion::Happy, 1.0);
+        assert_eq!(state.current_emotion(), Emotion::Elated);
+        state.decay();
+        state.decay();
+        assert_eq!(state.current_emotion(), Emotion::Happy);
+        for _ in 0..60 {
             state.decay();
         }
         assert_eq!(state.current_emotion(), Emotion::Neutral);
+    }
+
+    #[test]
+    fn the_other_mood_fades_when_one_is_recorded() {
+        let mut state = EmotionState::default();
+        record(&mut state, Emotion::Sad, 1.0);
+        record(&mut state, Emotion::Happy, 1.0);
+        record(&mut state, Emotion::Happy, 0.3);
+        assert_eq!(state.current_emotion(), Emotion::Happy);
     }
 }

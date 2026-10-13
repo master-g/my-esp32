@@ -440,9 +440,9 @@ impl AppState {
                     warn!(
                         session_key,
                         error = %err,
-                        "emotion analyzer failed, falling back to neutral"
+                        "emotion analyzer failed, leaving the mood unchanged"
                     );
-                    EmotionAnalysis::neutral()
+                    return;
                 }
             };
             app.apply_emotion_analysis(session_key, generation, recv_ts, analysis).await;
@@ -1569,7 +1569,7 @@ mod tests {
                 10,
                 EmotionAnalysis {
                     emotion: Emotion::Happy,
-                    confidence: 0.9,
+                    intensity: 0.9,
                 },
             )
             .await;

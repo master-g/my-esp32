@@ -9,7 +9,18 @@ use tracing::warn;
 use crate::config::EmotionConfig;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_SYSTEM_PROMPT: &str = "Classify the user's emotional tone. Respond with JSON only in the shape {\"emotion\":\"neutral|happy|sad|sob\",\"confidence\":0.0}. Use sob only for obvious intense distress. Do not add markdown or explanation.";
+// Wording follows notchi's EmotionAnalyzer. The model only names happy, sad or
+// neutral; elated and sob are reached through EmotionState's scores.
+const DEFAULT_SYSTEM_PROMPT: &str = "\
+Classify the emotional tone of the user's message into exactly one emotion and an intensity score.
+Emotions: happy, sad, neutral.
+Happy: explicit praise (\"great job\", \"you are so good\"), gratitude, celebration, affection toward the assistant (\"I love you\", \"love u\", \"you're the best\"), positive profanity (\"LETS FUCKING GO\").
+Sad: frustration, anger, insults, complaints, feeling stuck, disappointment, negative profanity.
+Neutral: instructions, requests, task descriptions, questions, enthusiasm about work, factual statements. Exclamation marks or urgency about a task do NOT make it happy — only genuine positive sentiment toward the AI or outcome does.
+Default to neutral when unsure. Most coding instructions are neutral regardless of tone.
+Direct affection or praise aimed at the assistant is happy, not neutral, even when casual or abbreviated.
+Intensity: 0.0 (barely noticeable) to 1.0 (very strong). ALL CAPS text indicates stronger emotion — increase intensity by 0.2-0.3 compared to the same message in lowercase.
+Reply with ONLY valid JSON: {\"emotion\": \"...\", \"intensity\": ...}";
 const MIN_EMOTION_MAX_TOKENS: u32 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +43,11 @@ impl Emotion {
         }
     }
 
-    pub fn from_str(value: &str) -> Self {
+    /// What the classifier may answer; anything else counts as neutral.
+    fn from_classifier(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "happy" => Self::Happy,
-            "elated" => Self::Elated,
             "sad" => Self::Sad,
-            "sob" => Self::Sob,
             _ => Self::Neutral,
         }
     }
@@ -46,16 +56,7 @@ impl Emotion {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmotionAnalysis {
     pub emotion: Emotion,
-    pub confidence: f32,
-}
-
-impl EmotionAnalysis {
-    pub fn neutral() -> Self {
-        Self {
-            emotion: Emotion::Neutral,
-            confidence: 0.0,
-        }
-    }
+    pub intensity: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -251,8 +252,8 @@ fn parse_analysis_text(text: &str) -> Result<EmotionAnalysis> {
     let payload: EmotionPayload =
         serde_json::from_str(candidate).context("failed to parse emotion JSON payload")?;
     Ok(EmotionAnalysis {
-        emotion: Emotion::from_str(&payload.emotion),
-        confidence: payload.confidence.unwrap_or(0.0).clamp(0.0, 1.0),
+        emotion: Emotion::from_classifier(&payload.emotion),
+        intensity: payload.intensity.unwrap_or(0.0).clamp(0.0, 1.0),
     })
 }
 
@@ -279,7 +280,7 @@ fn extract_json_object(text: &str) -> Option<&str> {
 struct EmotionPayload {
     emotion: String,
     #[serde(default)]
-    confidence: Option<f32>,
+    intensity: Option<f32>,
 }
 
 #[cfg(test)]
@@ -368,13 +369,13 @@ mod tests {
         let body = json!({
             "content": [
                 {"type": "thinking", "thinking": "working"},
-                {"type": "text", "text": "{\"emotion\":\"happy\",\"confidence\":0.7}"}
+                {"type": "text", "text": "{\"emotion\":\"happy\",\"intensity\":0.7}"}
             ]
         });
 
         assert_eq!(
             first_text_block(&body).as_deref(),
-            Some("{\"emotion\":\"happy\",\"confidence\":0.7}")
+            Some("{\"emotion\":\"happy\",\"intensity\":0.7}")
         );
     }
 
@@ -409,10 +410,16 @@ mod tests {
 
     #[test]
     fn parse_analysis_text_understands_fenced_json() {
-        let analysis =
-            parse_analysis_text("```json\n{\"emotion\":\"sob\",\"confidence\":1.2}\n```")
-                .expect("fenced json should parse");
-        assert_eq!(analysis.emotion, Emotion::Sob);
-        assert_eq!(analysis.confidence, 1.0);
+        let analysis = parse_analysis_text("```json\n{\"emotion\":\"sad\",\"intensity\":1.2}\n```")
+            .expect("fenced json should parse");
+        assert_eq!(analysis.emotion, Emotion::Sad);
+        assert_eq!(analysis.intensity, 1.0);
+    }
+
+    #[test]
+    fn parse_analysis_text_treats_unknown_labels_as_neutral() {
+        let analysis = parse_analysis_text("{\"emotion\":\"sob\",\"intensity\":0.9}")
+            .expect("json should parse");
+        assert_eq!(analysis.emotion, Emotion::Neutral);
     }
 }
