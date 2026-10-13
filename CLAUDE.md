@@ -53,96 +53,21 @@ Each app implements `app_descriptor_t` with callbacks: `init`, `create_root`, `r
 - I2C: Touch on GPIO18/17, RTC+IMU on GPIO48/47
 - Device addresses: Touch 0x3B, RTC 0x51, IMU 0x6B
 
-## Build Commands
+## Commands
 
-### Firmware (ESP-IDF)
+Everything goes through `make` (`make help` lists the targets); this machine's shell has no `idf.py` on PATH, the Makefile finds ESP-IDF v6.0 itself.
 
-All commands require ESP-IDF environment. Use VS Code's "ESP-IDF: Open ESP-IDF Terminal" or ensure `idf.py` is in PATH:
+- `make check` — every fast check: Rust format, `cargo test`, firmware host tests against `protocol/fixtures/` (needs `brew install cjson`). CI (`.github/workflows/check.yml`) runs it plus a firmware build on every push.
+- `make fmt` — `cargo fmt` plus clang-format on firmware C. Run it **before** `make build`, so what gets flashed is what gets committed.
+- `make build` / `make flash` / `make monitor` — firmware. `flash` pauses the launchd agent that holds the serial port and restarts it afterwards.
+- `cd tools/esp32dash && cargo install --path .`, then `launchctl kickstart -k gui/$(id -u)/com.local.esp32dash` — put a changed agent into service. The wire protocol has no version negotiation: change host and firmware together.
 
-```bash
-# Set target (one-time after clone)
-idf.py set-target esp32s3
+Looking at the real device (all of these work while the agent is running; they ask it to step off the port):
 
-# Build
-idf.py build
-
-# Flash and monitor (replace XXXX with your port)
-idf.py -p /dev/cu.usbserial-XXXX flash
-idf.py -p /dev/cu.usbserial-XXXX monitor
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
-
-# Clean build artifacts
-idf.py fullclean
-
-# Configuration menu
-idf.py menuconfig
-```
-
-Flash at lower baud rate if connection fails:
-
-```bash
-idf.py -p /dev/cu.usbserial-XXXX -b 115200 flash
-```
-
-### esp32dash (Rust)
-
-```bash
-cd tools/esp32dash
-
-# Run agent
-cargo run -- agent run
-
-# Send test event
-printf '%s\n' '{"hook_event_name":"SessionStart","cwd":"/tmp/project"}' | cargo run -- claude ingest --event-from-stdin
-
-# Check status
-cargo run -- agent status
-
-# Install as launchd service (macOS) from a stable binary path
-cargo install --path .
-ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launchd
-```
-
-## Project Structure
-
-```
-├── src/
-│   ├── main/              # ESP-IDF entrypoint (main.c, bootstrap.c)
-│   ├── components/        # Firmware modules
-│   │   ├── bsp_board/     # Board support (display, touch, RTC)
-│   │   ├── core_*/        # app_manager, event_bus, system_state, types
-│   │   ├── service_*/     # time, weather, claude, market
-│   │   ├── net_manager/   # Wi-Fi connection management
-│   │   ├── power_policy/  # Power state machine
-│   │   └── power_runtime/ # Power state execution
-│   └── apps/              # App implementations
-│       ├── app_home/
-│       ├── app_trading/
-│       └── app_settings/
-├── tools/esp32dash/       # Rust host agent for Claude hooks and serial device control
-├── docs/                  # Design documents and guides
-│   ├── design/            # Architecture and app designs
-│   ├── hardware/          # Board specifications
-│   ├── guides/            # Setup instructions
-│   ├── plans/             # Action plans and roadmap
-│   └── reports/           # Audit reports
-├── sdkconfig.defaults     # Default ESP-IDF configuration
-└── CMakeLists.txt         # Project root CMake
-```
-
-## Development Workflow
-
-1. Open repository in VS Code
-2. Run "ESP-IDF: Open ESP-IDF Terminal" to get configured environment
-3. Make changes to source files
-4. Build with `idf.py build`
-5. Flash with `idf.py -p PORT flash monitor`
-
-## Key Configuration Files
-
-- `sdkconfig.defaults`: Default ESP-IDF config (16MB flash, 8MB PSRAM, LVGL RGB565)
-- `partitions.csv`: Flash partition table (if customized)
-- `CMakeLists.txt`: Sets `EXTRA_COMPONENT_DIRS` to `src/components`, `src/apps`, `src/main`
+- `esp32dash device screenshot --out x.png` — what is on the screen now.
+- `esp32dash device rpc <method> '<json>'` — any RPC, e.g. `app.switch '{"app":"trading"}'`, `debug.market_snapshot`.
+- `esp32dash chibi test --state working --workspace demo --bubble "..." [--pending approval] [--hold 15]` — put a Home state on screen for `--hold` seconds; `chibi screensaver enter --effect stars`.
+- `esp32dash agent status` — the shown snapshot, every tracked session (workspace, status, pid, idle time) and `events_received`.
 
 ## Important Constraints
 
@@ -157,71 +82,25 @@ ESP32DASH_SERIAL_PORT=/dev/cu.usbmodemXXXX ~/.cargo/bin/esp32dash install-launch
 - `protocol.error` and the serial line-overflow guard are unrelated to approvals and stay load-bearing — do not revert them
 - Lock order: LVGL lock → service mutex. No service task may call LVGL directly
 
-## 语言风格
-
-用自然的散文体回答，像一个见多识广的同事在跟我对话，而不是一个在做演示的客服。
-参考叶圣陶，不要阿里腔
-
-### 语气
-
-- 不要用"Great question!"、"Absolutely!"、"Let's dive in!"、"Sure thing!"这类客套话开头。
-- 不要在回答末尾反问我"需要我进一步展开吗？"或"还有什么我可以帮你的吗？"——如果我需要，我会追问。
-- 不要夸我的问题好。直接回答。
-
-### 格式
-
-- 默认用段落和自然语言，不要用列表和bullet points，除非我明确要求"列一下"。
-- 少用粗体。只在真正需要强调的关键术语上加粗，不要把每句话的重点词都加粗。
-- 不要用分割线排版。
-- 标题和小标题只在长篇结构化内容中使用，日常对话不要加。
-
-### 内容
-
-- 简洁优先。能用两句话说清楚的不要用五句。
-- 如果一个问题有明确答案，先给结论，再给理由——不要铺垫。
-- 承认不确定性，不要装作什么都知道。说"我不确定"比编一个听起来合理的答案好得多。
-- 如果我的想法有问题，直说，不要先肯定再转折。
-- 避免重复我已经说过的内容来"表示理解"。
-
-### 语言
-
-- 我用中文提问就用中文回答，用英文就用英文。
-- 中文回答中遇到技术术语，保留英文原文即可，不需要刻意翻译成中文再括号注明英文。
-- 不要用"赋能"、"拆解"、"底层逻辑"、"维度"、"颗粒度"、"抓手"、"狠狠干"、"落一刀" 这类互联网黑话。用正常人说的话。
-- 不要用：「不是...... 而是......」句式；
-
-### 搜索
-
-- 联网搜索的时候要优先采信英文网站信源；
 
 ## 技术栈
-- 固件: C + ESP-IDF (`idf: ">5.0.4,!=5.1.1"`，项目按 6.0 开发)，目标 `esp32s3`；UI 用 LVGL `^9`；运行时 FreeRTOS。
-- 固件依赖 (`src/main/idf_component.yml`): `espressif/esp_lcd_axs15231b 2.1.0`、`espressif/esp_websocket_client ^1`。
-- 宿主代理 `tools/esp32dash/`: Rust，edition 2024，crate `esp32dash 0.1.1`，通过 USB 串口 + WebSocket 与设备/Claude hook 通信。
-
-## 命令
-- 固件构建/烧录见上文「Build Commands」：`idf.py build`、`idf.py -p <PORT> flash monitor`、`idf.py fullclean`。
-- 宿主代理: `cd tools/esp32dash && cargo build` / `cargo run -- agent run` / `cargo test`。
-- 固件主机侧测试: `make test-host`(纯 C,需 `brew install cjson`),覆盖 `device_protocol` 与 `protocol/fixtures/` 的契约。
-- 提交前格式化: `pre-commit run --all-files`（需 `pip install pre-commit` 后 `pre-commit install`）。
+- 固件: C + ESP-IDF 6.0，目标 `esp32s3`；UI 用 LVGL 9；运行时 FreeRTOS。依赖见 `src/main/idf_component.yml`。
+- 宿主代理 `tools/esp32dash/`: Rust edition 2024。hook 通过本机 HTTP（`127.0.0.1:37125`）把事件交给代理，代理通过 USB 串口的 JSON 行协议驱动设备。
 
 ## 代码风格
-- C: `.clang-format`（LLVM 基底，4 空格缩进，列宽 100，Linux 大括号，指针右对齐，`SortIncludes: false`）。仅作用于 `src/**.{c,h,cpp,hpp}`，由 pre-commit 的 clang-format hook 强制。
-- Rust: `tools/esp32dash/.rustfmt.toml`（edition 2024，4 空格，`use_small_heuristics = "Off"`，`reorder_imports`）。用 `cargo fmt`。
-- pre-commit hooks: trailing-whitespace、end-of-file-fixer、check-yaml、check-merge-conflict、clang-format(固件)。
+- C: `.clang-format`，由 pre-commit 的 clang-format hook 强制（`make fmt`）。
+- Rust: `tools/esp32dash/.rustfmt.toml`（`cargo fmt`）。
 
 ## 禁止文件
 - 构建产物: `build/`、`build-*/`、`managed_components/`、`target/`（勿手改）。
 - 配置: `sdkconfig`、`sdkconfig.*`、`sdkconfig.old`（生成物）；唯一手改的基线是 `sdkconfig.defaults`。
-- 生成代码: `src/apps/*/src/generated/`、`tools/lv_font_pipeline/*_tmp.c`（字体/精灵流水线产物）。
-- 本地状态: `.claude/`、`.omc/`、`.pre-commit-cache/`。
+- 生成代码: `src/apps/*/src/generated/`、`src/components/*/src/generated/`、`tools/lv_font_pipeline/*_tmp.c`（字体/精灵流水线产物，只能由脚本生成）。
+- 本地状态: `.claude/`、`.omc/`、`.pre-commit-cache/`、`plans/`。
 
 ## 审查规则
-- 提交信息遵循 Conventional Commits 带 scope：`feat(...)` / `fix(...)` / `refactor(...)` / `docs(...)`（见 git log）。
-- 提交前跑 pre-commit；改动固件需 `idf.py build` 通过后再提交。
-- 暂无 CONTRIBUTING.md / CODEOWNERS / PR 模板 (待补充)。
+- 提交信息遵循 Conventional Commits 带 scope：`feat(...)` / `fix(...)` / `refactor(...)` / `docs(...)`。
+- 提交前 `make check` 和 pre-commit 通过；改动固件需 `make build` 通过。
 
 ## 项目记忆 (回写约定)
 跨会话的持久信息记录在 [PROJECT_MEMORY.md](./PROJECT_MEMORY.md)。
-**完成每个重要任务后务必回写**: 把确认的决策写入「已验证的事实」、踩的坑写入「失败尝试」、用进展更新「上次会话」、把计划写入「下次运行」。
-保持 PROJECT_MEMORY.md 在 300~400 行,超长时用 `scripts/memory.py compact` 压缩(保留事实与计划,淘汰最旧日志)。
+完成重要任务后回写: 确认的决策写入「已验证的事实」、踩的坑写入「失败尝试」、进展更新「上次会话」、计划写入「下次运行」。每条一两句，超过 400 行时淘汰最旧的「上次会话」条目。

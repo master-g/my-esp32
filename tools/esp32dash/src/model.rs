@@ -240,6 +240,24 @@ pub struct AgentStatusResponse {
     pub current_seq: u64,
     pub serial: SerialConnectionStatus,
     pub snapshot: Snapshot,
+    /// Hook events accepted since the agent started. A hook gives up after
+    /// 100 ms, so a count that lags behind Claude's activity means dropped events.
+    #[serde(default)]
+    pub events_received: u64,
+    /// Every tracked session; `snapshot` above is the one chosen for the display.
+    #[serde(default)]
+    pub sessions: Vec<SessionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub workspace: String,
+    pub status: String,
+    pub event: String,
+    pub unread: bool,
+    pub claude_pid: Option<u32>,
+    pub idle_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

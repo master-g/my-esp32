@@ -36,6 +36,7 @@ const RPC_TIMEOUT_SCREENSHOT_START: Duration = Duration::from_secs(10);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(700);
 const SCREENSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(60);
 const SCREENSHOT_FORMAT_RGB565_LE: &str = "rgb565_le";
 const SCREENSHOT_MAX_WIDTH: usize = 640;
@@ -68,6 +69,12 @@ enum WorkerCommand {
     Rpc {
         request: RpcRequest,
         reply: oneshot::Sender<Result<Value, String>>,
+    },
+    /// Close the serial port until `until` so a CLI command can open it; a
+    /// deadline in the past resumes at once. `ack` fires once the port is free.
+    Pause {
+        until: Instant,
+        ack: oneshot::Sender<()>,
     },
 }
 
@@ -128,6 +135,17 @@ impl DeviceManager {
             .await
             .map_err(|_| anyhow!("device worker dropped rpc response"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    pub async fn pause(&self, duration: Duration) -> Result<()> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(WorkerCommand::Pause {
+                until: Instant::now() + duration,
+                ack: ack_tx,
+            })
+            .map_err(|_| anyhow!("device worker is unavailable"))?;
+        ack_rx.await.map_err(|_| anyhow!("device worker dropped pause request"))
     }
 
     pub fn status(&self) -> SerialConnectionStatus {
@@ -261,8 +279,49 @@ fn worker_loop(
     initial_snapshot: Option<Snapshot>,
 ) {
     let mut pending_snapshot = initial_snapshot.filter(|snapshot| snapshot.seq > 0);
+    let mut paused: Option<(Instant, oneshot::Sender<()>)> = None;
 
     loop {
+        // The session of the previous iteration is closed by now, so the port is free.
+        if let Some((mut until, ack)) = paused.take() {
+            let _ = ack.send(());
+            loop {
+                let now = Instant::now();
+                if now >= until {
+                    break;
+                }
+                match cmd_rx.recv_timeout(until - now) {
+                    Ok(WorkerCommand::UpdateSnapshot(snapshot)) => {
+                        pending_snapshot = Some(snapshot)
+                    }
+                    Ok(WorkerCommand::Event {
+                        ..
+                    }) => {}
+                    Ok(WorkerCommand::Rpc {
+                        reply,
+                        ..
+                    }) => {
+                        let _ = reply.send(Err("device link is paused for a CLI command".into()));
+                    }
+                    Ok(WorkerCommand::Pause {
+                        until: next,
+                        ack,
+                    }) => {
+                        // Extend, never shorten, a pause another command asked
+                        // for; only an explicit resume (deadline now) cuts it.
+                        until = if next <= Instant::now() {
+                            next
+                        } else {
+                            until.max(next)
+                        };
+                        let _ = ack.send(());
+                    }
+                    Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        }
+
         match connect_for_worker(config.clone(), factory.clone()) {
             Ok((port, mut session, hello)) => {
                 set_connected(&status, &port, &hello);
@@ -323,6 +382,14 @@ fn worker_loop(
                                 break;
                             }
                         }
+                        Ok(WorkerCommand::Pause {
+                            until,
+                            ack,
+                        }) => {
+                            paused = Some((until, ack));
+                            set_disconnected(&status);
+                            break;
+                        }
                         Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
                         Err(std_mpsc::RecvTimeoutError::Timeout) => {}
                     }
@@ -373,6 +440,10 @@ fn worker_loop(
                     }) => {
                         let _ = reply.send(Err("no compatible device connected".to_string()));
                     }
+                    Ok(WorkerCommand::Pause {
+                        until,
+                        ack,
+                    }) => paused = Some((until, ack)),
                     Err(std_mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
                 }
@@ -401,7 +472,13 @@ fn resolve_port(
     }
 
     info!("scanning serial ports for compatible devices...");
-    let devices = discover_devices(factory, baud)?;
+    let mut devices = discover_devices(factory.clone(), baud)?;
+    if devices.is_empty() {
+        // A port that another process closed a moment ago can miss the hello
+        // window once; one more look saves the caller a manual retry.
+        thread::sleep(DISCOVERY_RETRY_DELAY);
+        devices = discover_devices(factory, baud)?;
+    }
     match devices.len() {
         0 => bail!("no compatible esp32dash device found on serial ports"),
         1 => {

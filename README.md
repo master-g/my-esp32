@@ -47,7 +47,6 @@ cargo run -- agent status
 The bridge is documented in:
 
 - [docs/design/dashboard-design.md](./docs/design/dashboard-design.md)
-- [docs/design/apps/claude-app.md](./docs/design/apps/claude-app.md)
 
 ## Firmware Baseline
 

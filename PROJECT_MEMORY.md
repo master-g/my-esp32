@@ -34,6 +34,7 @@
 - [2026-10-13] Home 布局:时钟保持整行 44 号 `HH:MM:SS`(试过把秒缩成 22 号,两种字体不协调,用户否决);项目名(快照 `workspace`)和 working 已用时长是角色脚下的 11 号小标签(放屏幕中间用 22 号字被用户否决为「出戏」);气泡在时钟与角色之间(`HOME_SESSION_X/W`,底色 `SURFACE_SECONDARY`,左下对齐),不再盖住角色。气泡在无 pending 时显示 `detail`(提示词预览/工具名),这是有意保留的。
 - [2026-10-13] 主机:日志一律写 stderr(hook 的 stdout 会进 Claude 上下文);以 `<task-notification>`、`<system-reminder>`、`[SYSTEM NOTIFICATION`、`<agent-message from=` 开头的 UserPromptSubmit 不当作用户提示词;会话失活或被清理时连带清掉它的 pending;`state.json` 0600,pending id 用摘要不含问题文本。`make check` = fmt-check + `make test-host` + `cargo test`(不含固件构建;clippy 有 23 条既有警告未纳入)。
 - [2026-10-13] 主机会话表:一个 Claude 进程只保留一条会话。`/clear`、`/resume` 会让同一 pid 换 session id,旧条目收不到事件、pid 又活着,不会被对账清掉;若它停在 waiting_for_input(优先级最高)就会一直占着屏幕。现在同 pid 的新 id 到来时删掉旧条目及其 pending(`apply_event_to_sessions`)。授权后到工具跑完之间 Claude Code 不发 hook,所以长命令期间提示会一直留到 PostToolUse。
+- [2026-10-13] 真机查看不用再停服务:`device screenshot`、`chibi test/demo/screensaver` 会先 `POST /v1/device/pause` 让代理让出串口(只延长不缩短,`secs=0` 立即恢复);`device rpc <method> <json>` 走代理;`chibi test` 有 `--workspace`、`--pending`、`--hold`;`agent status` 列出全部会话和 `events_received`。屏保不能经代理发:代理的下一帧快照会把屏幕唤醒。pre-commit 曾要 3 分多钟,原因是 `src/components/ui_fonts/src/generated/` 下 3 MB 的字体文件没被排除,排除后 0.7 秒。CI 在 `.github/workflows/check.yml`。
 
 ## 上次会话
 <!-- 上次运行做了什么、停在何处。滚动记录,超长时最旧条目优先淘汰。 -->

@@ -114,6 +114,7 @@ struct AgentState {
     emotions: BTreeMap<String, SessionEmotionEntry>,
     last_heartbeat_ts: u64,
     pending: PendingQueue,
+    events_received: u64,
 }
 
 impl AgentState {
@@ -132,6 +133,7 @@ impl AgentState {
             emotions: BTreeMap::new(),
             last_heartbeat_ts: 0,
             pending: PendingQueue::new(timeouts),
+            events_received: 0,
         }
     }
 }
@@ -192,6 +194,7 @@ pub async fn run(config: Config) -> Result<()> {
 
 impl AppState {
     pub async fn ingest(self: &Arc<Self>, event: LocalHookEvent) {
+        self.state.lock().await.events_received += 1;
         self.clear_pending_for_event(&event).await;
         match event.hook_event_name.as_str() {
             "PreToolUse" => self.handle_pre_tool(event).await,
@@ -815,12 +818,57 @@ async fn post_event(
 
 async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
+    let now = now_epoch();
+    let (events_received, sessions) = {
+        let guard = state.state.lock().await;
+        let sessions = guard
+            .sessions
+            .values()
+            .map(|session| crate::model::SessionSummary {
+                session_id: session.snapshot.session_id.clone(),
+                workspace: session.snapshot.workspace.clone(),
+                status: session.snapshot.status.clone(),
+                event: session.snapshot.event.clone(),
+                unread: session.snapshot.unread,
+                claude_pid: session.claude_pid,
+                idle_secs: now.saturating_sub(session.last_activity_ts),
+            })
+            .collect();
+        (guard.events_received, sessions)
+    };
     Json(AgentStatusResponse {
         admin_addr: state.config.admin_addr_raw.clone(),
         current_seq: snapshot.seq,
         serial: state.serial_status(),
         snapshot,
+        events_received,
+        sessions,
     })
+}
+
+#[derive(serde::Deserialize)]
+struct PauseRequest {
+    secs: u64,
+}
+
+/// Longest a CLI command may keep the agent off the serial port.
+const MAX_DEVICE_PAUSE_SECS: u64 = 600;
+
+async fn post_device_pause(
+    State(state): State<AppState>,
+    Json(request): Json<PauseRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<AdminErrorResponse>)> {
+    let duration = Duration::from_secs(request.secs.min(MAX_DEVICE_PAUSE_SECS));
+    match state.device_manager.pause(duration).await {
+        Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Err(err) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(AdminErrorResponse {
+                ok: false,
+                error: err.to_string(),
+            }),
+        )),
+    }
 }
 
 async fn get_snapshot(State(state): State<AppState>) -> impl IntoResponse {
@@ -972,6 +1020,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/v1/status", get(get_status))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/device/rpc", post(post_device_rpc))
+        .route("/v1/device/pause", post(post_device_pause))
         .with_state(app_state)
 }
 

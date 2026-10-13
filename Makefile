@@ -157,8 +157,9 @@ test-host: ## Run firmware host tests against protocol/fixtures (needs: brew ins
 check: fmt-check test-host ## Run every fast check: Rust format + tests, firmware host tests (not the firmware build)
 	@$(CARGO) test --manifest-path tools/esp32dash/Cargo.toml
 
-fmt: ## Format the Rust host tool (firmware C is formatted by the pre-commit clang-format hook)
+fmt: ## Format Rust (cargo fmt) and firmware C (the pre-commit clang-format hook); run before build + flash
 	@$(CARGO) fmt --all --manifest-path tools/esp32dash/Cargo.toml
+	@pre-commit run clang-format --all-files >/dev/null || true
 
 fmt-check: ## Check Rust formatting without rewriting files
 	@$(CARGO) fmt --all --manifest-path tools/esp32dash/Cargo.toml -- --check

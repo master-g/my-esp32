@@ -32,7 +32,7 @@ use crate::{
     agent::Config,
     device::{
         UnixSerialFactory, capture_screenshot_direct, discover_devices, open_direct_session,
-        request_direct, request_direct_with_timeout, send_event_direct,
+        request_direct, send_event_direct,
     },
     model::{
         AdminErrorResponse, AdminRpcResponse, Attention, DeviceScreenshot, LocalHookEvent,
@@ -45,7 +45,9 @@ use crate::{
     },
 };
 
-const CHIBI_SCREENSAVER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SCREENSHOT_PAUSE_SECS: u64 = 8;
+const DEMO_PAUSE_SECS: u64 = 600;
+const SCREENSAVER_PAUSE_SECS: u64 = 60;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -153,7 +155,22 @@ enum DeviceCommand {
         )]
         port: Option<String>,
     },
-    #[command(about = "Capture the current device screen to a PNG file over direct serial")]
+    #[command(
+        about = "Send one raw RPC to the device and print the result",
+        long_about = "Send one raw RPC to the device and print the result, e.g.\n  \
+                      esp32dash device rpc app.switch '{\"app\":\"trading\"}'"
+    )]
+    Rpc {
+        #[arg(help = "Method name, e.g. app.switch, device.info, debug.market_snapshot")]
+        method: String,
+        #[arg(default_value = "{}", help = "Params as a JSON object")]
+        params: String,
+        #[arg(long, help = "Use a specific serial port instead of the running agent")]
+        port: Option<String>,
+    },
+    #[command(
+        about = "Capture the current device screen to a PNG file (pauses the running agent for it)"
+    )]
     Screenshot {
         #[arg(short = 'o', long, help = "Output PNG path")]
         out: PathBuf,
@@ -222,6 +239,25 @@ enum ChibiAttention {
     Low,
     Medium,
     High,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ChibiPending {
+    Approval,
+    Prompt,
+}
+
+impl ChibiPending {
+    fn display(self) -> crate::model::PendingDisplay {
+        let (kind, coarse_type) = match self {
+            Self::Approval => ("approval", "Bash command"),
+            Self::Prompt => ("prompt", "Question"),
+        };
+        crate::model::PendingDisplay {
+            kind: kind.into(),
+            coarse_type: coarse_type.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -305,6 +341,16 @@ enum ChibiCommand {
         session_id: String,
         #[arg(long, default_value = "Stop", help = "Hook event label to send")]
         event: String,
+        #[arg(long, default_value = "", help = "Project name shown under the sprite")]
+        workspace: String,
+        #[arg(long, value_enum, help = "Show a pending interaction (sticky bubble, flashing)")]
+        pending: Option<ChibiPending>,
+        #[arg(
+            long,
+            default_value_t = 15,
+            help = "Seconds the running agent stays off the port so the test stays on screen"
+        )]
+        hold: u64,
         #[arg(long, help = "Serial port (default: autodiscover)")]
         port: Option<String>,
     },
@@ -407,10 +453,28 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
             .await?;
             print_json(&result)
         }
+        DeviceCommand::Rpc {
+            method,
+            params,
+            port,
+        } => {
+            let params: Value =
+                serde_json::from_str(&params).context("params must be a JSON object")?;
+            let result = run_request(
+                port.as_deref(),
+                RpcRequest {
+                    method,
+                    params,
+                },
+            )
+            .await?;
+            print_json(&result)
+        }
         DeviceCommand::Screenshot {
             out,
             port,
         } => {
+            pause_agent(SCREENSHOT_PAUSE_SECS).await;
             let screenshot = capture_screenshot_direct(
                 Arc::new(UnixSerialFactory),
                 port.as_deref(),
@@ -430,6 +494,21 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
                 bytes: screenshot.data.len(),
             })
         }
+    }
+}
+
+/// Ask a running agent to stay off the serial port for `secs` (0 resumes it), so
+/// a command that talks to the device directly does not fight it for the bytes.
+/// No agent, no problem: the port is already free.
+async fn pause_agent(secs: u64) {
+    let result = Client::new()
+        .post(format!("{}/v1/device/pause", admin_base_url()))
+        .json(&json!({ "secs": secs }))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await;
+    if let Err(err) = result {
+        debug!("no agent to pause: {err}");
     }
 }
 
@@ -458,9 +537,12 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
             source,
             session_id,
             event,
+            workspace,
+            pending,
+            hold,
             port,
         } => {
-            let snapshot = build_test_snapshot(
+            let mut snapshot = build_test_snapshot(
                 &state,
                 &emotion,
                 bubble.as_deref(),
@@ -473,6 +555,9 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                     event,
                 },
             );
+            snapshot.workspace = workspace;
+            snapshot.pending = pending.map(ChibiPending::display);
+            pause_agent(hold).await;
             send_event_direct(
                 Arc::new(UnixSerialFactory),
                 port.as_deref(),
@@ -496,6 +581,7 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
         } => {
             let factory = Arc::new(UnixSerialFactory);
             let baud = compat::serial_baud();
+            pause_agent(DEMO_PAUSE_SECS).await;
             let mut session = open_direct_session(factory, port.as_deref(), baud)?;
 
             let steps: &[(ChibiState, ChibiEmotion, &str)] = &[
@@ -539,6 +625,8 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                     std::thread::sleep(std::time::Duration::from_secs(3));
                 }
             }
+            drop(session);
+            pause_agent(0).await;
             println!("demo complete");
             Ok(())
         }
@@ -554,7 +642,15 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                     params["effect"] = json!(name);
                 }
             }
-            request_direct_with_timeout(
+            // A snapshot from the agent wakes the screen again, so keep the
+            // agent off the port while the screensaver is being looked at.
+            pause_agent(if enabled {
+                SCREENSAVER_PAUSE_SECS
+            } else {
+                0
+            })
+            .await;
+            request_direct(
                 Arc::new(UnixSerialFactory),
                 port.as_deref(),
                 compat::serial_baud(),
@@ -562,7 +658,6 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                     method: "home.screensaver".into(),
                     params,
                 },
-                CHIBI_SCREENSAVER_RPC_TIMEOUT,
             )?;
             match (enabled, effect.as_deref()) {
                 (true, Some(name)) => println!("screensaver entered (effect: {name})"),
