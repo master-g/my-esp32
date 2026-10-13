@@ -2,6 +2,7 @@ use crate::emotion::{Emotion, EmotionAnalysis};
 
 const EMOTION_DECAY_FACTOR: f32 = 0.75;
 const HAPPY_THRESHOLD: f32 = 0.35;
+const ELATED_THRESHOLD: f32 = 0.9;
 const SAD_THRESHOLD: f32 = 0.35;
 const SOB_THRESHOLD: f32 = 0.8;
 
@@ -14,7 +15,7 @@ pub struct EmotionState {
 impl EmotionState {
     pub fn record_emotion(&mut self, analysis: &EmotionAnalysis) {
         match analysis.emotion {
-            Emotion::Happy => {
+            Emotion::Happy | Emotion::Elated => {
                 self.happy_score = self.happy_score.max(analysis.confidence.max(HAPPY_THRESHOLD));
                 self.sad_score *= 0.5;
             }
@@ -49,7 +50,11 @@ impl EmotionState {
         if self.sad_score >= SOB_THRESHOLD {
             Emotion::Sob
         } else if self.happy_score >= HAPPY_THRESHOLD && self.happy_score > self.sad_score {
-            Emotion::Happy
+            if self.happy_score >= ELATED_THRESHOLD {
+                Emotion::Elated
+            } else {
+                Emotion::Happy
+            }
         } else if self.sad_score >= SAD_THRESHOLD {
             Emotion::Sad
         } else {
@@ -71,6 +76,18 @@ mod tests {
             emotion: Emotion::Happy,
             confidence: 0.7,
         });
+        assert_eq!(state.current_emotion(), Emotion::Happy);
+    }
+
+    #[test]
+    fn very_confident_happy_escalates_to_elated_then_decays_to_happy() {
+        let mut state = EmotionState::default();
+        state.record_emotion(&EmotionAnalysis {
+            emotion: Emotion::Happy,
+            confidence: 0.95,
+        });
+        assert_eq!(state.current_emotion(), Emotion::Elated);
+        state.decay();
         assert_eq!(state.current_emotion(), Emotion::Happy);
     }
 

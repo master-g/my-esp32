@@ -109,6 +109,9 @@ static sprite_emotion_t emotion_from_text(const char *emotion)
     if (strcmp(emotion, "sob") == 0) {
         return SPRITE_EMOTION_SOB;
     }
+    if (strcmp(emotion, "elated") == 0) {
+        return SPRITE_EMOTION_ELATED;
+    }
     return SPRITE_EMOTION_NEUTRAL;
 }
 

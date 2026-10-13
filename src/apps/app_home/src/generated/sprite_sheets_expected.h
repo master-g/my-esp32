@@ -16,12 +16,15 @@ static const uint32_t sprite_idle_hashes[] = {0x54b6399du, 0xf0216d3bu, 0xf0216d
 static const uint32_t sprite_idle_happy_hashes[] = {0x0a69888bu, 0x0a5f7726u, 0x0a5f7726u, 0x4563498cu, 0x2f76f898u, 0x4aa5ac49u};
 static const uint32_t sprite_idle_sad_hashes[] = {0x76ffddcfu, 0x040ba5dfu, 0xf3823869u, 0xa6031931u, 0x34ba617du, 0x694bfa97u};
 static const uint32_t sprite_idle_sob_hashes[] = {0x274e7b64u, 0xa8bef93au, 0xb5c29be6u, 0xe43c453au, 0x599a5c07u, 0x599a5c07u};
+static const uint32_t sprite_idle_elated_hashes[] = {0x407bdce1u, 0x81c46b49u, 0x7320bcceu, 0x7c732c82u, 0x7320bcceu, 0xbeb03c7cu, 0x75c676b6u, 0xf72bc4e6u, 0x75c676b6u, 0x3195ce76u, 0x7320bcceu, 0x7c732c82u, 0x7320bcceu, 0xa9f1e891u, 0x75c676b6u, 0xf72bc4e6u, 0x75c676b6u};
 static const uint32_t sprite_working_hashes[] = {0x61dce74eu, 0x3ecbfbf0u, 0x020bb08bu, 0xd6b67f2du, 0x9c7e96bdu, 0xbf10e776u};
 static const uint32_t sprite_working_happy_hashes[] = {0x988e2c97u, 0x51805dc9u, 0xa25b4102u, 0x0d357040u, 0xfc986ae1u, 0x88176b0bu};
 static const uint32_t sprite_working_sad_hashes[] = {0xf23435ecu, 0x5d9b6ff4u, 0xc4a72779u, 0xa4d24ac1u, 0x28878a3eu, 0x885ecc90u};
+static const uint32_t sprite_working_sob_hashes[] = {0x6bb3b467u, 0x0f2ced91u, 0x6a2ddf96u, 0x7e6ce5eau, 0xf8096fa8u, 0xf8096fa8u};
 static const uint32_t sprite_waiting_hashes[] = {0x4f12dc2fu, 0x05dbd9bcu, 0xce370269u, 0xce370269u, 0x6b6146b8u, 0xd2cc8152u};
 static const uint32_t sprite_waiting_happy_hashes[] = {0x575a868au, 0x2390b629u, 0xccf47124u, 0xccf47124u, 0x98439c67u, 0x550c321fu};
 static const uint32_t sprite_waiting_sad_hashes[] = {0x3d267f16u, 0xd099226bu, 0x01583fa2u, 0x6cdf3e8au, 0xbd0e7048u, 0x576484e7u};
+static const uint32_t sprite_waiting_sob_hashes[] = {0x6c2f8a98u, 0xc437d9ccu, 0x1a0bb97eu, 0xaee357beu, 0x0b059abau, 0x0b059abau};
 static const uint32_t sprite_compacting_hashes[] = {0xe295c8eau, 0xe8d8ed2fu, 0x1427291bu, 0xa8ae4645u, 0x54b6399du};
 static const uint32_t sprite_sleeping_hashes[] = {0x0523d6afu, 0x9a8d5ae3u, 0xaaccc4bcu, 0x5e901fa4u, 0x680e12e1u, 0x20560d13u};
 static const uint32_t sprite_sleeping_happy_hashes[] = {0xc7f62e87u, 0x4803d316u, 0x08689c39u, 0xe754e02cu, 0x9a728612u, 0x9a728612u};
@@ -31,12 +34,15 @@ static const sprite_expected_t sprite_expected[] = {
     {"idle_happy", &sprite_idle_happy, sprite_idle_happy_hashes},
     {"idle_sad", &sprite_idle_sad, sprite_idle_sad_hashes},
     {"idle_sob", &sprite_idle_sob, sprite_idle_sob_hashes},
+    {"idle_elated", &sprite_idle_elated, sprite_idle_elated_hashes},
     {"working", &sprite_working, sprite_working_hashes},
     {"working_happy", &sprite_working_happy, sprite_working_happy_hashes},
     {"working_sad", &sprite_working_sad, sprite_working_sad_hashes},
+    {"working_sob", &sprite_working_sob, sprite_working_sob_hashes},
     {"waiting", &sprite_waiting, sprite_waiting_hashes},
     {"waiting_happy", &sprite_waiting_happy, sprite_waiting_happy_hashes},
     {"waiting_sad", &sprite_waiting_sad, sprite_waiting_sad_hashes},
+    {"waiting_sob", &sprite_waiting_sob, sprite_waiting_sob_hashes},
     {"compacting", &sprite_compacting, sprite_compacting_hashes},
     {"sleeping", &sprite_sleeping, sprite_sleeping_hashes},
     {"sleeping_happy", &sprite_sleeping_happy, sprite_sleeping_happy_hashes},

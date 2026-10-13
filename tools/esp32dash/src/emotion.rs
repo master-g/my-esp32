@@ -16,6 +16,7 @@ const MIN_EMOTION_MAX_TOKENS: u32 = 256;
 pub enum Emotion {
     Neutral,
     Happy,
+    Elated,
     Sad,
     Sob,
 }
@@ -25,6 +26,7 @@ impl Emotion {
         match self {
             Self::Neutral => "neutral",
             Self::Happy => "happy",
+            Self::Elated => "elated",
             Self::Sad => "sad",
             Self::Sob => "sob",
         }
@@ -33,6 +35,7 @@ impl Emotion {
     pub fn from_str(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "happy" => Self::Happy,
+            "elated" => Self::Elated,
             "sad" => Self::Sad,
             "sob" => Self::Sob,
             _ => Self::Neutral,

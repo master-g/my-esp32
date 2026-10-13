@@ -20,6 +20,7 @@ typedef enum {
     SPRITE_EMOTION_HAPPY,
     SPRITE_EMOTION_SAD,
     SPRITE_EMOTION_SOB,
+    SPRITE_EMOTION_ELATED,
     SPRITE_EMOTION_COUNT,
 } sprite_emotion_t;
 

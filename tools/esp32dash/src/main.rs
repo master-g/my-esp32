@@ -204,6 +204,7 @@ enum ChibiState {
 enum ChibiEmotion {
     Neutral,
     Happy,
+    Elated,
     Sad,
     Sob,
 }
@@ -246,6 +247,7 @@ impl ChibiEmotion {
         match self {
             Self::Neutral => "neutral",
             Self::Happy => "happy",
+            Self::Elated => "elated",
             Self::Sad => "sad",
             Self::Sob => "sob",
         }
@@ -503,6 +505,9 @@ async fn run_chibi_command(command: ChibiCommand) -> Result<()> {
                 (ChibiState::Compacting, ChibiEmotion::Neutral, "Compacting..."),
                 (ChibiState::Waiting, ChibiEmotion::Sad, "Need your input!"),
                 (ChibiState::Idle, ChibiEmotion::Sob, "This is rough..."),
+                (ChibiState::Working, ChibiEmotion::Sob, "Everything is broken"),
+                (ChibiState::Waiting, ChibiEmotion::Sob, "Please help..."),
+                (ChibiState::Idle, ChibiEmotion::Elated, "It works!"),
                 (ChibiState::Sleeping, ChibiEmotion::Happy, ""),
             ];
 

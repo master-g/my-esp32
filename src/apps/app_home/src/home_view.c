@@ -27,18 +27,21 @@ static const sprite_anim_def_t s_sprite_anims[SPRITE_STATE_COUNT][SPRITE_EMOTION
             [SPRITE_EMOTION_HAPPY] = {&sprite_idle_happy, 333},
             [SPRITE_EMOTION_SAD] = {&sprite_idle_sad, 333},
             [SPRITE_EMOTION_SOB] = {&sprite_idle_sob, 333},
+            [SPRITE_EMOTION_ELATED] = {&sprite_idle_elated, 143},
         },
     [SPRITE_STATE_WORKING] =
         {
             [SPRITE_EMOTION_NEUTRAL] = {&sprite_working, 250},
             [SPRITE_EMOTION_HAPPY] = {&sprite_working_happy, 250},
             [SPRITE_EMOTION_SAD] = {&sprite_working_sad, 250},
+            [SPRITE_EMOTION_SOB] = {&sprite_working_sob, 250},
         },
     [SPRITE_STATE_WAITING] =
         {
             [SPRITE_EMOTION_NEUTRAL] = {&sprite_waiting, 333},
             [SPRITE_EMOTION_HAPPY] = {&sprite_waiting_happy, 333},
             [SPRITE_EMOTION_SAD] = {&sprite_waiting_sad, 333},
+            [SPRITE_EMOTION_SOB] = {&sprite_waiting_sob, 333},
         },
     [SPRITE_STATE_COMPACTING] =
         {
@@ -58,6 +61,7 @@ static const sprite_motion_def_t s_sprite_motions[SPRITE_STATE_COUNT][SPRITE_EMO
             [SPRITE_EMOTION_HAPPY] = {1500, 20, 22},
             [SPRITE_EMOTION_SAD] = {1500, 9, 10},
             [SPRITE_EMOTION_SOB] = {0, 0, 0},
+            [SPRITE_EMOTION_ELATED] = {1500, 24, 26},
         },
     [SPRITE_STATE_WORKING] =
         {
@@ -65,6 +69,7 @@ static const sprite_motion_def_t s_sprite_motions[SPRITE_STATE_COUNT][SPRITE_EMO
             [SPRITE_EMOTION_HAPPY] = {400, 10, 10},
             [SPRITE_EMOTION_SAD] = {400, 4, 5},
             [SPRITE_EMOTION_SOB] = {0, 0, 0},
+            [SPRITE_EMOTION_ELATED] = {400, 12, 12},
         },
     [SPRITE_STATE_WAITING] =
         {
@@ -72,6 +77,7 @@ static const sprite_motion_def_t s_sprite_motions[SPRITE_STATE_COUNT][SPRITE_EMO
             [SPRITE_EMOTION_HAPPY] = {1500, 12, 12},
             [SPRITE_EMOTION_SAD] = {1500, 5, 6},
             [SPRITE_EMOTION_SOB] = {0, 0, 0},
+            [SPRITE_EMOTION_ELATED] = {1500, 14, 14},
         },
     [SPRITE_STATE_COMPACTING] =
         {
@@ -155,11 +161,14 @@ static const sprite_anim_def_t *lookup_anim(sprite_state_t state, sprite_emotion
         return anim;
     }
 
-    if (emotion == SPRITE_EMOTION_SOB) {
-        anim = &s_sprite_anims[state][SPRITE_EMOTION_SAD];
+    if (emotion == SPRITE_EMOTION_SOB || emotion == SPRITE_EMOTION_ELATED) {
+        sprite_emotion_t milder =
+            emotion == SPRITE_EMOTION_SOB ? SPRITE_EMOTION_SAD : SPRITE_EMOTION_HAPPY;
+
+        anim = &s_sprite_anims[state][milder];
         if (anim_ready(anim)) {
             if (resolved_emotion != NULL) {
-                *resolved_emotion = SPRITE_EMOTION_SAD;
+                *resolved_emotion = milder;
             }
             return anim;
         }
