@@ -4,7 +4,8 @@
 
 ## 已验证的事实
 <!-- 确认过的技术决策和约束。每条一行：结论 + 原因 + 来源或适用范围。 -->
-- [2026-08-31] 吞事件的标志必须以「确认会产生该事件」为前提：`s_ignore_disconnect_event` 曾无条件置位，`esp_wifi_disconnect()` 不发事件时吞掉下一次真实断开，重连永久停摆（修于 98c1ec5）。
+- [2026-11-02] `esp_wifi_disconnect()` 的返回值判断不了事件会不会来：空闲时返回 ESP_OK 却不发事件，打断在途连接时原因码是 36 而非 8；所以 `s_ignore_disconnect_event` 只吞这两个原因码。真机验证。
+- [2026-11-02] 连接尝试进行中 `wifi.scan` 会返回空列表（约一半），未联网时要先取消在途连接再扫。设备重试时 `last_disconnect_reason` 应循环 201；一直是 0 说明重试链停了。
 - [2026-09-14] launchd 不创建日志目录，`~/Library/Logs/esp32dash/` 缺失时日志静默丢失；轮转只能原地截断，rename 无效（launchd 持有 fd）。
 - [2026-09-14] hook 脚本的真身在 `~/archdotfiles/ai/.claude/hooks/esp32dash-hook.sh`（`~/.claude/hooks/` 是软链）；`esp32dash hooks install` 返回 `script_written:false` 表示与模板一致。
 - [2026-10-13] sprite 没用 LVGL 原生 I8：它要求 `LV_BIN_DECODER_RAM_LOAD`，且带缩放旋转时每次重绘都从 64 KB 的 LVGL 堆临时分 16 KB；所以自带调色板 + RLE，每帧解到一块 ARGB8888 缓冲。
@@ -26,10 +27,9 @@
 
 ## 上次会话
 <!-- 整节改写：停在何处、验证结果。 -->
-- [2026-10-13] main，工作区干净。/improve 审计的 15 条发现与界面改动已实现；`make check`（112 条）、`make build`、CI 通过，设备与代理都是最新版。
-  K 线溢出（1H/4H/1D）、Wi-Fi profile 轮换、天气失败退避、输密码时不重建键盘只过了编译，未在真机复现。本地索引在 `plans/README.md`（不入库）。
+- [2026-11-02] main。查设备时间未同步：Wi-Fi 重试链开机即停摆（已修，真机验证 201 循环、扫描 10/10）；`make check` 通过。设备当前环境扫不到唯一的 `Mico_SZ`，所以时间仍未同步，等用户加网络。
+  「连上后 NTP 成功」未验证。K 线溢出（1H/4H/1D）、Wi-Fi profile 轮换、天气失败退避、输密码时不重建键盘只过了编译，未在真机复现。本地索引在 `plans/README.md`（不入库）。
 
-## 下次运行
 <!-- 整节改写：接下来的计划与优先级。 -->
-- [2026-10-13] 可选的后续，按价值排：串口 worker 写超时与积压折叠；`app_settings.c` 拆分；可选服务初始化失败不致命；渲染模式改 partial 前先测帧耗时。
+- [2026-11-02] 先给设备加一个能连的 2.4 GHz 网络并确认 NTP 成功。可选的后续，按价值排：串口 worker 写超时与积压折叠；`app_settings.c` 拆分；可选服务初始化失败不致命；渲染模式改 partial 前先测帧耗时。
   遗留：`openspec/specs/` 下三份规格描述的是已删除的结构；clippy 有 23 条既有警告未纳入 `make check`；dotfiles 的 hook 脚本副本未同步输出屏蔽（非必需）。

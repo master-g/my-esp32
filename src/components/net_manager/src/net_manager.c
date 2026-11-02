@@ -606,9 +606,10 @@ static esp_err_t start_connection_to_profile(uint8_t profile_idx)
         return ESP_OK;
     }
 
-    // 只有 esp_wifi_disconnect 真的拆掉了在途连接才会产生 DISCONNECTED 事件;
-    // 失败(本就未连接)时不会来事件,此时置标志会把下一次真实断开吞掉、重试链永久停摆。
-    s_ignore_disconnect_event = (esp_wifi_disconnect() == ESP_OK);
+    // 空闲时 esp_wifi_disconnect 同样返回 ESP_OK 却不发事件,所以返回值判断不了事件会不会来;
+    // 事件处理端只吞主动断开的原因码(ASSOC_LEAVE/STA_LEAVING),标志留到下一次真实失败时也不会把它吞掉。
+    s_ignore_disconnect_event = true;
+    (void)esp_wifi_disconnect();
     publish_net_event();
     return esp_wifi_connect();
 }
@@ -764,7 +765,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 
         if (s_ignore_disconnect_event) {
             s_ignore_disconnect_event = false;
-            return;
+            if (event->reason == WIFI_REASON_ASSOC_LEAVE ||
+                event->reason == WIFI_REASON_STA_LEAVING) {
+                return;
+            }
         }
 
         auth_failure = is_auth_failure_reason(event->reason);
@@ -1043,7 +1047,21 @@ esp_err_t net_manager_remove_profile(const char *ssid)
 esp_err_t net_manager_scan_access_points(net_scan_ap_t *results, size_t max_results,
                                          size_t *out_count)
 {
-    return scan_access_points_internal(results, max_results, out_count);
+    // 连接尝试进行中时驱动的扫描结果是空的,而没网时正是用户要扫描添加网络的时候:
+    // 未联网就先取消在途连接、暂停重试链,扫完再恢复。
+    bool pause_retries = s_started && !net_manager_is_connected() && net_manager_has_credentials();
+    esp_err_t err;
+
+    if (pause_retries) {
+        xTimerStop(s_retry_timer, 0);
+        s_ignore_disconnect_event = true;
+        (void)esp_wifi_disconnect();
+    }
+    err = scan_access_points_internal(results, max_results, out_count);
+    if (pause_retries) {
+        schedule_retry(false);
+    }
+    return err;
 }
 
 bool net_manager_scan_ap_auth_required(const net_scan_ap_t *result)
