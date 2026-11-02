@@ -30,7 +30,7 @@ ESP-IDF / LVGL / FreeRTOS
 - **event_bus** (`src/components/core_event_bus/`): Central event distribution system. Event payloads are NULL; subscribers use event type as a signal and query services for data.
 - **device_protocol** (`src/components/device_protocol/`): The hardware-free part of the host/device serial protocol — line assembly with the overflow guard, `claude.update` parsing, and the method list the device declares. Depends only on cJSON and libc; `device_link` is the serial adapter on top of it. `make test-host` builds it with the system `cc` and checks it against `protocol/fixtures/`, the same sample frames the Rust agent's tests read.
 - **BSP Layer** (`src/components/bsp_board/`): Board support package abstracting display (AXS15231B QSPI LCD), touch (I2C), and RTC (PCF85063). The LVGL task calls a registered UI callback (`bsp_display_set_ui_callback`) each tick to process queued events.
-- **Services**: Background data services for time (NTP+RTC), weather, market data, and Claude Code status. Each service protects its snapshot with a FreeRTOS mutex and exposes a copy-out getter (`void get(X *out)`) — callers receive a stack copy, never a live pointer.
+- **Services**: Background data services for time (NTP, RTC, and the host clock over USB), weather, market data, and Claude Code status. Each service protects its snapshot with a FreeRTOS mutex and exposes a copy-out getter (`void get(X *out)`) — callers receive a stack copy, never a live pointer.
 - **Power Policy** (`src/components/power_policy/`): Decides how hard each service may work for the foreground app. The board runs from USB with the screen always on at full brightness; there is no battery, dim or sleep state.
 
 ### Event-Driven App Interface

@@ -5,20 +5,11 @@
 #include <string.h>
 
 const char *const device_protocol_methods[] = {
-    DP_METHOD_DEVICE_INFO,
-    DP_METHOD_DEVICE_REBOOT,
-    DP_METHOD_CONFIG_EXPORT,
-    DP_METHOD_CONFIG_SET_MANY,
-    DP_METHOD_WIFI_SCAN,
-    DP_METHOD_WIFI_PROFILES_LIST,
-    DP_METHOD_WIFI_PROFILE_ADD,
-    DP_METHOD_WIFI_PROFILE_REMOVE,
-    DP_METHOD_CLAUDE_UPDATE,
-    DP_METHOD_CLAUDE_HEARTBEAT,
-    DP_METHOD_PROTOCOL_ERROR,
-    DP_METHOD_HOME_SCREENSAVER,
-    DP_METHOD_APP_SWITCH,
-    DP_METHOD_SCREEN_CAPTURE_START,
+    DP_METHOD_DEVICE_INFO,           DP_METHOD_DEVICE_REBOOT,       DP_METHOD_CONFIG_EXPORT,
+    DP_METHOD_CONFIG_SET_MANY,       DP_METHOD_WIFI_SCAN,           DP_METHOD_WIFI_PROFILES_LIST,
+    DP_METHOD_WIFI_PROFILE_ADD,      DP_METHOD_WIFI_PROFILE_REMOVE, DP_METHOD_CLAUDE_UPDATE,
+    DP_METHOD_CLAUDE_HEARTBEAT,      DP_METHOD_TIME_SYNC,           DP_METHOD_PROTOCOL_ERROR,
+    DP_METHOD_HOME_SCREENSAVER,      DP_METHOD_APP_SWITCH,          DP_METHOD_SCREEN_CAPTURE_START,
     DP_METHOD_DEBUG_MARKET_SNAPSHOT,
 };
 const size_t device_protocol_method_count =
@@ -144,5 +135,18 @@ bool device_protocol_parse_claude_update(const cJSON *payload, claude_snapshot_t
             snapshot->working_secs = (uint32_t)working_secs->valuedouble;
         }
     }
+    return true;
+}
+
+bool device_protocol_parse_time_sync(const cJSON *payload, uint32_t *epoch_s)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(payload, "epoch_s");
+
+    if (!cJSON_IsNumber(value) || value->valuedouble < 0 ||
+        value->valuedouble > (double)UINT32_MAX) {
+        return false;
+    }
+
+    *epoch_s = (uint32_t)value->valuedouble;
     return true;
 }

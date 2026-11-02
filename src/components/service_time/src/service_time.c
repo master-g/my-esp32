@@ -30,6 +30,7 @@ static SemaphoreHandle_t s_mutex;
 static QueueHandle_t s_command_queue;
 static bool s_rtc_valid;
 static bool s_ntp_synced;
+static bool s_host_synced;
 static bool s_started;
 static bool s_sync_in_progress;
 static char s_timezone[TIME_SERVICE_TIMEZONE_TZ_MAX];
@@ -112,7 +113,10 @@ static void update_text_from_epoch(uint32_t epoch_s)
     strftime(s_snapshot.weekday_text, sizeof(s_snapshot.weekday_text), "%a", &tm_value);
 }
 
-static bool time_service_is_valid_locked(void) { return s_rtc_valid || s_ntp_synced; }
+static bool time_service_is_valid_locked(void)
+{
+    return s_rtc_valid || s_ntp_synced || s_host_synced;
+}
 
 static void time_service_refresh_now_locked(void)
 {
@@ -321,6 +325,7 @@ esp_err_t time_service_init(void)
     s_command_queue = NULL;
     s_rtc_valid = false;
     s_ntp_synced = false;
+    s_host_synced = false;
     s_started = false;
     s_sync_in_progress = false;
 
@@ -460,4 +465,39 @@ bool time_service_is_valid(void)
     valid = time_service_is_valid_locked();
     xSemaphoreGive(s_mutex);
     return valid;
+}
+
+void time_service_apply_host_time(uint32_t epoch_s)
+{
+    int64_t old_epoch_s = (int64_t)time(NULL);
+    struct timeval tv = {.tv_sec = epoch_s};
+    bool rtc_write_ok = false;
+    esp_err_t err;
+
+    if (!bsp_rtc_is_time_plausible(epoch_s)) {
+        ESP_LOGW(TAG, "host time rejected: epoch=%" PRIu32, epoch_s);
+        return;
+    }
+
+    /* The frame arrives every 60 s; correcting transport jitter would make the
+     * visible seconds hop, and an RTC write per minute is pointless. */
+    if (time_service_is_valid() && llabs(old_epoch_s - (int64_t)epoch_s) <= 2) {
+        return;
+    }
+
+    settimeofday(&tv, NULL);
+    err = bsp_rtc_write_epoch(epoch_s);
+    rtc_write_ok = err == ESP_OK;
+    if (!rtc_write_ok) {
+        ESP_LOGW(TAG, "RTC writeback failed: %s", esp_err_to_name(err));
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_host_synced = true;
+    if (rtc_write_ok) {
+        s_rtc_valid = true;
+    }
+    time_service_refresh_now_locked();
+    xSemaphoreGive(s_mutex);
+    ESP_LOGI(TAG, "host time applied: old=%" PRId64 " new=%" PRIu32, old_epoch_s, epoch_s);
 }

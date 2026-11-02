@@ -858,6 +858,17 @@ static void handle_event_frame(const cJSON *root)
         claude_service_note_transport_alive();
         return;
     }
+
+    if (strcmp(method->valuestring, DP_METHOD_TIME_SYNC) == 0) {
+        uint32_t epoch_s = 0;
+
+        if (!device_protocol_parse_time_sync(payload, &epoch_s)) {
+            ESP_LOGW(TAG, "time.sync: invalid payload");
+            return;
+        }
+        time_service_apply_host_time(epoch_s);
+        return;
+    }
 }
 
 static void handle_request_frame(const cJSON *root)

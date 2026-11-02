@@ -38,6 +38,7 @@ const READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DISCOVERY_RETRY_DELAY: Duration = Duration::from_millis(700);
 const SCREENSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(60);
+const TIME_SYNC_INTERVAL: Duration = Duration::from_secs(60);
 const SCREENSHOT_FORMAT_RGB565_LE: &str = "rgb565_le";
 const SCREENSHOT_MAX_WIDTH: usize = 640;
 const SCREENSHOT_MAX_HEIGHT: usize = 172;
@@ -338,7 +339,25 @@ fn worker_loop(
                     }
                 }
 
+                let mut last_time_sync: Option<Instant> = None;
+
                 loop {
+                    if last_time_sync.is_none_or(|sent| sent.elapsed() >= TIME_SYNC_INTERVAL) {
+                        if let Err(err) = send_named_event(
+                            session.as_mut(),
+                            "time.sync",
+                            json!({"epoch_s": now_epoch()}),
+                        ) {
+                            set_last_error(
+                                &status,
+                                format!("failed to push event time.sync over serial: {err:#}"),
+                            );
+                            set_disconnected(&status);
+                            break;
+                        }
+                        last_time_sync = Some(Instant::now());
+                    }
+
                     match cmd_rx.recv_timeout(IDLE_POLL_INTERVAL) {
                         Ok(WorkerCommand::UpdateSnapshot(snapshot)) => {
                             pending_snapshot = Some(snapshot.clone());

@@ -29,5 +29,6 @@ void time_service_get_timezone_tz(char *out, size_t out_size);
 esp_err_t time_service_apply_timezone_config(const char *timezone_name, const char *timezone_tz);
 void time_service_get_snapshot(time_snapshot_t *out);
 bool time_service_is_valid(void);
+void time_service_apply_host_time(uint32_t epoch_s);
 
 #endif

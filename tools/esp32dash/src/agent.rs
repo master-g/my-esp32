@@ -1192,6 +1192,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_sends_time_sync_on_each_connection_without_any_snapshot() -> Result<()> {
+        fn time_syncs(writes: &Mutex<Vec<WireFrame>>) -> Vec<u64> {
+            writes
+                .lock()
+                .expect("writes mutex poisoned")
+                .iter()
+                .filter_map(|frame| match frame {
+                    WireFrame::Event {
+                        method,
+                        payload,
+                    } if method == "time.sync" => payload["epoch_s"].as_u64(),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let before = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+        let manager = DeviceManager::start(
+            DeviceConfig {
+                preferred_port: Some("/dev/fake".into()),
+                baud: 115_200,
+            },
+            Arc::new(FakeFactory {
+                writes: writes.clone(),
+            }),
+            None,
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+        let synced = time_syncs(&writes);
+        assert_eq!(synced.len(), 1);
+        assert!((before..=after).contains(&synced[0]));
+
+        // A zero-length pause closes the session and reconnects at once.
+        manager.pause(Duration::ZERO).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(time_syncs(&writes).len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn status_endpoint_returns_serial_and_snapshot_state() -> Result<()> {
         let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos();
         let state_dir = std::env::temp_dir().join(format!("esp32dash-status-test-{unique}"));

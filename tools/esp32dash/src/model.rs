@@ -416,6 +416,11 @@ mod tests {
         "/../../protocol/fixtures/claude.update.json"
     ));
 
+    const TIME_SYNC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/fixtures/time.sync.json"
+    ));
+
     /// Frames the device sends to the host; they are not capabilities.
     const DEVICE_TO_HOST: &[&str] =
         &["protocol.error", "screen.capture.chunk", "screen.capture.done", "screen.capture.error"];
@@ -435,6 +440,14 @@ mod tests {
         let snapshot: Snapshot = serde_json::from_value(payload).unwrap();
         assert!(snapshot.pending.is_some());
         let frame = WireFrame::event("claude.update", serde_json::to_value(&snapshot).unwrap());
+        assert_eq!(serde_json::to_value(&frame).unwrap(), fixture);
+    }
+
+    #[test]
+    fn time_sync_fixture_is_exactly_what_the_host_serialises() {
+        let fixture: Value = serde_json::from_str(TIME_SYNC).unwrap();
+        let frame = WireFrame::event("time.sync", serde_json::json!({"epoch_s": 1743957128u64}));
+        assert_eq!(serde_json::from_value::<WireFrame>(fixture.clone()).unwrap(), frame);
         assert_eq!(serde_json::to_value(&frame).unwrap(), fixture);
     }
 

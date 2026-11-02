@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "cJSON.h"
 #include "service_claude.h"
@@ -27,6 +28,7 @@
 #define DP_METHOD_WIFI_PROFILE_REMOVE "wifi.profile.remove"
 #define DP_METHOD_CLAUDE_UPDATE "claude.update"
 #define DP_METHOD_CLAUDE_HEARTBEAT "claude.heartbeat"
+#define DP_METHOD_TIME_SYNC "time.sync"
 #define DP_METHOD_PROTOCOL_ERROR "protocol.error"
 #define DP_METHOD_HOME_SCREENSAVER "home.screensaver"
 #define DP_METHOD_APP_SWITCH "app.switch"
@@ -58,5 +60,9 @@ device_protocol_line_event_t device_protocol_line_feed(device_protocol_line_t *a
 /* Parse a claude.update payload. Returns false when a required field (seq,
  * unread, ts) is missing or mistyped; optional strings default to empty. */
 bool device_protocol_parse_claude_update(const cJSON *payload, claude_snapshot_t *snapshot);
+
+/* Parse a time.sync payload. Returns false when epoch_s is missing, not a number,
+ * negative, or does not fit uint32. */
+bool device_protocol_parse_time_sync(const cJSON *payload, uint32_t *epoch_s);
 
 #endif

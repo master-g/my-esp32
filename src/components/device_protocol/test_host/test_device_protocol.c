@@ -133,6 +133,34 @@ static void test_claude_update_fixture(const char *dir)
     cJSON_Delete(frame);
 }
 
+static void test_time_sync_fixture(const char *dir)
+{
+    cJSON *frame = load_fixture(dir, "time.sync.json");
+    cJSON *payload = cJSON_GetObjectItemCaseSensitive(frame, "payload");
+    uint32_t epoch_s = 0;
+
+    assert(strcmp(cJSON_GetObjectItemCaseSensitive(frame, "method")->valuestring,
+                  DP_METHOD_TIME_SYNC) == 0);
+    assert(device_protocol_parse_time_sync(payload, &epoch_s));
+    assert(epoch_s == 1743957128);
+
+    cJSON_ReplaceItemInObjectCaseSensitive(payload, "epoch_s", cJSON_CreateNumber(4294967295.0));
+    assert(device_protocol_parse_time_sync(payload, &epoch_s));
+    assert(epoch_s == UINT32_MAX);
+
+    cJSON_ReplaceItemInObjectCaseSensitive(payload, "epoch_s", cJSON_CreateNumber(4294967296.0));
+    assert(!device_protocol_parse_time_sync(payload, &epoch_s));
+    cJSON_ReplaceItemInObjectCaseSensitive(payload, "epoch_s", cJSON_CreateNumber(-1));
+    assert(!device_protocol_parse_time_sync(payload, &epoch_s));
+    cJSON_ReplaceItemInObjectCaseSensitive(payload, "epoch_s", cJSON_CreateString("1743957128"));
+    assert(!device_protocol_parse_time_sync(payload, &epoch_s));
+    cJSON_DeleteItemFromObjectCaseSensitive(payload, "epoch_s");
+    assert(!device_protocol_parse_time_sync(payload, &epoch_s));
+    assert(!device_protocol_parse_time_sync(NULL, &epoch_s));
+    assert(epoch_s == UINT32_MAX);
+    cJSON_Delete(frame);
+}
+
 static void test_hello_fixture_matches_method_list(const char *dir)
 {
     cJSON *frame = load_fixture(dir, "hello.json");
@@ -156,6 +184,7 @@ int main(int argc, char **argv)
     test_line_assembly();
     test_line_overflow_guard();
     test_claude_update_fixture(argv[1]);
+    test_time_sync_fixture(argv[1]);
     test_hello_fixture_matches_method_list(argv[1]);
     puts("device_protocol host tests: ok");
     return 0;

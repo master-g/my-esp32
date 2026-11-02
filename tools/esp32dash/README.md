@@ -129,7 +129,7 @@ Protocol frames share the same serial line as normal ESP-IDF logs. Only lines st
 Device hello:
 
 ```json
-@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.heartbeat","protocol.error","home.screensaver","app.switch","screen.capture.start","debug.market_snapshot"]}
+@esp32dash {"type":"hello","protocol_version":1,"device_id":"esp32-dashboard-a1b2c3","product":"Waveshare ESP32-S3-Touch-LCD-3.49","capabilities":["device.info","device.reboot","config.export","config.set_many","wifi.scan","wifi.profiles.list","wifi.profile.add","wifi.profile.remove","claude.update","claude.heartbeat","time.sync","protocol.error","home.screensaver","app.switch","screen.capture.start","debug.market_snapshot"]}
 ```
 
 Host request:
@@ -169,6 +169,12 @@ Host Claude update:
 ```
 
 `pending` is the one pending interaction the device should show, or `null`. `kind` is `approval` or `prompt`; `type` is a coarse label only, never a command, argument, question or option. There are no request/dismiss frames: the device shows whatever the latest `claude.update` says (see `docs/adr/0001-pending-interaction-as-snapshot-level.md`).
+
+Host time sync, sent when a connection opens and every 60 s after it, with no response:
+
+```json
+@esp32dash {"type":"event","method":"time.sync","payload":{"epoch_s":1743957128}}
+```
 
 Host screenshot capture start:
 

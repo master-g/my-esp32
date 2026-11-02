@@ -1,0 +1,7 @@
+{
+  "type": "event",
+  "method": "time.sync",
+  "payload": {
+    "epoch_s": 1743957128
+  }
+}
