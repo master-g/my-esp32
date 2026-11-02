@@ -655,10 +655,10 @@ fn no_saved_network_message(scan: &[WiFiScanEntry]) -> String {
     seen.sort_unstable();
     seen.dedup();
     if seen.is_empty() {
-        return "the device sees no Wi-Fi networks; pass --ssid to import one anyway".to_owned();
+        return "the device sees no Wi-Fi networks; pass --ssid to import a network saved on this Mac anyway".to_owned();
     }
     format!(
-        "none of the networks the device can see are saved on this Mac: {}; pass --ssid to choose one",
+        "none of the networks the device can see are saved on this Mac: {}; join one on this Mac first, or enter its password with `esp32dash config`",
         seen.join(", ")
     )
 }
