@@ -32,5 +32,5 @@
   「连上后 NTP 成功」未验证。K 线溢出（1H/4H/1D）、Wi-Fi profile 轮换、天气失败退避、输密码时不重建键盘只过了编译，未在真机复现。本地索引在 `plans/README.md`（不入库）。
 
 <!-- 整节改写：接下来的计划与优先级。 -->
-- [2026-11-02] 在有 Mac 已保存的 2.4 GHz 网络的地方跑 `esp32dash device wifi-import`，确认连上后 NTP 成功。可选的后续，按价值排：串口 worker 写超时与积压折叠；`app_settings.c` 拆分；可选服务初始化失败不致命；渲染模式改 partial 前先测帧耗时。
+- [2026-11-02] 设备只能走 `Mico_SZ`（用户确认），但现场 Mac 与设备都只看到 3 个 2.4 GHz 网络且都不是它；要等路由器开 2.4 GHz，或改做 USB 对时。之后确认连上后 NTP 成功。可选的后续，按价值排：串口 worker 写超时与积压折叠；`app_settings.c` 拆分；可选服务初始化失败不致命；渲染模式改 partial 前先测帧耗时。
   遗留：`openspec/specs/` 下三份规格描述的是已删除的结构；clippy 有 23 条既有警告未纳入 `make check`；dotfiles 的 hook 脚本副本未同步输出屏蔽（非必需）。
