@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, process::Command};
 
 use anyhow::{Context, Result, bail};
 use inquire::{Confirm, InquireError, Password, Select, Text};
@@ -398,7 +398,7 @@ async fn edit_wifi_profiles(profiles: &[WiFiProfileEntry], port: Option<&str>) -
     }
 }
 
-async fn select_visible_network(profiles: &[WiFiProfileEntry], port: Option<&str>) -> Result<bool> {
+async fn scan_networks(port: Option<&str>) -> Result<Vec<WiFiScanEntry>> {
     let value = run_request(
         port,
         RpcRequest {
@@ -409,13 +409,17 @@ async fn select_visible_network(profiles: &[WiFiProfileEntry], port: Option<&str
     .await?;
     let response: WiFiScanResponse = serde_json::from_value(value)
         .context("device returned an unsupported wifi.scan payload")?;
+    Ok(response.aps)
+}
 
-    if response.aps.is_empty() {
+async fn select_visible_network(profiles: &[WiFiProfileEntry], port: Option<&str>) -> Result<bool> {
+    let mut aps = scan_networks(port).await?;
+
+    if aps.is_empty() {
         println!("No visible Wi-Fi networks were found.");
         return Ok(false);
     }
 
-    let mut aps = response.aps;
     aps.sort_by(|left, right| right.rssi.cmp(&left.rssi).then_with(|| left.ssid.cmp(&right.ssid)));
     aps.dedup_by(|left, right| left.ssid == right.ssid);
 
@@ -589,6 +593,90 @@ async fn send_wifi_profile_add(
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn wifi_import(ssid: Option<&str>, port: Option<&str>) -> Result<Value> {
+    let scan = scan_networks(port).await;
+    let aps = if ssid.is_some() {
+        scan.unwrap_or_default()
+    } else {
+        scan?
+    };
+    let candidates = match ssid {
+        Some(ssid) => vec![ssid.to_owned()],
+        None => read_preferred_networks()?,
+    };
+    let visible = pick_network(&aps, &candidates);
+    let ssid = match (ssid, visible) {
+        (Some(ssid), _) => ssid,
+        (None, Some(ap)) => ap.ssid.as_str(),
+        (None, None) => bail!("{}", no_saved_network_message(&aps)),
+    };
+
+    let password = match visible {
+        Some(ap) if !ap.auth_required => String::new(),
+        _ => read_keychain_password(ssid)?,
+    };
+    send_wifi_profile_add(port, ssid, Some(&password), false).await?;
+
+    Ok(json!({
+        "ssid": ssid,
+        "rssi": visible.map(|ap| ap.rssi),
+        "visible_to_device": visible.is_some(),
+    }))
+}
+
+fn read_preferred_networks() -> Result<Vec<String>> {
+    // ponytail: en0 only, other Macs get an empty list; parse -listallhardwareports if it matters.
+    let output = Command::new("networksetup")
+        .args(["-listpreferredwirelessnetworks", "en0"])
+        .output()
+        .context("failed to execute networksetup")?;
+    Ok(parse_preferred_networks(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_preferred_networks(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .skip(1)
+        .map(str::trim_start)
+        .filter(|ssid| !ssid.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn pick_network<'a>(scan: &'a [WiFiScanEntry], saved: &[String]) -> Option<&'a WiFiScanEntry> {
+    scan.iter().filter(|ap| saved.contains(&ap.ssid)).max_by_key(|ap| ap.rssi)
+}
+
+fn no_saved_network_message(scan: &[WiFiScanEntry]) -> String {
+    let mut seen: Vec<&str> =
+        scan.iter().map(|ap| ap.ssid.as_str()).filter(|ssid| !ssid.is_empty()).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    if seen.is_empty() {
+        return "the device sees no Wi-Fi networks; pass --ssid to import one anyway".to_owned();
+    }
+    format!(
+        "none of the networks the device can see are saved on this Mac: {}; pass --ssid to choose one",
+        seen.join(", ")
+    )
+}
+
+fn read_keychain_password(ssid: &str) -> Result<String> {
+    // ponytail: `security -w` may print non-ASCII passwords as hex; decode if one ever shows up.
+    let output = Command::new("security")
+        .args(["find-generic-password", "-D", "AirPort network password", "-a", ssid, "-w"])
+        .output()
+        .context("failed to execute security")?;
+    let no_password = || format!("no usable saved password found for `{ssid}` in the Keychain");
+    if !output.status.success() {
+        bail!("{}", no_password());
+    }
+    let Ok(password) = String::from_utf8(output.stdout) else {
+        bail!("{}", no_password());
+    };
+    Ok(password.strip_suffix('\n').unwrap_or(&password).to_owned())
 }
 
 fn find_profile<'a>(profiles: &'a [WiFiProfileEntry], ssid: &str) -> Option<&'a WiFiProfileEntry> {
@@ -960,8 +1048,49 @@ const TIMEZONES: &[TimeZoneChoice] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{WiFiProfilesResponse, find_timezones, parse_config_state};
+    use super::{
+        WiFiProfilesResponse, WiFiScanEntry, find_timezones, parse_config_state,
+        parse_preferred_networks, pick_network,
+    };
     use serde_json::json;
+
+    fn ap(ssid: &str, rssi: i32) -> WiFiScanEntry {
+        WiFiScanEntry {
+            ssid: ssid.into(),
+            rssi,
+            auth_mode: "wpa2_psk".into(),
+            auth_required: true,
+        }
+    }
+
+    #[test]
+    fn parse_preferred_networks_skips_header_and_keeps_inner_and_trailing_spaces() {
+        let stdout = "Preferred networks on en0:\n\tHome Net\n\tCafe \n";
+        assert_eq!(parse_preferred_networks(stdout), ["Home Net", "Cafe "]);
+    }
+
+    #[test]
+    fn parse_preferred_networks_returns_nothing_for_header_only() {
+        assert!(parse_preferred_networks("en0 is not a Wi-Fi interface.\n").is_empty());
+    }
+
+    #[test]
+    fn pick_network_returns_strongest_of_duplicate_bssids() {
+        let scan = [ap("home", -70), ap("home", -40), ap("home", -60)];
+        assert_eq!(pick_network(&scan, &["home".into()]).unwrap().rssi, -40);
+    }
+
+    #[test]
+    fn pick_network_ignores_stronger_unsaved_ap() {
+        let scan = [ap("neighbor", -30), ap("home", -70)];
+        assert_eq!(pick_network(&scan, &["home".into()]).unwrap().ssid, "home");
+    }
+
+    #[test]
+    fn pick_network_returns_none_without_intersection() {
+        let scan = [ap("neighbor", -30)];
+        assert!(pick_network(&scan, &["Neighbor".into()]).is_none());
+    }
 
     #[test]
     fn parse_config_state_reads_expected_keys() {

@@ -67,6 +67,7 @@ Looking at the real device (all of these work while the agent is running; they a
 - `esp32dash device screenshot --out x.png` — what is on the screen now.
 - `esp32dash device rpc <method> '<json>'` — any RPC, e.g. `app.switch '{"app":"trading"}'`, `debug.market_snapshot`.
 - `esp32dash chibi test --state working --workspace demo --bubble "..." [--pending approval] [--hold 15]` — put a Home state on screen for `--hold` seconds; `chibi screensaver enter --effect stars`.
+- `esp32dash device wifi-import [--ssid X]` — copy a network saved on this Mac to the device, password from the Keychain (macOS may ask for approval). Without `--ssid` it picks the strongest network the device can see that the Mac has saved.
 - `esp32dash agent status` — the shown snapshot, every tracked session (workspace, status, pid, idle time) and `events_received`.
 
 ## Important Constraints

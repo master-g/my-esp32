@@ -177,6 +177,21 @@ enum DeviceCommand {
         #[arg(long, help = "Use a specific serial port instead of autodiscovery")]
         port: Option<String>,
     },
+    #[command(
+        about = "Copy a Wi-Fi network saved on this Mac, password included, to the device",
+        long_about = "Copy a Wi-Fi network saved on this Mac, password included, to the device.\n\
+                      Without --ssid, picks the strongest network the device can see that this \
+                      Mac has saved. Reading the password may raise a macOS auth dialog."
+    )]
+    WifiImport {
+        #[arg(long, help = "Import this network, whether or not the device can see it")]
+        ssid: Option<String>,
+        #[arg(
+            long,
+            help = "Use a specific serial port instead of autodiscovery or the running agent"
+        )]
+        port: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -494,6 +509,10 @@ async fn run_device_command(command: DeviceCommand) -> Result<()> {
                 bytes: screenshot.data.len(),
             })
         }
+        DeviceCommand::WifiImport {
+            ssid,
+            port,
+        } => print_json(&config_ui::wifi_import(ssid.as_deref(), port.as_deref()).await?),
     }
 }
 
